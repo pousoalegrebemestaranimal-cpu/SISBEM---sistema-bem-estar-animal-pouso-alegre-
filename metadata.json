@@ -1,0 +1,6 @@
+{
+  "name": "SISBEM - Sistema de Bem-Estar Animal",
+  "description": "Sistema interno para gestão de animais resgatados e controle de solicitantes para centros de bem-estar animal públicos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
