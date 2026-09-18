@@ -738,11 +738,11 @@ const ReportsPage: React.FC = () => {
               <td class="text-right">${serviceCounts.totalAtendimentos > 0 ? Math.round((serviceCounts.atendimentosExternos/serviceCounts.totalAtendimentos)*100) : 0}%</td>
             </tr>
             <tr style="background:#f1f5f9;"><td colspan="3"><em>Quantitativo por Resumo de Diagnóstico / Suspeita Preenchida (Contagem por Atendimento)</em></td></tr>
-            ${Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]) => `
+            ${Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]: [string, number]) => `
               <tr>
                 <td style="padding-left:20px;">↳ ${diagName}</td>
                 <td class="text-right font-bold">${count}</td>
-                <td class="text-right">${serviceCounts.totalAtendimentos > 0 ? Math.round((count / serviceCounts.totalAtendimentos) * 100) : 0}%</td>
+                <td class="text-right">${serviceCounts.totalAtendimentos > 0 ? Math.round((Number(count) / serviceCounts.totalAtendimentos) * 100) : 0}%</td>
               </tr>
             `).join('')}
 
@@ -847,11 +847,11 @@ const ReportsPage: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                ${Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, cnt]) => `
+                ${Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, cnt]: [string, number]) => `
                   <tr>
                     <td style="padding:4px 6px;border:1px solid #e2e8f0;"><strong>${diagName}</strong></td>
                     <td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;font-weight:bold;">${cnt}</td>
-                    <td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;">${serviceCounts.totalAtendimentos > 0 ? Math.round((cnt / serviceCounts.totalAtendimentos) * 100) : 0}%</td>
+                    <td style="padding:4px 6px;border:1px solid #e2e8f0;text-align:right;">${serviceCounts.totalAtendimentos > 0 ? Math.round((Number(cnt) / serviceCounts.totalAtendimentos) * 100) : 0}%</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -1538,8 +1538,8 @@ const ReportsPage: React.FC = () => {
                         ↳ Quantitativo por Resumo do Diagnóstico / Suspeita Preenchida (Por Atendimento)
                       </td>
                     </tr>
-                    {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]) => {
-                      const percent = serviceCounts.totalAtendimentos > 0 ? Math.round((count / serviceCounts.totalAtendimentos) * 100) : 0;
+                    {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]: [string, number]) => {
+                      const percent = serviceCounts.totalAtendimentos > 0 ? Math.round((Number(count) / serviceCounts.totalAtendimentos) * 100) : 0;
                       return (
                         <tr key={diagName} className="hover:bg-slate-50">
                           <td className="p-2.5 pl-10 text-slate-600 text-xs">
@@ -1854,8 +1854,8 @@ const ReportsPage: React.FC = () => {
                 </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 pt-1">
-                {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]) => {
-                  const percent = serviceCounts.totalAtendimentos > 0 ? Math.round((count / serviceCounts.totalAtendimentos) * 100) : 0;
+                {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]: [string, number]) => {
+                  const percent = serviceCounts.totalAtendimentos > 0 ? Math.round((Number(count) / serviceCounts.totalAtendimentos) * 100) : 0;
                   return (
                     <div key={diagName} className="bg-white border border-slate-200 rounded-lg p-2.5 flex flex-col justify-between shadow-2xs">
                       <span className="text-[11px] font-bold text-slate-700 truncate" title={diagName}>{diagName}</span>
@@ -2270,12 +2270,12 @@ const ReportsPage: React.FC = () => {
                           ↳ Quantitativo por Resumo de Diagnóstico / Suspeita Preenchida (Por Atendimento)
                         </td>
                       </tr>
-                      {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]) => (
+                      {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, count]: [string, number]) => (
                         <tr key={diagName}>
                           <td className="p-1.5 pl-6 border border-slate-300 text-slate-700">↳ {diagName}</td>
                           <td className="p-1.5 border border-slate-300 text-right font-bold text-slate-900">{count}</td>
                           <td className="p-1.5 border border-slate-300 text-right text-slate-600">
-                            {serviceCounts.totalAtendimentos > 0 ? Math.round((count / serviceCounts.totalAtendimentos) * 100) : 0}%
+                            {serviceCounts.totalAtendimentos > 0 ? Math.round((Number(count) / serviceCounts.totalAtendimentos) * 100) : 0}%
                           </td>
                         </tr>
                       ))}
@@ -2402,12 +2402,12 @@ const ReportsPage: React.FC = () => {
                           </tr>
                         </thead>
                         <tbody>
-                          {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, cnt]) => (
+                          {Object.entries(serviceCounts.diagnosticoCounts).map(([diagName, cnt]: [string, number]) => (
                             <tr key={diagName}>
                               <td className="p-1.5 border border-slate-200 font-medium">{diagName}</td>
                               <td className="p-1.5 border border-slate-200 text-right font-bold">{cnt}</td>
                               <td className="p-1.5 border border-slate-200 text-right">
-                                {serviceCounts.totalAtendimentos > 0 ? Math.round((cnt / serviceCounts.totalAtendimentos) * 100) : 0}%
+                                {serviceCounts.totalAtendimentos > 0 ? Math.round((Number(cnt) / serviceCounts.totalAtendimentos) * 100) : 0}%
                               </td>
                             </tr>
                           ))}

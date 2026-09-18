@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { db } from '../services/db';
-import { Especie, AnimalCondicao, AnimalJoined } from '../types';
+import { Especie, AnimalCondicao, AnimalJoined, CirurgiaStatus } from '../types';
 import { 
   Dog, Cat, Calendar, ClipboardCheck, Clock, MapPin, Camera, Stethoscope, Heart, FileText, Scissors
 } from 'lucide-react';
@@ -26,7 +26,7 @@ const Dashboard: React.FC = () => {
       !a.temTutor && ![AnimalCondicao.ADOTADO, AnimalCondicao.OBITO, AnimalCondicao.SOLTURA].includes(a.condicao)
     );
 
-    const cirurgiasAgendadas = db.getCirurgias().filter(c => c.status === 'AGENDADA' || c.status === 'EM_ANDAMENTO').length;
+    const cirurgiasAgendadas = db.getCirurgias().filter(c => c.status === CirurgiaStatus.AGENDADA || c.status === CirurgiaStatus.EM_PREPARO).length;
     const naoCastrados = activeAnimals.filter(a => !a.castrado).length;
 
     return {

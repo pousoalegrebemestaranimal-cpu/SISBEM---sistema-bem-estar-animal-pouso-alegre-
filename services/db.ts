@@ -1,5 +1,23 @@
 
 import { Animal, Solicitante, Tutor, User, AnimalJoined, AnimalCondicao, ClinicalRecord, Prescription, StatusLog, Kennel, KennelType, KennelOccupation, KennelConfig, Adotante, Especie, Porte, Sexo, AgendamentoCirurgia, CirurgiaStatus, CirurgiaPrioridade, CirurgiaJoined } from '../types';
+import {
+  syncAnimalToSupabase,
+  deleteAnimalFromSupabase,
+  syncSolicitanteToSupabase,
+  deleteSolicitanteFromSupabase,
+  syncTutorToSupabase,
+  deleteTutorFromSupabase,
+  syncSurgeryToSupabase,
+  deleteSurgeryFromSupabase,
+  syncRecordToSupabase,
+  deleteRecordFromSupabase,
+  syncKennelToSupabase,
+  syncOccupationToSupabase,
+  syncUserToSupabase,
+  deleteUserFromSupabase,
+  syncAllLocalDataToSupabase,
+  pullFromSupabaseToLocal
+} from '../src/lib/supabaseSync';
 
 const KEYS = {
   USERS: 'sisbem_users',
@@ -1054,10 +1072,98 @@ export const resetAndSeedAllData = () => {
   return true;
 };
 
-const seed = () => {
-  const existingAnimals = localStorage.getItem(KEYS.ANIMALS);
-  if (!existingAnimals || JSON.parse(existingAnimals || '[]').length < 10) {
-    resetAndSeedAllData();
+export const clearAllFictitiousData = () => {
+  // 1. Apaga todos os animais fictícios
+  localStorage.setItem(KEYS.ANIMALS, JSON.stringify([]));
+
+  // 2. Apaga todos os tutores fictícios de teste
+  localStorage.setItem(KEYS.TUTORES, JSON.stringify([]));
+
+  // 3. Apaga prontuários e prescrições de teste
+  localStorage.setItem(KEYS.RECORDS, JSON.stringify([]));
+
+  // 4. Apaga agendamentos e cirurgias de teste
+  localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify([]));
+
+  // 5. Apaga ocupações de baias e gatis (todas as baias ficam 100% livres)
+  localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify([]));
+
+  // 6. Apaga histórico de mudanças de status
+  localStorage.setItem(KEYS.STATUS_LOGS, JSON.stringify([]));
+
+  // 7. Filtra e mantém apenas órgãos públicos oficiais e remove os solicitantes fictícios
+  const existingSolicitantes: Solicitante[] = JSON.parse(localStorage.getItem(KEYS.SOLICITANTES) || '[]');
+  const officialSolicitantes: Solicitante[] = [
+    { id: 'inst-bombeiros', nomeCompleto: 'Corpo de Bombeiros Militar (193)', cpf: 'INST-BOMBEIROS', telefone: '193', tipo: 'ORGAO_PUBLICO', endereco: 'Rua Afonso Pena, 400 - Centro, Pouso Alegre' },
+    { id: 'inst-pm', nomeCompleto: 'Polícia Militar de Minas Gerais (190)', cpf: 'INST-PM', telefone: '190', tipo: 'ORGAO_PUBLICO', endereco: 'Av. Vicente Simões, 1100' },
+    { id: 'inst-pa', nomeCompleto: 'Polícia Militar de Meio Ambiente', cpf: 'INST-PA', telefone: '(35) 3429-1900', tipo: 'ORGAO_PUBLICO', endereco: 'Rodovia Fernão Dias, Km 850' },
+    { id: 'inst-desconhecido', nomeCompleto: 'Solicitante Desconhecido / Anônimo', cpf: 'DESC-ANONIMO', telefone: 'Não informado', tipo: 'DESCONHECIDO' }
+  ];
+  
+  const mockSolicitanteIds = new Set(['ong-01', 'ong-02', 'ong-03', 'sol-particular-1', 'sol-particular-2', 'sol-protetor-1']);
+  const customSolicitantes = existingSolicitantes.filter(s => !mockSolicitanteIds.has(s.id) && !s.id.startsWith('inst-'));
+  localStorage.setItem(KEYS.SOLICITANTES, JSON.stringify([...officialSolicitantes, ...customSolicitantes]));
+
+  // 8. Zera a ocupação atual de todas as baias no inventário
+  const kennels: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');
+  const emptyKennels = kennels.map(k => ({ ...k, currentOccupancy: 0 }));
+  localStorage.setItem(KEYS.KENNELS, JSON.stringify(emptyKennels));
+
+  // Marca que os dados fictícios foram excluídos definitivamente
+  localStorage.setItem('sisbem_cleaned_mock_data_v3', 'true');
+  return true;
+};
+
+const initSystem = () => {
+  // 1. Inicializa usuários básicos de acesso se não existirem
+  const existingUsers = localStorage.getItem(KEYS.USERS);
+  if (!existingUsers || JSON.parse(existingUsers || '[]').length === 0) {
+    const users: User[] = [
+      { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN' },
+      { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887' },
+      { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888' },
+      { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890' },
+      { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889' }
+    ];
+    localStorage.setItem(KEYS.USERS, JSON.stringify([
+      { ...users[0], password: 'admin' },
+      { ...users[1], password: 'password123' },
+      { ...users[2], password: 'password123' },
+      { ...users[3], password: 'password123' },
+      { ...users[4], password: 'password123' }
+    ]));
+  }
+
+  // 2. Inicializa configurações de baias se não existirem
+  const existingConfigs = localStorage.getItem(KEYS.KENNEL_CONFIGS);
+  if (!existingConfigs) {
+    const initialConfigs: KennelConfig[] = [
+      { type: KennelType.INDIVIDUAL, count: 54, capacity: 1 },
+      { type: KennelType.COLETIVA, count: 11, capacity: 5 },
+      { type: KennelType.QUARENTENA, count: 9, capacity: 1 },
+      { type: KennelType.GATIL, count: 43, capacity: 3 },
+      { type: KennelType.PRE_OPERATORIO, count: 3, capacity: 1 },
+      { type: KennelType.POS_OPERATORIO, count: 6, capacity: 1 }
+    ];
+    localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(initialConfigs));
+    db.syncKennelsWithConfigs(initialConfigs);
+  }
+
+  // 3. Inicializa órgãos públicos oficiais se lista estiver vazia
+  const existingSolicitantes = localStorage.getItem(KEYS.SOLICITANTES);
+  if (!existingSolicitantes || JSON.parse(existingSolicitantes || '[]').length === 0) {
+    const defaultSolicitantes: Solicitante[] = [
+      { id: 'inst-bombeiros', nomeCompleto: 'Corpo de Bombeiros Militar (193)', cpf: 'INST-BOMBEIROS', telefone: '193', tipo: 'ORGAO_PUBLICO', endereco: 'Rua Afonso Pena, 400 - Centro, Pouso Alegre' },
+      { id: 'inst-pm', nomeCompleto: 'Polícia Militar de Minas Gerais (190)', cpf: 'INST-PM', telefone: '190', tipo: 'ORGAO_PUBLICO', endereco: 'Av. Vicente Simões, 1100' },
+      { id: 'inst-pa', nomeCompleto: 'Polícia Militar de Meio Ambiente', cpf: 'INST-PA', telefone: '(35) 3429-1900', tipo: 'ORGAO_PUBLICO', endereco: 'Rodovia Fernão Dias, Km 850' },
+      { id: 'inst-desconhecido', nomeCompleto: 'Solicitante Desconhecido / Anônimo', cpf: 'DESC-ANONIMO', telefone: 'Não informado', tipo: 'DESCONHECIDO' }
+    ];
+    localStorage.setItem(KEYS.SOLICITANTES, JSON.stringify(defaultSolicitantes));
+  }
+
+  // 4. Executa a limpeza dos cadastros fictícios gerados em testes anteriores
+  if (localStorage.getItem('sisbem_cleaned_mock_data_v3') !== 'true') {
+    clearAllFictitiousData();
   }
 };
 
@@ -1075,12 +1181,14 @@ export const db = {
       if (idx > -1) users[idx] = { ...users[idx], ...userData };
     }
     localStorage.setItem(KEYS.USERS, JSON.stringify(users));
+    syncUserToSupabase(userData).catch(err => console.warn('Supabase syncUser:', err));
     return userData;
   },
 
-  deleteUser: (id: string) => {
-    const users = db.getUsers().filter(u => u.id !== id);
+  deleteUser: (idOrUsername: string) => {
+    const users = db.getUsers().filter(u => u.id !== idOrUsername && u.username !== idOrUsername);
     localStorage.setItem(KEYS.USERS, JSON.stringify(users));
+    deleteUserFromSupabase(idOrUsername).catch(err => console.warn('Supabase deleteUser:', err));
   },
 
   getAnimals: (): Animal[] => JSON.parse(localStorage.getItem(KEYS.ANIMALS) || '[]'),
@@ -1143,6 +1251,7 @@ export const db = {
     }
 
     localStorage.setItem(KEYS.SOLICITANTES, JSON.stringify(solicitantes));
+    syncSolicitanteToSupabase(newSolicitante).catch(err => console.warn('Supabase syncSolicitante:', err));
     return newSolicitante;
   },
 
@@ -1153,6 +1262,33 @@ export const db = {
     const animals = db.getAnimals();
     const updatedAnimals = animals.map(a => a.solicitanteId === id ? { ...a, solicitanteId: '' } : a);
     localStorage.setItem(KEYS.ANIMALS, JSON.stringify(updatedAnimals));
+    deleteSolicitanteFromSupabase(id).catch(err => console.warn('Supabase deleteSolicitante:', err));
+  },
+
+  saveTutor: (tutorData: Partial<Tutor>): Tutor => {
+    const tutores = db.getTutores();
+    const id = tutorData.id || crypto.randomUUID();
+    const newTutor: Tutor = {
+      id,
+      nomeCompleto: tutorData.nomeCompleto || 'Tutor Desconhecido',
+      cpf: tutorData.cpf || '',
+      telefone: tutorData.telefone || '',
+      endereco: tutorData.endereco || '',
+      temCadUnico: !!tutorData.temCadUnico,
+      documentoCadUnico: tutorData.documentoCadUnico || '',
+      dataCadastro: tutorData.dataCadastro || new Date().toISOString()
+    };
+
+    const existingIndex = tutores.findIndex(t => t.id === id);
+    if (existingIndex >= 0) {
+      tutores[existingIndex] = { ...tutores[existingIndex], ...newTutor };
+    } else {
+      tutores.push(newTutor);
+    }
+
+    localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
+    syncTutorToSupabase(newTutor).catch(err => console.warn('Supabase syncTutor:', err));
+    return newTutor;
   },
 
   syncKennelsWithConfigs: (configs: KennelConfig[]) => {
@@ -1241,6 +1377,7 @@ export const db = {
 
     occupations.push(newOcc);
     localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
+    syncOccupationToSupabase(newOcc).catch(err => console.warn('Supabase syncOccupation:', err));
     return newOcc;
   },
 
@@ -1255,6 +1392,7 @@ export const db = {
           : `Desalocado: ${releaseJustification}`;
       }
       localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
+      syncOccupationToSupabase(occupations[idx]).catch(err => console.warn('Supabase syncOccupation:', err));
     }
   },
 
@@ -1290,6 +1428,7 @@ export const db = {
           };
           tutores.push(newTutor);
           tutorId = newTutor.id;
+          syncTutorToSupabase(newTutor).catch(err => console.warn('Supabase syncTutor:', err));
         } else {
           tutores[tutorIdx] = { 
             ...tutores[tutorIdx], 
@@ -1300,6 +1439,7 @@ export const db = {
             documentoCadUnico: tutorPersona.documentoCadUnico || tutores[tutorIdx].documentoCadUnico
           };
           tutorId = tutores[tutorIdx].id;
+          syncTutorToSupabase(tutores[tutorIdx]).catch(err => console.warn('Supabase syncTutor:', err));
         }
         localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
       } else {
@@ -1329,6 +1469,7 @@ export const db = {
           };
           solicitantes.push(newSol);
           solicitanteId = newSol.id;
+          syncSolicitanteToSupabase(newSol).catch(err => console.warn('Supabase syncSol:', err));
         } else {
           solicitantes[solicitanteIdx] = {
             ...solicitantes[solicitanteIdx],
@@ -1341,6 +1482,7 @@ export const db = {
             email: solPersona.email || solicitantes[solicitanteIdx].email
           };
           solicitanteId = solicitantes[solicitanteIdx].id;
+          syncSolicitanteToSupabase(solicitantes[solicitanteIdx]).catch(err => console.warn('Supabase syncSol:', err));
         }
         localStorage.setItem(KEYS.SOLICITANTES, JSON.stringify(solicitantes));
       }
@@ -1350,6 +1492,7 @@ export const db = {
         const solicitante = { id: crypto.randomUUID(), nomeCompleto: 'Solicitante Desconhecido', cpf: '000.000.000-00', telefone: '' };
         solicitantes.push(solicitante);
         solicitanteId = solicitante.id;
+        syncSolicitanteToSupabase(solicitante).catch(err => console.warn('Supabase syncSol:', err));
       } else solicitanteId = solicitantes[unknownIdx].id;
       localStorage.setItem(KEYS.SOLICITANTES, JSON.stringify(solicitantes));
     }
@@ -1412,6 +1555,7 @@ export const db = {
     }
     
     localStorage.setItem(KEYS.ANIMALS, JSON.stringify(animals));
+    syncAnimalToSupabase(newAnimal).catch(err => console.warn('Supabase syncAnimal:', err));
     return newAnimal;
   },
 
@@ -1430,6 +1574,7 @@ export const db = {
 
     const cirurgias = db.getCirurgias().filter(c => c.animalId !== id);
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+    deleteAnimalFromSupabase(id).catch(err => console.warn('Supabase deleteAnimal:', err));
   },
 
   getCirurgias: (): AgendamentoCirurgia[] => {
@@ -1515,6 +1660,7 @@ export const db = {
     }
 
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+    syncSurgeryToSupabase(newCirurgia).catch(err => console.warn('Supabase syncSurgery:', err));
 
     // Se foi marcada como REALIZADA diretamente, atualiza o animal para castrado = true
     if (newCirurgia.status === CirurgiaStatus.REALIZADA) {
@@ -1569,6 +1715,7 @@ export const db = {
 
     cirurgias[idx] = updatedCirurgia;
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+    syncSurgeryToSupabase(updatedCirurgia).catch(err => console.warn('Supabase syncSurgery:', err));
 
     // Atualiza status do animal para castrado: true se a cirurgia for castração
     const isCastracao = (cirurgia.tipoCirurgia || '').toLowerCase().includes('castra');
@@ -1619,12 +1766,14 @@ export const db = {
     };
 
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+    syncSurgeryToSupabase(cirurgias[idx]).catch(err => console.warn('Supabase syncSurgery:', err));
     return cirurgias[idx];
   },
 
   deleteCirurgia: (id: string) => {
     const cirurgias = db.getCirurgias().filter(c => c.id !== id);
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+    deleteSurgeryFromSupabase(id).catch(err => console.warn('Supabase deleteSurgery:', err));
   },
 
   deleteTutor: (id: string) => {
@@ -1634,6 +1783,7 @@ export const db = {
     const animals = db.getAnimals();
     const updatedAnimals = animals.map(a => a.tutorId === id ? { ...a, tutorId: undefined, temTutor: false } : a);
     localStorage.setItem(KEYS.ANIMALS, JSON.stringify(updatedAnimals));
+    deleteTutorFromSupabase(id).catch(err => console.warn('Supabase deleteTutor:', err));
   },
 
   saveRecord: (record: Partial<ClinicalRecord>, vetId: string) => {
@@ -1713,6 +1863,7 @@ export const db = {
     const idx = records.findIndex(r => r.id === newRecord.id);
     if (idx >= 0) records[idx] = newRecord; else records.push(newRecord);
     localStorage.setItem(KEYS.RECORDS, JSON.stringify(records));
+    syncRecordToSupabase(newRecord).catch(err => console.warn('Supabase syncRecord:', err));
     return newRecord;
   },
 
@@ -1772,14 +1923,26 @@ export const db = {
     }, null, vetId);
   },
 
+  setCurrentUser: (user: User | null) => {
+    if (user) {
+      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(KEYS.CURRENT_USER);
+    }
+  },
+
   getCurrentUser: (): User | null => {
     const user = localStorage.getItem(KEYS.CURRENT_USER);
     return user ? JSON.parse(user) : null;
   },
 
   login: (username: string, password: string): User | null => {
+    const cleanU = username.trim().toLowerCase();
     const users = db.getUsers();
-    const user = users.find(u => u.username === username && u.password === password);
+    const user = users.find(u => 
+      (u.username?.toLowerCase() === cleanU || (u.email && u.email.toLowerCase() === cleanU)) && 
+      u.password === password
+    );
     if (user) {
       const { password: _, ...safeUser } = user;
       localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(safeUser));
@@ -1788,9 +1951,26 @@ export const db = {
     return null;
   },
 
-  logout: () => localStorage.removeItem(KEYS.CURRENT_USER),
+  logout: () => {
+    localStorage.removeItem(KEYS.CURRENT_USER);
+  },
 
-  resetAndSeedAllData: () => resetAndSeedAllData()
+  clearAllFictitiousData: () => clearAllFictitiousData(),
+  resetAndSeedAllData: () => resetAndSeedAllData(),
+
+  // Sincronização direta com Supabase
+  syncAllToSupabase: () => syncAllLocalDataToSupabase(db),
+  pullFromSupabase: () => pullFromSupabaseToLocal(db),
 };
 
-seed();
+initSystem();
+
+// Dispara sincronização inicial em segundo plano após carregamento
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    syncAllLocalDataToSupabase(db).catch(err => {
+      console.warn('Sincronização em segundo plano Supabase:', err);
+    });
+  }, 2000);
+}
+

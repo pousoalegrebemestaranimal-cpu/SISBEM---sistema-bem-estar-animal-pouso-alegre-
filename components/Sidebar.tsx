@@ -3,13 +3,17 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Dog, LogOut, PlusCircle, ClipboardList, Users, Stethoscope, Home, Settings, UserSearch, UserCircle, FileText, Scissors } from 'lucide-react';
 import { db } from '../services/db';
+import { supabase } from '../src/lib/supabase';
 
 const Sidebar: React.FC = () => {
   const location = useLocation();
   const user = db.getCurrentUser();
   const isVetOrAdmin = user?.role === 'VETERINARIO' || user?.role === 'ADMIN';
   
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch {}
     db.logout();
     window.location.hash = '/login';
   };

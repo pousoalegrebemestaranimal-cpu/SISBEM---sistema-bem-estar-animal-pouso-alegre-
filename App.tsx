@@ -1,7 +1,8 @@
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { db } from './services/db';
+import { supabase, mapSupabaseUserToAppUser } from './src/lib/supabase';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AnimalList from './pages/AnimalList';
@@ -54,6 +55,29 @@ const AppRoutes = () => {
 };
 
 const App: React.FC = () => {
+  useEffect(() => {
+    // Restaura sessão existente do Supabase
+    supabase.auth.getSession().then(({ data }) => {
+      if (data?.session?.user && !db.getCurrentUser()) {
+        const appUser = mapSupabaseUserToAppUser(data.session.user);
+        db.setCurrentUser(appUser);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        const appUser = mapSupabaseUserToAppUser(session.user);
+        db.setCurrentUser(appUser);
+      } else if (event === 'SIGNED_OUT') {
+        db.logout();
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
   return (
     <HashRouter>
       <AppRoutes />
@@ -62,3 +86,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

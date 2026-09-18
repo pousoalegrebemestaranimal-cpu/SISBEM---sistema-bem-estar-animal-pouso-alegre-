@@ -1,7 +1,8 @@
 
 export enum Especie {
   CAO = 'Cão',
-  GATO = 'Gato'
+  GATO = 'Gato',
+  OUTRO = 'Outro'
 }
 
 export enum Porte {
@@ -23,7 +24,8 @@ export enum AnimalCondicao {
   ADOTADO = 'Adotado',
   OBITO = 'Óbito',
   SOLTURA = 'Soltura',
-  ATENDIDO = 'Atendido'
+  ATENDIDO = 'Atendido',
+  ALTA = 'Alta'
 }
 
 export enum KennelType {

@@ -1,12 +1,20 @@
 
 import React, { useState, useMemo } from 'react';
 import { db } from '../services/db';
-import { Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock } from 'lucide-react';
+import { registerWithSupabase } from '../src/lib/supabase';
+import { Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, AlertTriangle, X, ShieldCheck } from 'lucide-react';
 
 const UserManagement: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
-  const [usersList, setUsersList] = useState(db.getUsers());
+  const [usersList, setUsersList] = useState<any[]>(() => db.getUsers());
+
+  // Modal de exclusão in-app (sem usar window.confirm que é bloqueado em iframes)
+  const [userToDelete, setUserToDelete] = useState<any | null>(null);
+  const [protectedAdminNotice, setProtectedAdminNotice] = useState(false);
+  const [deletingLoading, setDeletingLoading] = useState(false);
+
+  const currentUser = useMemo(() => db.getCurrentUser(), []);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -19,7 +27,7 @@ const UserManagement: React.FC = () => {
     matricula: ''
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
 
@@ -32,11 +40,22 @@ const UserManagement: React.FC = () => {
     setLoading(true);
 
     try {
+      // Se o usuário digitou um e-mail, sincroniza também com o Supabase Auth
+      let supabaseMsg = '';
+      if (formData.username.includes('@')) {
+        const sbRes = await registerWithSupabase(formData.username, formData.password, formData.name, formData.role);
+        if (sbRes.success) {
+          supabaseMsg = ' Conta sincronizada no Supabase Auth.';
+        } else if (sbRes.error) {
+          console.warn('Aviso ao sincronizar com Supabase:', sbRes.error);
+        }
+      }
+
       // Create a copy without confirmPassword to save in DB
       const { confirmPassword, ...dataToSave } = formData;
       db.saveUser(dataToSave);
       
-      setMessage({ type: 'success', text: 'Usuário cadastrado com sucesso!' });
+      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg}` });
       setFormData({ 
         name: '', 
         username: '', 
@@ -54,20 +73,47 @@ const UserManagement: React.FC = () => {
     }
   };
 
-  const handleDelete = (id: string, username: string) => {
-    if (username === 'admin') {
-      alert('O usuário administrador principal (admin) não pode ser removido por questões de segurança do sistema.');
+  const handleDeleteClick = (user: any) => {
+    if (user.username === 'admin') {
+      setProtectedAdminNotice(true);
       return;
     }
-    
-    if (confirm(`Deseja realmente remover o acesso de "${username}"?`)) {
-      try {
-        db.deleteUser(id);
-        setUsersList(db.getUsers());
-        setMessage({ type: 'success', text: 'Acesso removido com sucesso.' });
-      } catch (err: any) {
-        setMessage({ type: 'error', text: err.message });
+    setUserToDelete(user);
+  };
+
+  const handleConfirmDelete = () => {
+    if (!userToDelete) return;
+    setDeletingLoading(true);
+
+    try {
+      // Exclui por id e por username para garantir remoção completa
+      db.deleteUser(userToDelete.id);
+      if (userToDelete.username) {
+        db.deleteUser(userToDelete.username);
       }
+
+      const updated = db.getUsers();
+      setUsersList(updated);
+      setMessage({
+        type: 'success',
+        text: `O acesso do servidor "${userToDelete.name}" (@${userToDelete.username}) foi removido com sucesso.`
+      });
+
+      const wasSelf = currentUser && (
+        currentUser.id === userToDelete.id || 
+        currentUser.username === userToDelete.username
+      );
+
+      setUserToDelete(null);
+
+      if (wasSelf) {
+        db.logout();
+        window.location.hash = '/login';
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Erro ao excluir usuário.' });
+    } finally {
+      setDeletingLoading(false);
     }
   };
 
@@ -240,19 +286,27 @@ const UserManagement: React.FC = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex justify-center">
-                        <button 
-                          onClick={() => handleDelete(user.id, user.username)}
-                          disabled={user.username === 'admin'}
-                          className={`p-2 rounded transition-colors ${
-                            user.username === 'admin' 
-                            ? 'text-slate-200 cursor-not-allowed opacity-50' 
-                            : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
-                          }`}
-                          title={user.username === 'admin' ? "Administrador Mestre (Protegido)" : "Remover Acesso"}
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                      <div className="flex justify-center items-center">
+                        {user.username === 'admin' ? (
+                          <button
+                            type="button"
+                            onClick={() => setProtectedAdminNotice(true)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 text-[10px] font-bold border border-amber-200 transition-colors cursor-pointer"
+                            title="Credencial mestre protegida pelo sistema"
+                          >
+                            <ShieldCheck size={13} className="text-amber-600" />
+                            <span>Protegido</span>
+                          </button>
+                        ) : (
+                          <button 
+                            type="button"
+                            onClick={() => handleDeleteClick(user)}
+                            className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all cursor-pointer group"
+                            title={`Remover acesso de ${user.name}`}
+                          >
+                            <Trash2 size={16} className="group-hover:scale-110 transition-transform" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -262,6 +316,120 @@ const UserManagement: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Modal de Confirmação de Exclusão de Servidor */}
+      {userToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-5 animate-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                  <Trash2 size={22} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Excluir Servidor</h3>
+                  <p className="text-xs text-slate-500">Revogação de acesso ao SISBEM</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUserToDelete(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200/80 space-y-2 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-slate-500 font-medium">Nome Completo:</span>
+                <span className="font-bold text-slate-900">{userToDelete.name}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-500 font-medium">Usuário / Login:</span>
+                <span className="font-mono font-bold text-slate-800">@{userToDelete.username}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-slate-500 font-medium">Nível de Acesso:</span>
+                <span className="font-semibold text-slate-800">{getRoleLabel(userToDelete.role)}</span>
+              </div>
+
+              {currentUser && (currentUser.id === userToDelete.id || currentUser.username === userToDelete.username) && (
+                <div className="mt-2 pt-2.5 border-t border-slate-200 flex items-start gap-2 text-amber-800 bg-amber-50 p-2.5 rounded-lg">
+                  <AlertTriangle size={16} className="shrink-0 text-amber-600 mt-0.5" />
+                  <p className="text-[11px] leading-relaxed">
+                    <strong>Atenção:</strong> Você está excluindo o seu próprio usuário logado no momento. Se confirmar, sua sessão será encerrada e você será desconectado.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Tem certeza de que deseja remover este acesso? Esta ação é definitiva e removerá as permissões deste servidor.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setUserToDelete(null)}
+                disabled={deletingLoading}
+                className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-100 text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={deletingLoading}
+                className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 active:scale-95 text-white text-xs font-bold transition-all shadow-md shadow-red-200 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 size={14} />
+                <span>{deletingLoading ? 'Removendo...' : 'Sim, Excluir Usuário'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Aviso de Administrador Protegido */}
+      {protectedAdminNotice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3 text-amber-600">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center shrink-0">
+                  <ShieldCheck size={22} className="text-amber-700" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Administrador Mestre Protegido</h3>
+                  <p className="text-xs text-slate-500">Regra de Segurança do SISBEM</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProtectedAdminNotice(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              O usuário <strong>admin</strong> é a credencial mestre essencial para a administração e recuperação do sistema. Por segurança e integridade das políticas internas, ele não pode ser removido.
+            </p>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setProtectedAdminNotice(false)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all cursor-pointer"
+              >
+                Entendido
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
