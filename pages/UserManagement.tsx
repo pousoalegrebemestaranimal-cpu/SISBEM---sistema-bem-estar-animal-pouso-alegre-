@@ -3,15 +3,23 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/db';
 import { registerWithSupabase, supabase } from '../src/lib/supabase';
 import { mapUserToSupabase } from '../src/lib/supabaseSync';
+import { hashPassword } from '../src/lib/authCrypto';
 import { 
   Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, 
-  AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal
+  AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal, KeyRound
 } from 'lucide-react';
 
 const UserManagement: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [usersList, setUsersList] = useState<any[]>(() => db.getUsers());
+
+  // Modal de alteração de senha
+  const [userToChangePassword, setUserToChangePassword] = useState<any | null>(null);
+  const [newPasswordInput, setNewPasswordInput] = useState('');
+  const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState('');
+  const [changePasswordLoading, setChangePasswordLoading] = useState(false);
+  const [changePasswordMessage, setChangePasswordMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
 
   // Modal de exclusão in-app (sem usar window.confirm que é bloqueado em iframes)
   const [userToDelete, setUserToDelete] = useState<any | null>(null);
@@ -61,6 +69,39 @@ WITH CHECK (true);
 -- Notifica o PostgREST para recarregar o cache de esquemas
 NOTIFY pgrst, 'reload schema';`;
 
+  // Atualiza lista unificada de usuários (Local + Supabase)
+  const refreshUsers = async () => {
+    const localUsers = db.getUsers() || [];
+    try {
+      const { data: remoteUsers } = await supabase.from('users').select('*');
+      if (remoteUsers && remoteUsers.length > 0) {
+        const map = new Map<string, any>();
+        localUsers.forEach((u: any) => map.set(u.id, u));
+        remoteUsers.forEach((r: any) => {
+          const existing = map.get(r.id);
+          map.set(r.id, {
+            id: r.id,
+            name: r.name,
+            username: r.username,
+            role: r.role,
+            crmv: r.crmv || undefined,
+            matricula: r.matricula || undefined,
+            email: r.email || undefined,
+            uid: r.uid || undefined,
+            password: existing?.password || undefined,
+            syncedWithSupabase: true
+          });
+        });
+        const merged = Array.from(map.values());
+        setUsersList(merged);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    setUsersList(localUsers);
+  };
+
   // Função para verificar se a tabela users existe no Supabase e quantos registros tem
   const checkSupabaseUsers = async () => {
     setSupabaseTableStatus('checking');
@@ -91,6 +132,7 @@ NOTIFY pgrst, 'reload schema';`;
 
   useEffect(() => {
     checkSupabaseUsers();
+    refreshUsers();
   }, []);
 
   const handleCopySql = () => {
@@ -99,7 +141,7 @@ NOTIFY pgrst, 'reload schema';`;
     setTimeout(() => setCopiedSql(false), 2500);
   };
 
-  // Sincroniza todos os usuários locais para o Supabase
+  // Sincroniza todos os usuários locais para o Supabase com senhas seguras
   const handleSyncAllUsersToSupabase = async () => {
     setSyncingSupabaseUsers(true);
     setSyncSupabaseMessage(null);
@@ -110,7 +152,24 @@ NOTIFY pgrst, 'reload schema';`;
         return;
       }
 
-      const payload = localUsers.map(mapUserToSupabase);
+      // Senhas padrão caso não haja senha cadastrada no objeto
+      const defaultPasswords: Record<string, string> = {
+        admin: 'admin123',
+        vet01: 'vet123',
+        vet02: 'vet123',
+        vet03: 'vet123',
+        op01: 'op123'
+      };
+
+      const payload = await Promise.all(localUsers.map(async (u: any) => {
+        let credHash = u.uid || null;
+        if (!credHash) {
+          const pass = u.password || defaultPasswords[u.username] || '123456';
+          credHash = await hashPassword(pass, u.id);
+        }
+        return mapUserToSupabase(u, credHash);
+      }));
+
       const { error } = await supabase.from('users').upsert(payload, { onConflict: 'id' });
 
       if (error) {
@@ -128,9 +187,10 @@ NOTIFY pgrst, 'reload schema';`;
       } else {
         setSyncSupabaseMessage({ 
           type: 'success', 
-          text: `Sucesso! ${localUsers.length} usuários locais foram sincronizados na tabela "public.users" do Supabase.` 
+          text: `Sucesso! ${localUsers.length} usuários locais foram sincronizados na tabela "public.users" do Supabase com credenciais ativas.` 
         });
         await checkSupabaseUsers();
+        await refreshUsers();
       }
     } catch (err: any) {
       setSyncSupabaseMessage({ 
@@ -146,6 +206,7 @@ NOTIFY pgrst, 'reload schema';`;
   const [formData, setFormData] = useState({
     name: '',
     username: '',
+    email: '',
     password: '',
     confirmPassword: '',
     role: 'OPERATOR' as 'ADMIN' | 'OPERATOR' | 'VETERINARIO',
@@ -163,39 +224,125 @@ NOTIFY pgrst, 'reload schema';`;
       return;
     }
 
+    if (formData.password.length < 4) {
+      setMessage({ type: 'error', text: 'A senha provisória deve ter pelo menos 4 caracteres.' });
+      return;
+    }
+
     setLoading(true);
 
     try {
+      const newUserId = crypto.randomUUID();
+      const cleanPass = formData.password.trim();
+      const pwdHash = await hashPassword(cleanPass, newUserId);
+
       // Se o usuário digitou um e-mail, sincroniza também com o Supabase Auth
       let supabaseMsg = '';
-      if (formData.username.includes('@')) {
-        const sbRes = await registerWithSupabase(formData.username, formData.password, formData.name, formData.role);
+      const emailToRegister = formData.email.trim() || (formData.username.includes('@') ? formData.username : '');
+      if (emailToRegister) {
+        const sbRes = await registerWithSupabase(emailToRegister, cleanPass, formData.name, formData.role);
         if (sbRes.success) {
           supabaseMsg = ' Conta sincronizada no Supabase Auth.';
         } else if (sbRes.error) {
-          console.warn('Aviso ao sincronizar com Supabase:', sbRes.error);
+          console.warn('Aviso ao sincronizar com Supabase Auth:', sbRes.error);
         }
       }
 
-      // Create a copy without confirmPassword to save in DB
+      // Create object to save in DB and Supabase
       const { confirmPassword, ...dataToSave } = formData;
-      db.saveUser(dataToSave);
+      const userRecord = {
+        ...dataToSave,
+        id: newUserId,
+        email: emailToRegister || undefined,
+        password: cleanPass,
+        uid: pwdHash,
+      };
+
+      db.saveUser(userRecord);
+
+      // Salva explicitamente no Supabase
+      await supabase.from('users').upsert([mapUserToSupabase(userRecord, pwdHash)]);
       
-      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg}` });
+      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg} Credenciais ativas para login pelo site.` });
       setFormData({ 
         name: '', 
         username: '', 
+        email: '',
         password: '', 
         confirmPassword: '',
         role: 'OPERATOR', 
         crmv: '', 
         matricula: '' 
       });
-      setUsersList(db.getUsers());
+      await refreshUsers();
+      await checkSupabaseUsers();
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Erro ao cadastrar usuário.' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Funções para Alteração de Senha
+  const handleOpenChangePassword = (user: any) => {
+    setUserToChangePassword(user);
+    setNewPasswordInput('');
+    setConfirmNewPasswordInput('');
+    setChangePasswordMessage(null);
+  };
+
+  const handleSaveNewPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userToChangePassword) return;
+
+    if (newPasswordInput.length < 4) {
+      setChangePasswordMessage({ type: 'error', text: 'A senha deve conter no mínimo 4 caracteres.' });
+      return;
+    }
+
+    if (newPasswordInput !== confirmNewPasswordInput) {
+      setChangePasswordMessage({ type: 'error', text: 'A confirmação de senha não confere.' });
+      return;
+    }
+
+    setChangePasswordLoading(true);
+    setChangePasswordMessage(null);
+
+    try {
+      const cleanPass = newPasswordInput.trim();
+      const newHash = await hashPassword(cleanPass, userToChangePassword.id);
+
+      // 1. Atualiza no Supabase
+      const { error: sbErr } = await supabase
+        .from('users')
+        .update({ uid: newHash })
+        .eq('id', userToChangePassword.id);
+
+      if (sbErr) {
+        console.warn('Aviso ao atualizar senha no Supabase:', sbErr.message);
+      }
+
+      // 2. Atualiza localmente
+      const updatedUser = {
+        ...userToChangePassword,
+        password: cleanPass,
+        uid: newHash,
+      };
+      db.saveUser(updatedUser);
+
+      setChangePasswordMessage({
+        type: 'success',
+        text: `Senha de "${userToChangePassword.name}" atualizada com sucesso! O acesso pelo site já está liberado.`
+      });
+
+      setTimeout(() => {
+        setUserToChangePassword(null);
+        refreshUsers();
+      }, 1600);
+    } catch (err: any) {
+      setChangePasswordMessage({ type: 'error', text: err?.message || 'Erro ao alterar senha.' });
+    } finally {
+      setChangePasswordLoading(false);
     }
   };
 
@@ -290,10 +437,23 @@ NOTIFY pgrst, 'reload schema';`;
               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Usuário (Login)</label>
               <input 
                 type="text" required
+                placeholder="ex: joaosilva"
                 value={formData.username}
                 onChange={e => setFormData({...formData, username: e.target.value.toLowerCase().replace(/\s/g, '')})}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm"
               />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">E-mail (opcional)</label>
+              <input 
+                type="email"
+                placeholder="ex: joao@gmail.com"
+                value={formData.email}
+                onChange={e => setFormData({...formData, email: e.target.value.toLowerCase().trim()})}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm"
+              />
+              <p className="text-[10px] text-slate-400">Permite login no site tanto com o usuário quanto com o e-mail.</p>
             </div>
             
             <div className="grid grid-cols-1 gap-4">
@@ -412,7 +572,16 @@ NOTIFY pgrst, 'reload schema';`;
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex justify-center items-center">
+                      <div className="flex justify-center items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenChangePassword(user)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-teal-600 hover:bg-teal-50 transition-all cursor-pointer group"
+                          title={`Alterar senha de ${user.name}`}
+                        >
+                          <KeyRound size={16} className="group-hover:scale-110 transition-transform text-slate-500 hover:text-teal-600" />
+                        </button>
+
                         {user.username === 'admin' ? (
                           <button
                             type="button"
@@ -427,7 +596,7 @@ NOTIFY pgrst, 'reload schema';`;
                           <button 
                             type="button"
                             onClick={() => handleDeleteClick(user)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all cursor-pointer group"
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all cursor-pointer group"
                             title={`Remover acesso de ${user.name}`}
                           >
                             <Trash2 size={16} className="group-hover:scale-110 transition-transform" />
@@ -637,6 +806,94 @@ NOTIFY pgrst, 'reload schema';`;
                 <span>{deletingLoading ? 'Removendo...' : 'Sim, Excluir Usuário'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Alteração de Senha */}
+      {userToChangePassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3 text-teal-600">
+                <div className="w-10 h-10 rounded-xl bg-teal-100 flex items-center justify-center shrink-0">
+                  <KeyRound size={22} className="text-teal-700" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Alterar Senha de Acesso</h3>
+                  <p className="text-xs text-slate-500">
+                    Servidor: <strong>{userToChangePassword.name}</strong> (@{userToChangePassword.username})
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUserToChangePassword(null)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {changePasswordMessage && (
+              <div className={`p-3 rounded-xl flex items-start gap-2.5 text-xs ${
+                changePasswordMessage.type === 'success' 
+                  ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' 
+                  : 'bg-red-50 border border-red-200 text-red-800'
+              }`}>
+                {changePasswordMessage.type === 'success' ? <Check size={16} className="shrink-0 text-emerald-600 mt-0.5" /> : <AlertTriangle size={16} className="shrink-0 text-red-600 mt-0.5" />}
+                <p>{changePasswordMessage.text}</p>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveNewPassword} className="space-y-4 pt-1">
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Nova Senha</label>
+                <input 
+                  type="password"
+                  required
+                  placeholder="Mínimo 4 caracteres"
+                  value={newPasswordInput}
+                  onChange={e => setNewPasswordInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Confirmar Nova Senha</label>
+                <input 
+                  type="password"
+                  required
+                  placeholder="Repita a nova senha"
+                  value={confirmNewPasswordInput}
+                  onChange={e => setConfirmNewPasswordInput(e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-lg outline-none focus:ring-2 text-sm transition-colors ${
+                    confirmNewPasswordInput && newPasswordInput !== confirmNewPasswordInput 
+                      ? 'bg-red-50 border-red-300 focus:ring-red-500' 
+                      : 'bg-slate-50 border-slate-200 focus:ring-teal-500'
+                  }`}
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setUserToChangePassword(null)}
+                  disabled={changePasswordLoading}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={changePasswordLoading}
+                  className="px-4 py-2 bg-teal-600 hover:bg-teal-700 active:scale-95 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-teal-200 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <KeyRound size={14} />
+                  <span>{changePasswordLoading ? 'Salvando...' : 'Salvar Nova Senha'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

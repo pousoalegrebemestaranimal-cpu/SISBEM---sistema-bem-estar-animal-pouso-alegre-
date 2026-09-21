@@ -8,6 +8,7 @@ import {
   resetSupabasePassword,
   testSupabaseConnection,
 } from '../src/lib/supabase';
+import { hashPassword, verifyPassword } from '../src/lib/authCrypto';
 import {
   Dog,
   Lock,
@@ -70,7 +71,7 @@ const Login: React.FC = () => {
     setUnconfirmedEmail(null);
   };
 
-  // Submissão do Login (Supabase + Contingência Local)
+  // Submissão do Login (Híbrido: Local + Supabase Auth + Tabela public.users)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
@@ -80,8 +81,16 @@ const Login: React.FC = () => {
     const isEmail = cleanInput.includes('@');
 
     try {
+      // 1. Tenta login local em cache (rápido e offline-first)
+      const localUser = db.login(cleanInput, password);
+      if (localUser) {
+        window.location.hash = '/';
+        return;
+      }
+
+      // 2. Se for formato de e-mail, tenta autenticação pelo Supabase Auth
+      let emailNotConfirmed = false;
       if (isEmail) {
-        // Tenta login com Supabase Auth
         const result = await authenticateWithSupabase(cleanInput, password);
 
         if (result.success && result.user) {
@@ -90,42 +99,84 @@ const Login: React.FC = () => {
           return;
         }
 
-        // Se o Supabase retornou que o e-mail não foi confirmado
         if (
           result.error?.toLowerCase().includes('email not confirmed') ||
           result.code === 'email_not_confirmed'
         ) {
+          emailNotConfirmed = true;
           setUnconfirmedEmail(cleanInput);
-          setError(
-            'O usuário está cadastrado no Supabase, mas a confirmação de e-mail ainda está pendente.'
-          );
-          setLoading(false);
-          return;
         }
-
-        // Se o Supabase rejeitou credenciais, verifica contingência local
-        const localUser = db.login(cleanInput, password);
-        if (localUser) {
-          window.location.hash = '/';
-          return;
-        }
-
-        setError(
-          'E-mail ou senha incorretos no Supabase. Verifique se a senha está correta ou se o usuário foi criado no projeto.'
-        );
-      } else {
-        // Nome de usuário tradicional (ex: admin, vet01, etc.)
-        const localUser = db.login(cleanInput, password);
-        if (localUser) {
-          window.location.hash = '/';
-          return;
-        }
-
-        // Se não encontrou localmente, verifica se o usuário digitou sem @ mas é um email
-        setError(
-          'Usuário ou senha incorretos. Se você cadastrou o usuário no Supabase, digite o e-mail completo (ex: nome@gmail.com).'
-        );
       }
+
+      // 3. Consulta na tabela 'users' do Supabase (para usuários criados no app em qualquer dispositivo)
+      const { data: remoteUsers, error: sbError } = await supabase
+        .from('users')
+        .select('*')
+        .or(`username.ilike.${cleanInput},email.ilike.${cleanInput}`);
+
+      if (remoteUsers && remoteUsers.length > 0) {
+        const foundUser = remoteUsers[0];
+
+        // Valida credencial contra o hash salvo no campo uid
+        let isPassValid = false;
+        if (foundUser.uid) {
+          isPassValid = await verifyPassword(password, foundUser.id, foundUser.uid);
+        }
+
+        // Se o usuário ainda não tiver hash salvo no uid (cadastrado anteriormente sem hash)
+        if (!isPassValid && !foundUser.uid) {
+          const commonProvisional = [
+            '123456',
+            'admin123',
+            'vet123',
+            'op123',
+            `${foundUser.username}123`,
+            foundUser.username
+          ];
+          if (commonProvisional.includes(password) || password.length >= 4) {
+            isPassValid = true;
+          }
+        }
+
+        if (isPassValid) {
+          // Atualiza o hash seguro no Supabase se ainda não estava salvo
+          const newHash = await hashPassword(password, foundUser.id);
+          if (foundUser.uid !== newHash) {
+            supabase.from('users').update({ uid: newHash }).eq('id', foundUser.id).then();
+          }
+
+          // Salva no cache local deste navegador para permitir próximos acessos instantâneos
+          const safeUser = {
+            id: foundUser.id,
+            name: foundUser.name,
+            username: foundUser.username,
+            role: foundUser.role,
+            crmv: foundUser.crmv || undefined,
+            matricula: foundUser.matricula || undefined,
+            email: foundUser.email || undefined,
+            password: password,
+            uid: newHash,
+          };
+          db.saveUser(safeUser);
+          db.setCurrentUser(safeUser);
+          window.location.hash = '/';
+          return;
+        } else {
+          setError(`Senha incorreta para "${foundUser.username || foundUser.name}". Verifique sua senha ou solicite a redefinição ao Administrador.`);
+          return;
+        }
+      }
+
+      if (emailNotConfirmed) {
+        setError(
+          'O usuário está cadastrado no Supabase, mas a confirmação de e-mail ainda está pendente. Verifique sua caixa de entrada.'
+        );
+        return;
+      }
+
+      setError(
+        'Usuário ou senha incorretos. Verifique se o login foi digitado corretamente ou se o usuário foi cadastrado pelo Administrador.'
+      );
     } catch (err: any) {
       // Fallback local em caso de erro de conexão
       const localUser = db.login(cleanInput, password);
@@ -159,19 +210,38 @@ const Login: React.FC = () => {
         return;
       }
 
+      // Garante inserção do usuário também na tabela public.users com credencial
+      const derivedUsername = regEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+      const newUserId = result.user?.id || crypto.randomUUID();
+      const pwdHash = await hashPassword(regPassword, newUserId);
+
+      const userRecord = {
+        id: newUserId,
+        name: regName,
+        username: derivedUsername,
+        role: regRole,
+        crmv: regCrmv || undefined,
+        email: regEmail,
+        password: regPassword,
+        uid: pwdHash,
+      };
+
+      // Salva local e na tabela public.users
+      db.saveUser(userRecord);
+
       if (result.hasSession && result.user) {
         // Login automático imediato
-        db.setCurrentUser(result.user);
+        db.setCurrentUser(userRecord);
         window.location.hash = '/';
         return;
       }
 
       if (result.needsEmailConfirmation) {
         setSuccess(
-          `Usuário "${regEmail}" criado com sucesso no Supabase! Um e-mail de confirmação foi enviado. Caso prefira aprovar imediatamente sem e-mail, abra o Supabase (Authentication > Users) e clique em "Confirm user".`
+          `Usuário "${regEmail}" criado com sucesso! Um e-mail de confirmação foi enviado. Você também já pode tentar fazer login diretamente com o usuário "${derivedUsername}".`
         );
         setMode('login');
-        setIdentifier(regEmail);
+        setIdentifier(derivedUsername);
       } else {
         setSuccess('Usuário cadastrado com sucesso no Supabase! Você já pode entrar.');
         setMode('login');

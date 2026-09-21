@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { hashPassword } from './authCrypto';
 import {
   Animal,
   Solicitante,
@@ -485,19 +486,25 @@ export function mapSupabaseToRecord(row: any): ClinicalRecord {
   };
 }
 
-export function mapUserToSupabase(u: User) {
-  return {
+export function mapUserToSupabase(u: any, credentialHash?: string | null) {
+  const payload: any = {
     id: u.id,
     name: u.name,
     username: u.username,
     role: u.role,
     crmv: cleanString(u.crmv),
     matricula: cleanString(u.matricula),
-    email: cleanString((u as any).email),
+    email: cleanString(u.email),
   };
+  if (credentialHash !== undefined) {
+    payload.uid = credentialHash;
+  } else if (u.uid) {
+    payload.uid = u.uid;
+  }
+  return payload;
 }
 
-export function mapSupabaseToUser(row: any): User {
+export function mapSupabaseToUser(row: any): any {
   return {
     id: row.id,
     name: row.name,
@@ -505,6 +512,8 @@ export function mapSupabaseToUser(row: any): User {
     role: row.role,
     crmv: row.crmv || undefined,
     matricula: row.matricula || undefined,
+    email: row.email || undefined,
+    uid: row.uid || undefined,
   };
 }
 
@@ -649,9 +658,13 @@ export async function syncOccupationToSupabase(occupation: KennelOccupation) {
   }
 }
 
-export async function syncUserToSupabase(user: User) {
+export async function syncUserToSupabase(user: any) {
   try {
-    const payload = mapUserToSupabase(user);
+    let credHash = user.uid || null;
+    if (!credHash && user.password) {
+      credHash = await hashPassword(user.password, user.id);
+    }
+    const payload = mapUserToSupabase(user, credHash);
     const { error } = await supabase.from('users').upsert([payload]);
     if (error) {
       console.warn('Supabase syncUser info:', error.message);
@@ -742,7 +755,13 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
     }
 
     if (localUsers.length > 0) {
-      const payload = localUsers.map(mapUserToSupabase);
+      const payload = await Promise.all(localUsers.map(async (u: any) => {
+        let credHash = u.uid || null;
+        if (!credHash && u.password) {
+          credHash = await hashPassword(u.password, u.id);
+        }
+        return mapUserToSupabase(u, credHash);
+      }));
       const { error } = await supabase.from('users').upsert(payload);
       if (error) {
         // Se violar RLS da tabela users, não trava a sincronização dos animais
@@ -898,6 +917,31 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
       const merged = Array.from(map.values());
       localStorage.setItem('sisbem_cirurgias', JSON.stringify(merged));
       syncedCounts.surgeries = merged.length;
+    }
+
+    // 5. Usuários
+    const { data: remUsers } = await supabase.from('users').select('*');
+    if (remUsers && remUsers.length > 0) {
+      const localUsers = dbInstance.getUsers() || [];
+      const map = new Map<string, any>();
+      localUsers.forEach((u: any) => map.set(u.id, u));
+      remUsers.forEach((r: any) => {
+        const existing = map.get(r.id);
+        map.set(r.id, {
+          id: r.id,
+          name: r.name,
+          username: r.username,
+          role: r.role,
+          crmv: r.crmv || undefined,
+          matricula: r.matricula || undefined,
+          email: r.email || undefined,
+          uid: r.uid || undefined,
+          password: existing?.password || undefined,
+        });
+      });
+      const merged = Array.from(map.values());
+      localStorage.setItem('sisbem_users', JSON.stringify(merged));
+      syncedCounts.users = merged.length;
     }
 
     return { success: true, syncedCounts };
