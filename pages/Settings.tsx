@@ -275,7 +275,48 @@ ALTER TABLE public.solicitantes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referrals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.status_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.exam_files ENABLE ROW LEVEL SECURITY;`;
+ALTER TABLE public.exam_files ENABLE ROW LEVEL SECURITY;
+
+-- POLÍTICAS DE ACESSO COMPLETO (RLS)
+DO $$ 
+BEGIN
+    DROP POLICY IF EXISTS "Permitir leitura para todos os usuários autenticados" ON public.users;
+    DROP POLICY IF EXISTS "Permitir acesso completo a users" ON public.users;
+    CREATE POLICY "Permitir acesso completo a users" ON public.users FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a animais" ON public.animals;
+    CREATE POLICY "Permitir acesso completo a animais" ON public.animals FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a prontuários" ON public.clinical_records;
+    CREATE POLICY "Permitir acesso completo a prontuários" ON public.clinical_records FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a cirurgias" ON public.surgeries;
+    CREATE POLICY "Permitir acesso completo a cirurgias" ON public.surgeries FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a baias" ON public.kennels;
+    CREATE POLICY "Permitir acesso completo a baias" ON public.kennels FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a ocupações" ON public.kennel_occupations;
+    CREATE POLICY "Permitir acesso completo a ocupações" ON public.kennel_occupations FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a tutores" ON public.tutores;
+    CREATE POLICY "Permitir acesso completo a tutores" ON public.tutores FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a solicitantes" ON public.solicitantes;
+    CREATE POLICY "Permitir acesso completo a solicitantes" ON public.solicitantes FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a prescrições" ON public.prescriptions;
+    CREATE POLICY "Permitir acesso completo a prescrições" ON public.prescriptions FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a encaminhamentos" ON public.referrals;
+    CREATE POLICY "Permitir acesso completo a encaminhamentos" ON public.referrals FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a logs de status" ON public.status_logs;
+    CREATE POLICY "Permitir acesso completo a logs de status" ON public.status_logs FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a arquivos de exame" ON public.exam_files;
+    CREATE POLICY "Permitir acesso completo a arquivos de exame" ON public.exam_files FOR ALL USING (true) WITH CHECK (true);
+END $$;`;
 
   const handleCopyMigration = () => {
     navigator.clipboard.writeText(migrationSql);

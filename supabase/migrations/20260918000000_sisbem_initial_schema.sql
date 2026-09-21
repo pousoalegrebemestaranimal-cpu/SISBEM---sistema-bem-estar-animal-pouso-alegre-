@@ -290,7 +290,8 @@ ALTER TABLE public.exam_files ENABLE ROW LEVEL SECURITY;
 DO $$ 
 BEGIN
     DROP POLICY IF EXISTS "Permitir leitura para todos os usuários autenticados" ON public.users;
-    CREATE POLICY "Permitir leitura para todos os usuários autenticados" ON public.users FOR SELECT USING (true);
+    DROP POLICY IF EXISTS "Permitir acesso completo a users" ON public.users;
+    CREATE POLICY "Permitir acesso completo a users" ON public.users FOR ALL USING (true) WITH CHECK (true);
 
     DROP POLICY IF EXISTS "Permitir acesso completo a animais" ON public.animals;
     CREATE POLICY "Permitir acesso completo a animais" ON public.animals FOR ALL USING (true) WITH CHECK (true);

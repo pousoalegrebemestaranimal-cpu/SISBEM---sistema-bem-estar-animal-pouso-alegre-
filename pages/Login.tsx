@@ -22,7 +22,9 @@ import {
   RefreshCw,
   ExternalLink,
   HelpCircle,
-  Info
+  Info,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 type Mode = 'login' | 'register' | 'forgot';
@@ -33,11 +35,13 @@ const Login: React.FC = () => {
   // Login form state
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   // Register form state
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
   const [regRole, setRegRole] = useState<'ADMIN' | 'OPERATOR' | 'VETERINARIO'>('ADMIN');
   const [regCrmv, setRegCrmv] = useState('');
 
@@ -349,12 +353,14 @@ const Login: React.FC = () => {
                   <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
                     E-mail ou Usuário
                   </label>
-                  <div className="relative">
-                    <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Mail size={18} />
+                    </div>
                     <input
                       type="text"
                       required
-                      className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
+                      className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
                       placeholder="seu-email@gmail.com ou admin"
                       value={identifier}
                       onChange={e => setIdentifier(e.target.value)}
@@ -375,16 +381,27 @@ const Login: React.FC = () => {
                       Esqueceu a senha?
                     </button>
                   </div>
-                  <div className="relative">
-                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Lock size={18} />
+                    </div>
                     <input
-                      type="password"
+                      type={showPassword ? 'text' : 'password'}
                       required
-                      className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
+                      className="w-full pl-11 pr-11 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 transition-all text-sm font-medium text-slate-900 placeholder:text-slate-400"
                       placeholder="Sua senha secreta"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3.5 p-1 text-slate-400 hover:text-slate-600 focus:outline-none transition cursor-pointer"
+                      tabIndex={-1}
+                      title={showPassword ? 'Ocultar senha' : 'Exibir senha'}
+                    >
+                      {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -431,12 +448,14 @@ const Login: React.FC = () => {
               <div className="space-y-3">
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-slate-600 uppercase">Nome Completo</label>
-                  <div className="relative">
-                    <UserIcon className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                      <UserIcon size={18} />
+                    </div>
                     <input
                       type="text"
                       required
-                      className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm"
+                      className="w-full pl-11 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm font-medium text-slate-900 placeholder:text-slate-400"
                       placeholder="Ex: Dr. Roberto Santos ou Mariana"
                       value={regName}
                       onChange={e => setRegName(e.target.value)}
@@ -446,12 +465,14 @@ const Login: React.FC = () => {
 
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-slate-600 uppercase">E-mail (Supabase)</label>
-                  <div className="relative">
-                    <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Mail size={18} />
+                    </div>
                     <input
                       type="email"
                       required
-                      className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm"
+                      className="w-full pl-11 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm font-medium text-slate-900 placeholder:text-slate-400"
                       placeholder="pousoalegrebemestaranimal@gmail.com"
                       value={regEmail}
                       onChange={e => setRegEmail(e.target.value)}
@@ -461,17 +482,28 @@ const Login: React.FC = () => {
 
                 <div className="space-y-1">
                   <label className="text-[11px] font-bold text-slate-600 uppercase">Senha (mínimo 6 dígitos)</label>
-                  <div className="relative">
-                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                  <div className="relative flex items-center">
+                    <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Lock size={18} />
+                    </div>
                     <input
-                      type="password"
+                      type={showRegPassword ? 'text' : 'password'}
                       required
                       minLength={6}
-                      className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm"
+                      className="w-full pl-11 pr-11 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm font-medium text-slate-900 placeholder:text-slate-400"
                       placeholder="Defina uma senha segura"
                       value={regPassword}
                       onChange={e => setRegPassword(e.target.value)}
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowRegPassword(!showRegPassword)}
+                      className="absolute right-3.5 p-1 text-slate-400 hover:text-slate-600 focus:outline-none transition cursor-pointer"
+                      tabIndex={-1}
+                      title={showRegPassword ? 'Ocultar senha' : 'Exibir senha'}
+                    >
+                      {showRegPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
                   </div>
                 </div>
 
@@ -537,12 +569,14 @@ const Login: React.FC = () => {
 
               <div className="space-y-1">
                 <label className="text-[11px] font-bold text-slate-600 uppercase">E-mail Cadastrado</label>
-                <div className="relative">
-                  <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
+                <div className="relative flex items-center">
+                  <div className="absolute left-3.5 flex items-center pointer-events-none text-slate-400">
+                    <Mail size={18} />
+                  </div>
                   <input
                     type="email"
                     required
-                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm font-medium"
+                    className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 text-sm font-medium text-slate-900 placeholder:text-slate-400"
                     placeholder="seu-email@gmail.com"
                     value={forgotEmail}
                     onChange={e => setForgotEmail(e.target.value)}

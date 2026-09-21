@@ -1,8 +1,12 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/db';
-import { registerWithSupabase } from '../src/lib/supabase';
-import { Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, AlertTriangle, X, ShieldCheck } from 'lucide-react';
+import { registerWithSupabase, supabase } from '../src/lib/supabase';
+import { mapUserToSupabase } from '../src/lib/supabaseSync';
+import { 
+  Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, 
+  AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal
+} from 'lucide-react';
 
 const UserManagement: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -14,7 +18,129 @@ const UserManagement: React.FC = () => {
   const [protectedAdminNotice, setProtectedAdminNotice] = useState(false);
   const [deletingLoading, setDeletingLoading] = useState(false);
 
+  // Estado da Sincronização e Diagnóstico Supabase
+  const [supabaseUsersCount, setSupabaseUsersCount] = useState<number | null>(null);
+  const [supabaseTableStatus, setSupabaseTableStatus] = useState<'checking' | 'exists' | 'missing' | 'error'>('checking');
+  const [supabaseErrorDetails, setSupabaseErrorDetails] = useState<string | null>(null);
+  const [syncingSupabaseUsers, setSyncingSupabaseUsers] = useState(false);
+  const [syncSupabaseMessage, setSyncSupabaseMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [copiedSql, setCopiedSql] = useState(false);
+
   const currentUser = useMemo(() => db.getCurrentUser(), []);
+
+  const sqlFixUsersRls = `-- ==============================================================================
+-- SISBEM: LIBERAR ACESSO À TABELA DE USUÁRIOS NO SUPABASE (RLS)
+-- Execute este script no menu "SQL Editor" do painel do Supabase:
+-- ==============================================================================
+
+-- 1. Garante que a tabela public.users existe
+CREATE TABLE IF NOT EXISTS public.users (
+    id TEXT PRIMARY KEY,
+    uid TEXT UNIQUE,
+    email TEXT,
+    name TEXT NOT NULL,
+    username TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL CHECK (role IN ('ADMIN', 'OPERATOR', 'VETERINARIO')),
+    crmv TEXT,
+    matricula TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 2. Habilita RLS e cria política irrestrita de leitura/escrita
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Permitir leitura para todos os usuários autenticados" ON public.users;
+DROP POLICY IF EXISTS "Permitir acesso completo a users" ON public.users;
+
+CREATE POLICY "Permitir acesso completo a users" 
+ON public.users 
+FOR ALL 
+USING (true) 
+WITH CHECK (true);
+
+-- Notifica o PostgREST para recarregar o cache de esquemas
+NOTIFY pgrst, 'reload schema';`;
+
+  // Função para verificar se a tabela users existe no Supabase e quantos registros tem
+  const checkSupabaseUsers = async () => {
+    setSupabaseTableStatus('checking');
+    setSupabaseErrorDetails(null);
+    try {
+      const { data, error, status } = await supabase
+        .from('users')
+        .select('id', { count: 'exact' });
+
+      if (error) {
+        if (error.code === 'PGRST205' || error.message.includes('not find the table')) {
+          setSupabaseTableStatus('missing');
+          setSupabaseErrorDetails('Tabela public.users não foi encontrada no banco do Supabase.');
+        } else {
+          setSupabaseTableStatus('error');
+          setSupabaseErrorDetails(error.message);
+        }
+        setSupabaseUsersCount(null);
+      } else {
+        setSupabaseTableStatus('exists');
+        setSupabaseUsersCount(data?.length ?? 0);
+      }
+    } catch (err: any) {
+      setSupabaseTableStatus('error');
+      setSupabaseErrorDetails(err?.message || 'Falha ao contatar Supabase');
+    }
+  };
+
+  useEffect(() => {
+    checkSupabaseUsers();
+  }, []);
+
+  const handleCopySql = () => {
+    navigator.clipboard.writeText(sqlFixUsersRls);
+    setCopiedSql(true);
+    setTimeout(() => setCopiedSql(false), 2500);
+  };
+
+  // Sincroniza todos os usuários locais para o Supabase
+  const handleSyncAllUsersToSupabase = async () => {
+    setSyncingSupabaseUsers(true);
+    setSyncSupabaseMessage(null);
+    try {
+      const localUsers = db.getUsers();
+      if (localUsers.length === 0) {
+        setSyncSupabaseMessage({ type: 'error', text: 'Nenhum usuário local cadastrado para sincronizar.' });
+        return;
+      }
+
+      const payload = localUsers.map(mapUserToSupabase);
+      const { error } = await supabase.from('users').upsert(payload, { onConflict: 'id' });
+
+      if (error) {
+        if (error.message.includes('row-level security') || error.code === '42501') {
+          setSyncSupabaseMessage({ 
+            type: 'error', 
+            text: `Erro de Permissão (RLS): ${error.message}. Execute o script SQL abaixo no SQL Editor do Supabase para liberar o acesso.` 
+          });
+        } else {
+          setSyncSupabaseMessage({ 
+            type: 'error', 
+            text: `Erro ao enviar usuários: ${error.message}` 
+          });
+        }
+      } else {
+        setSyncSupabaseMessage({ 
+          type: 'success', 
+          text: `Sucesso! ${localUsers.length} usuários locais foram sincronizados na tabela "public.users" do Supabase.` 
+        });
+        await checkSupabaseUsers();
+      }
+    } catch (err: any) {
+      setSyncSupabaseMessage({ 
+        type: 'error', 
+        text: err?.message || 'Erro inesperado na sincronização.' 
+      });
+    } finally {
+      setSyncingSupabaseUsers(false);
+    }
+  };
 
   // Form State
   const [formData, setFormData] = useState({
@@ -314,6 +440,130 @@ const UserManagement: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      {/* Card de Diagnóstico e Sincronização Supabase */}
+      <div className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-slate-200 space-y-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2.5">
+              <Database className="text-indigo-600" size={22} />
+              <h3 className="text-lg font-bold text-slate-900">Sincronização com Supabase (Tabela public.users)</h3>
+              {supabaseTableStatus === 'checking' ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">
+                  <RefreshCw size={11} className="animate-spin" /> Verificando...
+                </span>
+              ) : supabaseTableStatus === 'exists' ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                  Tabela Ativa ({supabaseUsersCount ?? 0} no Supabase)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+                  <AlertTriangle size={12} className="text-amber-600" />
+                  RLS / Permissão Pendente
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500">
+              O SISBEM armazena os servidores internamente e sincroniza com a tabela relacional <code className="font-mono text-indigo-700 font-bold">public.users</code> no PostgreSQL do Supabase.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={checkSupabaseUsers}
+              disabled={supabaseTableStatus === 'checking'}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
+              title="Verificar se a tabela users responde no Supabase"
+            >
+              <RefreshCw size={13} className={supabaseTableStatus === 'checking' ? 'animate-spin' : ''} />
+              Verificar Tabela
+            </button>
+            <button
+              type="button"
+              onClick={handleSyncAllUsersToSupabase}
+              disabled={syncingSupabaseUsers}
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs rounded-xl shadow-sm transition cursor-pointer disabled:opacity-50"
+            >
+              {syncingSupabaseUsers ? <RefreshCw size={13} className="animate-spin" /> : <Globe size={13} />}
+              {syncingSupabaseUsers ? 'Sincronizando...' : 'Sincronizar Usuários no Supabase'}
+            </button>
+          </div>
+        </div>
+
+        {syncSupabaseMessage && (
+          <div className={`p-4 rounded-xl flex items-start gap-3 border text-xs leading-relaxed ${
+            syncSupabaseMessage.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'
+          }`}>
+            {syncSupabaseMessage.type === 'success' ? <CheckCircle2 size={18} className="shrink-0 mt-0.5" /> : <ShieldAlert size={18} className="shrink-0 mt-0.5" />}
+            <div>
+              <p className="font-bold">{syncSupabaseMessage.text}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Guia explicativo: Onde encontrar os usuários no Supabase */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+            <div className="flex items-center gap-2 font-bold text-slate-800">
+              <Database size={15} className="text-indigo-600" />
+              <span>1. Table Editor &gt; Tabela "users" (public)</span>
+            </div>
+            <p className="text-slate-600 leading-relaxed text-[11px]">
+              No menu lateral esquerdo do Supabase, clique em <strong>Table Editor</strong> e certifique-se de estar no esquema <strong>public</strong>. A tabela chama-se <strong>users</strong> e guarda o cadastro institucional (nome, login, papel, CRMV e matrícula).
+            </p>
+          </div>
+
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+            <div className="flex items-center gap-2 font-bold text-slate-800">
+              <Lock size={15} className="text-amber-600" />
+              <span>2. Authentication &gt; Users (auth.users)</span>
+            </div>
+            <p className="text-slate-600 leading-relaxed text-[11px]">
+              O menu <strong>Authentication</strong> guarda apenas contas que possuem <strong>e-mail e senha</strong> registrados via Supabase Auth. Os servidores locais (como <em>admin</em>, <em>vet01</em>) ficam registrados na tabela do Table Editor.
+            </p>
+          </div>
+        </div>
+
+        {/* Script SQL para liberar permissões da tabela users */}
+        <div className="bg-slate-900 text-slate-300 p-4 md:p-5 rounded-xl text-xs space-y-3 font-mono">
+          <div className="flex items-center justify-between text-slate-400 font-sans text-xs border-b border-slate-800 pb-3">
+            <div className="flex items-center gap-2">
+              <Code2 size={16} className="text-emerald-400" />
+              <span className="font-bold text-slate-200">
+                A tabela não aparece ou deu erro de RLS no Supabase?
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href="https://supabase.com/dashboard/project/azufmdknlvbfaxnfiwwg/sql/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 transition"
+              >
+                Abrir SQL Editor <ExternalLink size={12} />
+              </a>
+              <button
+                type="button"
+                onClick={handleCopySql}
+                className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-medium text-[11px] rounded-lg transition cursor-pointer"
+              >
+                {copiedSql ? <Check size={12} /> : <Copy size={12} />}
+                {copiedSql ? 'Copiado!' : 'Copiar Script SQL'}
+              </button>
+            </div>
+          </div>
+
+          <p className="font-sans text-[11px] text-slate-400 leading-relaxed">
+            Se a tabela <code className="text-emerald-400">users</code> estiver vazia ou com mensagem de <em>"violates row-level security"</em>, copie o script abaixo, cole no menu <strong>SQL Editor</strong> do painel Supabase e clique em <strong>Run</strong>:
+          </p>
+
+          <pre className="p-3 bg-slate-950 rounded-lg text-[10px] text-slate-300 max-h-44 overflow-y-auto font-mono whitespace-pre-wrap leading-relaxed border border-slate-800">
+            {sqlFixUsersRls}
+          </pre>
         </div>
       </div>
 
