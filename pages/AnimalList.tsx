@@ -2,10 +2,11 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../services/db';
 import { AnimalJoined, Especie, AnimalCondicao } from '../types';
+import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 // Added MapPin to the imports list
-import { Search, Plus, Edit2, Trash2, Filter, Heart, Stethoscope, Clock, Eye, AlertCircle, Camera, Leaf, UserCheck, Skull, UserCircle, MapPin, CheckCircle2, Home, Cpu, Printer, Scissors } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, Filter, Heart, Stethoscope, Clock, Eye, AlertCircle, Camera, Leaf, UserCheck, Skull, UserCircle, MapPin, CheckCircle2, Home, Cpu, Printer, Scissors, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 
@@ -16,10 +17,45 @@ const AnimalList: React.FC = () => {
   const [filterOrigem, setFilterOrigem] = useState<string>('TODOS');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [animals, setAnimals] = useState<AnimalJoined[]>([]);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
-  // Busca os dados sempre que o componente monta ou quando um delete acontece
-  useEffect(() => {
+  const refreshAnimals = () => {
     setAnimals(db.getAnimalsJoined());
+  };
+
+  const handleManualSync = async () => {
+    try {
+      setIsSyncing(true);
+      await pullFromSupabaseToLocal(db);
+      refreshAnimals();
+    } catch (e) {
+      console.warn('Erro ao atualizar animais:', e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // Busca os dados ao montar, ao deletar ou quando eventos de sincronização acontecerem
+  useEffect(() => {
+    refreshAnimals();
+
+    // Sincroniza em segundo plano ao abrir a lista para garantir os registros de outros usuários
+    pullFromSupabaseToLocal(db).then(() => {
+      refreshAnimals();
+    }).catch(() => {});
+
+    // Escuta alterações de animais vindas de outros usuários ou abas
+    const handleAnimalsChanged = () => {
+      refreshAnimals();
+    };
+
+    window.addEventListener('sisbem-animals-changed', handleAnimalsChanged);
+    window.addEventListener('storage', handleAnimalsChanged);
+
+    return () => {
+      window.removeEventListener('sisbem-animals-changed', handleAnimalsChanged);
+      window.removeEventListener('storage', handleAnimalsChanged);
+    };
   }, [showDeleteConfirm]);
 
   const filteredAnimals = animals.filter(animal => {
@@ -77,7 +113,19 @@ const AnimalList: React.FC = () => {
           <h2 className="text-2xl font-bold text-slate-900">Lista de Animais</h2>
           <p className="text-slate-500 text-sm">Gerencie todos os registros cadastrados.</p>
         </div>
-        <Link to="/animais/novo" className="flex items-center gap-2 px-6 py-2 bg-teal-600 text-white font-bold rounded-lg shadow-md hover:bg-teal-700 transition-all"><Plus size={18} /> Novo Cadastro</Link>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            title="Atualizar lista com dados da nuvem"
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 font-semibold rounded-lg shadow-sm hover:bg-slate-50 transition-all text-sm disabled:opacity-60 cursor-pointer"
+          >
+            <RefreshCw size={16} className={`text-teal-600 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>{isSyncing ? 'Sincronizando...' : 'Atualizar'}</span>
+          </button>
+          <Link to="/animais/novo" className="flex items-center gap-2 px-6 py-2 bg-teal-600 text-white font-bold rounded-lg shadow-md hover:bg-teal-700 transition-all text-sm"><Plus size={18} /> Novo Cadastro</Link>
+        </div>
       </div>
 
       {/* Abas de Origem: Todos, Internos, Externos */}

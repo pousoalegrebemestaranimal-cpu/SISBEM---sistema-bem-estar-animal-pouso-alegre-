@@ -13,7 +13,15 @@ const Dashboard: React.FC = () => {
   const [animals, setAnimals] = useState<AnimalJoined[]>([]);
 
   useEffect(() => {
-    setAnimals(db.getAnimalsJoined());
+    const refresh = () => setAnimals(db.getAnimalsJoined());
+    refresh();
+
+    window.addEventListener('sisbem-animals-changed', refresh);
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener('sisbem-animals-changed', refresh);
+      window.removeEventListener('storage', refresh);
+    };
   }, []);
 
   const stats = React.useMemo(() => {

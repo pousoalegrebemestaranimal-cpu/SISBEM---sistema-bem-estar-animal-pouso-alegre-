@@ -228,7 +228,7 @@ export function mapAnimalToSupabase(
 
   const validSolId = (existingSolIds && solId) ? (existingSolIds.has(solId) ? solId : null) : solId;
   const validTutorId = (existingTutorIds && tutorId) ? (existingTutorIds.has(tutorId) ? tutorId : null) : tutorId;
-  const validUserRespId = (existingUserIds && userRespId) ? (existingUserIds.has(userRespId) ? userRespId : null) : null;
+  const validUserRespId = (existingUserIds && userRespId) ? (existingUserIds.has(userRespId) ? userRespId : null) : (userRespId || null);
 
   return {
     id: a.id,
@@ -236,10 +236,10 @@ export function mapAnimalToSupabase(
     peso: typeof a.peso === 'number' ? a.peso : parseFloat(String(a.peso || 0)) || 0,
     idade: cleanString(a.idade),
     cor_pelagem: a.corPelagem || 'Não informada',
-    especie: a.especie || Especie.CAO,
-    raca: a.raca || 'SRD',
-    porte: a.porte || Porte.MEDIO,
-    sexo: a.sexo || Sexo.MACHO,
+    especie: normalizeEspecie(a.especie),
+    raca: cleanString(a.raca) || 'SRD',
+    porte: normalizePorte(a.porte),
+    sexo: normalizeSexo(a.sexo),
     castrado: !!a.castrado,
     microchipado: !!a.microchipado,
     numero_microchip: cleanString(a.numeroMicrochip),
@@ -523,22 +523,134 @@ export function mapSupabaseToUser(row: any): any {
 
 export async function syncAnimalToSupabase(animal: Animal) {
   try {
-    const payload = mapAnimalToSupabase(animal);
+    let validSolId: string | null = cleanString(animal.solicitanteId);
+    let validTutorId: string | null = cleanString(animal.tutorId);
+    let validUserId: string | null = cleanString(animal.usuarioResponsavelId);
+
+    // 1. Garante que o solicitante exista no Supabase se houver solicitanteId
+    if (validSolId) {
+      const { data: solExists } = await supabase.from('solicitantes').select('id').eq('id', validSolId).maybeSingle();
+      if (!solExists) {
+        try {
+          const localSolList = JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
+          const localSol = localSolList.find((s: any) => s.id === validSolId);
+          if (localSol) {
+            const solPayload = mapSolicitanteToSupabase(localSol);
+            const { error: solErr } = await supabase.from('solicitantes').upsert([solPayload]);
+            if (solErr) {
+              console.warn('Solicitante não pôde ser sincronizado:', solErr.message);
+              validSolId = null;
+            }
+          } else {
+            validSolId = null;
+          }
+        } catch {
+          validSolId = null;
+        }
+      }
+    }
+
+    // 2. Garante que o tutor exista no Supabase se houver tutorId
+    if (validTutorId) {
+      const { data: tutExists } = await supabase.from('tutores').select('id').eq('id', validTutorId).maybeSingle();
+      if (!tutExists) {
+        try {
+          const localTutList = JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
+          const localTut = localTutList.find((t: any) => t.id === validTutorId);
+          if (localTut) {
+            const tutPayload = mapTutorToSupabase(localTut);
+            const { error: tutErr } = await supabase.from('tutores').upsert([tutPayload]);
+            if (tutErr) {
+              console.warn('Tutor não pôde ser sincronizado:', tutErr.message);
+              validTutorId = null;
+            }
+          } else {
+            validTutorId = null;
+          }
+        } catch {
+          validTutorId = null;
+        }
+      }
+    }
+
+    // 3. Verifica se usuarioResponsavelId existe em users no Supabase
+    if (validUserId) {
+      const { data: userExists } = await supabase.from('users').select('id').eq('id', validUserId).maybeSingle();
+      if (!userExists) {
+        validUserId = null;
+      }
+    }
+
+    const payload = {
+      id: animal.id,
+      nome: animal.nome || 'Sem Nome',
+      peso: typeof animal.peso === 'number' ? animal.peso : parseFloat(String(animal.peso || 0)) || 0,
+      idade: cleanString(animal.idade),
+      cor_pelagem: animal.corPelagem || 'Não informada',
+      especie: normalizeEspecie(animal.especie),
+      raca: cleanString(animal.raca) || 'SRD',
+      porte: normalizePorte(animal.porte),
+      sexo: normalizeSexo(animal.sexo),
+      castrado: !!animal.castrado,
+      microchipado: !!animal.microchipado,
+      numero_microchip: cleanString(animal.numeroMicrochip),
+      tem_tutor: !!animal.temTutor,
+      local_resgate: animal.localResgate || 'Não informado',
+      data_resgate: cleanString(animal.dataResgate) || new Date().toISOString(),
+      motivo: animal.motivo || '',
+      data_cadastro: cleanString(animal.dataCadastro) || new Date().toISOString(),
+      usuario_responsavel_id: validUserId,
+      solicitante_id: validSolId,
+      tutor_id: validTutorId,
+      condicao: animal.condicao || AnimalCondicao.ACOLHIDO,
+      resgate_samuvet: !!animal.resgateSamuvet,
+      responsavel_samuvet: cleanString(animal.responsavelSamuvet),
+      foto: cleanString(animal.foto),
+      data_obito: cleanString(animal.dataObito),
+      causa_obito: cleanString(animal.causaObito),
+      data_soltura: cleanString(animal.dataSoltura),
+      local_soltura: cleanString(animal.localSoltura),
+      data_adocao: cleanString(animal.dataAdocao),
+      adotante_nome: animal.adotante ? cleanString(animal.adotante.nome) : null,
+      adotante_cpf: animal.adotante ? cleanString(animal.adotante.cpf) : null,
+      adotante_telefone: animal.adotante ? cleanString(animal.adotante.telefone) : null,
+      necessita_internacao: !!animal.necessitaInternacao,
+      tipo_acomodacao_sugerida: animal.tipoAcomodacaoSugerida || null,
+      justificativa_internacao: cleanString(animal.justificativaInternacao),
+      data_internacao: cleanString(animal.dataInternacao),
+    };
+
     const { error } = await supabase.from('animals').upsert([payload]);
     if (error) {
-      console.warn('Supabase syncAnimal error:', error.message);
+      console.error('Supabase syncAnimal error:', error.message, error);
       return false;
     }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
+        detail: { action: 'saved', animal }
+      }));
+    }
+
     return true;
   } catch (err) {
-    console.warn('Supabase syncAnimal exception:', err);
+    console.error('Supabase syncAnimal exception:', err);
     return false;
   }
 }
 
 export async function deleteAnimalFromSupabase(animalId: string) {
   try {
-    await supabase.from('animals').delete().eq('id', animalId);
+    const { error } = await supabase.from('animals').delete().eq('id', animalId);
+    if (error) {
+      console.warn('Erro ao deletar animal no Supabase:', error.message);
+      return false;
+    }
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
+        detail: { action: 'deleted', animalId }
+      }));
+    }
     return true;
   } catch (err) {
     return false;
@@ -773,8 +885,16 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
     }
 
     // 5. Animais
-    const existingSolIds = new Set(localSol.map(s => s.id));
-    const existingTutorIds = new Set(localTutores.map(t => t.id));
+    const { data: remoteSol } = await supabase.from('solicitantes').select('id');
+    const existingSolIds = new Set([
+      ...localSol.map(s => s.id),
+      ...(remoteSol || []).map((s: any) => s.id)
+    ]);
+    const { data: remoteTut } = await supabase.from('tutores').select('id');
+    const existingTutorIds = new Set([
+      ...localTutores.map(t => t.id),
+      ...(remoteTut || []).map((t: any) => t.id)
+    ]);
     const localAnimals: Animal[] = dbInstance.getAnimals() || [];
     
     if (localAnimals.length > 0) {
@@ -864,7 +984,7 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
 /**
  * Puxa dados do Supabase e mescla com o armazenamento local
  */
-export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
+export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
   success: boolean;
   syncedCounts: Partial<SyncStats['counts']>;
 }> {
@@ -874,7 +994,9 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
     // 1. Solicitantes
     const { data: remSol } = await supabase.from('solicitantes').select('*');
     if (remSol && remSol.length > 0) {
-      const localSol = dbInstance.getSolicitantes();
+      const localSol = (dbInstance && typeof dbInstance.getSolicitantes === 'function')
+        ? dbInstance.getSolicitantes()
+        : JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
       const map = new Map<string, Solicitante>();
       localSol.forEach((s: Solicitante) => map.set(s.id, s));
       remSol.forEach((r: any) => map.set(r.id, mapSupabaseToSolicitante(r)));
@@ -886,7 +1008,9 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
     // 2. Tutores
     const { data: remTutores } = await supabase.from('tutores').select('*');
     if (remTutores && remTutores.length > 0) {
-      const localTut = dbInstance.getTutores();
+      const localTut = (dbInstance && typeof dbInstance.getTutores === 'function')
+        ? dbInstance.getTutores()
+        : JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
       const map = new Map<string, Tutor>();
       localTut.forEach((t: Tutor) => map.set(t.id, t));
       remTutores.forEach((r: any) => map.set(r.id, mapSupabaseToTutor(r)));
@@ -896,21 +1020,31 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
     }
 
     // 3. Animais
-    const { data: remAnimals } = await supabase.from('animals').select('*');
-    if (remAnimals && remAnimals.length > 0) {
-      const localAnimals = dbInstance.getAnimals();
+    const { data: remAnimals, error: animErr } = await supabase.from('animals').select('*');
+    if (!animErr && remAnimals && remAnimals.length > 0) {
+      const localAnimals = (dbInstance && typeof dbInstance.getAnimals === 'function')
+        ? dbInstance.getAnimals()
+        : JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
       const map = new Map<string, Animal>();
       localAnimals.forEach((a: Animal) => map.set(a.id, a));
       remAnimals.forEach((r: any) => map.set(r.id, mapSupabaseToAnimal(r)));
       const merged = Array.from(map.values());
       localStorage.setItem('sisbem_animals', JSON.stringify(merged));
       syncedCounts.animals = merged.length;
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
+          detail: { source: 'supabase-pull', count: merged.length }
+        }));
+      }
     }
 
     // 4. Cirurgias
     const { data: remCirurgias } = await supabase.from('surgeries').select('*');
     if (remCirurgias && remCirurgias.length > 0) {
-      const localCir = dbInstance.getCirurgias();
+      const localCir = (dbInstance && typeof dbInstance.getCirurgias === 'function')
+        ? dbInstance.getCirurgias()
+        : JSON.parse(localStorage.getItem('sisbem_cirurgias') || '[]');
       const map = new Map<string, AgendamentoCirurgia>();
       localCir.forEach((c: AgendamentoCirurgia) => map.set(c.id, c));
       remCirurgias.forEach((r: any) => map.set(r.id, mapSupabaseToSurgery(r)));
@@ -922,7 +1056,9 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
     // 5. Usuários
     const { data: remUsers } = await supabase.from('users').select('*');
     if (remUsers && remUsers.length > 0) {
-      const localUsers = dbInstance.getUsers() || [];
+      const localUsers = (dbInstance && typeof dbInstance.getUsers === 'function')
+        ? (dbInstance.getUsers() || [])
+        : JSON.parse(localStorage.getItem('sisbem_users') || '[]');
       const map = new Map<string, any>();
       localUsers.forEach((u: any) => map.set(u.id, u));
       remUsers.forEach((r: any) => {
@@ -949,4 +1085,130 @@ export async function pullFromSupabaseToLocal(dbInstance: any): Promise<{
     console.warn('Erro ao puxar dados do Supabase:', err);
     return { success: false, syncedCounts: {} };
   }
+}
+
+let realtimeChannel: any = null;
+let realtimeInitialized = false;
+
+/**
+ * Inicializa a escuta em tempo real (Realtime Channel) do Supabase
+ * Permite que múltiplos usuários visualizem novos animais, cadastros e edições
+ * instantaneamente sem necessidade de recarregar a página manualmente.
+ */
+export function initRealtimeSync(onUpdate?: (table: string, payload: any) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  if (realtimeInitialized && realtimeChannel) return () => {};
+
+  realtimeInitialized = true;
+
+  try {
+    realtimeChannel = supabase.channel('sisbem-realtime-channel')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'animals' },
+        (payload: any) => {
+          try {
+            const localAnimals: Animal[] = JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToAnimal(payload.new);
+              const idx = localAnimals.findIndex(a => a.id === mapped.id);
+              if (idx > -1) {
+                localAnimals[idx] = mapped;
+              } else {
+                localAnimals.unshift(mapped);
+              }
+              localStorage.setItem('sisbem_animals', JSON.stringify(localAnimals));
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                const filtered = localAnimals.filter(a => a.id !== deletedId);
+                localStorage.setItem('sisbem_animals', JSON.stringify(filtered));
+              }
+            }
+
+            window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
+              detail: { type: payload.eventType, data: payload }
+            }));
+
+            if (onUpdate) onUpdate('animals', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de animais:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'solicitantes' },
+        (payload: any) => {
+          try {
+            const list: Solicitante[] = JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToSolicitante(payload.new);
+              const idx = list.findIndex(s => s.id === mapped.id);
+              if (idx > -1) list[idx] = mapped;
+              else list.push(mapped);
+              localStorage.setItem('sisbem_solicitantes', JSON.stringify(list));
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                localStorage.setItem('sisbem_solicitantes', JSON.stringify(list.filter(s => s.id !== deletedId)));
+              }
+            }
+            window.dispatchEvent(new CustomEvent('sisbem-solicitantes-changed'));
+            if (onUpdate) onUpdate('solicitantes', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de solicitantes:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'tutores' },
+        (payload: any) => {
+          try {
+            const list: Tutor[] = JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToTutor(payload.new);
+              const idx = list.findIndex(t => t.id === mapped.id);
+              if (idx > -1) list[idx] = mapped;
+              else list.push(mapped);
+              localStorage.setItem('sisbem_tutores', JSON.stringify(list));
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                localStorage.setItem('sisbem_tutores', JSON.stringify(list.filter(t => t.id !== deletedId)));
+              }
+            }
+            window.dispatchEvent(new CustomEvent('sisbem-tutores-changed'));
+            if (onUpdate) onUpdate('tutores', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de tutores:', e);
+          }
+        }
+      )
+      .subscribe();
+  } catch (err) {
+    console.warn('Erro ao inicializar canal realtime Supabase:', err);
+  }
+
+  // Ao focar na aba do navegador, efetua uma busca rápida por dados novos
+  const handleFocus = () => {
+    pullFromSupabaseToLocal().catch(() => {});
+  };
+  window.addEventListener('focus', handleFocus);
+
+  // Sincronização periódica suave em background a cada 20 segundos
+  const intervalId = setInterval(() => {
+    pullFromSupabaseToLocal().catch(() => {});
+  }, 20000);
+
+  return () => {
+    if (realtimeChannel) {
+      realtimeChannel.unsubscribe();
+      realtimeChannel = null;
+    }
+    realtimeInitialized = false;
+    window.removeEventListener('focus', handleFocus);
+    clearInterval(intervalId);
+  };
 }

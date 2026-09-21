@@ -5,6 +5,7 @@ import * as ReactRouterDOM from 'react-router-dom';
 const { useParams, useNavigate } = ReactRouterDOM as any;
 import { db } from '../services/db';
 import { Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
+import { syncAnimalToSupabase } from '../src/lib/supabaseSync';
 import { validateCPF, formatCPF, formatTelefone } from '../utils/validation';
 import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock } from 'lucide-react';
 
@@ -299,7 +300,7 @@ const AnimalForm: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
 
@@ -330,9 +331,16 @@ const AnimalForm: React.FC = () => {
     try {
       setLoading(true);
       const personaData = isExterno ? tutor : solicitante;
-      db.saveAnimal(animal, personaData, user!.id);
-      setMessage({ type: 'success', text: 'Registro salvo com sucesso!' });
-      setTimeout(() => navigate('/animais'), 1500);
+      const savedAnimal = db.saveAnimal(animal, personaData, user!.id);
+      
+      try {
+        await syncAnimalToSupabase(savedAnimal);
+        setMessage({ type: 'success', text: 'Registro salvo e sincronizado na nuvem com sucesso!' });
+      } catch (syncErr) {
+        setMessage({ type: 'success', text: 'Registro salvo localmente. Sincronização em nuvem em andamento.' });
+      }
+
+      setTimeout(() => navigate('/animais'), 1200);
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Ocorreu um erro ao salvar o registro.' });
     } finally {

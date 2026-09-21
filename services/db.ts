@@ -1556,6 +1556,19 @@ export const db = {
     
     localStorage.setItem(KEYS.ANIMALS, JSON.stringify(animals));
     syncAnimalToSupabase(newAnimal).catch(err => console.warn('Supabase syncAnimal:', err));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed', { detail: { animal: newAnimal } }));
+    }
+    return newAnimal;
+  },
+
+  saveAnimalAsync: async (data: Partial<Animal>, personaData: any, userId: string) => {
+    const newAnimal = db.saveAnimal(data, personaData, userId);
+    try {
+      await syncAnimalToSupabase(newAnimal);
+    } catch (err) {
+      console.warn('Supabase syncAnimal error:', err);
+    }
     return newAnimal;
   },
 
@@ -1575,6 +1588,9 @@ export const db = {
     const cirurgias = db.getCirurgias().filter(c => c.animalId !== id);
     localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
     deleteAnimalFromSupabase(id).catch(err => console.warn('Supabase deleteAnimal:', err));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed', { detail: { deletedId: id } }));
+    }
   },
 
   getCirurgias: (): AgendamentoCirurgia[] => {

@@ -3,6 +3,7 @@ import React, { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { db } from './services/db';
 import { supabase, mapSupabaseUserToAppUser } from './src/lib/supabase';
+import { pullFromSupabaseToLocal, initRealtimeSync } from './src/lib/supabaseSync';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AnimalList from './pages/AnimalList';
@@ -56,11 +57,20 @@ const AppRoutes = () => {
 
 const App: React.FC = () => {
   useEffect(() => {
+    // Sincroniza dados do Supabase imediatamente ao carregar o aplicativo
+    pullFromSupabaseToLocal(db).catch(err => console.warn('Supabase initial pull error:', err));
+
+    // Inicializa a escuta em tempo real (Realtime Channel) para manter todos os usuários conectados em sincronia
+    const cleanupRealtime = initRealtimeSync();
+
     // Restaura sessão existente do Supabase
     supabase.auth.getSession().then(({ data }) => {
       if (data?.session?.user && !db.getCurrentUser()) {
         const appUser = mapSupabaseUserToAppUser(data.session.user);
         db.setCurrentUser(appUser);
+      }
+      if (data?.session?.user) {
+        pullFromSupabaseToLocal(db).catch(() => {});
       }
     });
 
@@ -68,6 +78,7 @@ const App: React.FC = () => {
       if (session?.user) {
         const appUser = mapSupabaseUserToAppUser(session.user);
         db.setCurrentUser(appUser);
+        pullFromSupabaseToLocal(db).catch(() => {});
       } else if (event === 'SIGNED_OUT') {
         db.logout();
       }
@@ -75,6 +86,7 @@ const App: React.FC = () => {
 
     return () => {
       subscription.unsubscribe();
+      cleanupRealtime();
     };
   }, []);
 
