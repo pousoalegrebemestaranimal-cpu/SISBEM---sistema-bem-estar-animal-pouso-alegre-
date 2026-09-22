@@ -1201,7 +1201,23 @@ export const db = {
   getTutores: (): Tutor[] => JSON.parse(localStorage.getItem(KEYS.TUTORES) || '[]'),
   getRecords: (): ClinicalRecord[] => JSON.parse(localStorage.getItem(KEYS.RECORDS) || '[]'),
   getStatusLogs: (): StatusLog[] => JSON.parse(localStorage.getItem(KEYS.STATUS_LOGS) || '[]'),
-  getKennels: (): Kennel[] => JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]'),
+  getKennels: (): Kennel[] => {
+    const raw: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');
+    if (!Array.isArray(raw)) return [];
+    const seenName = new Set<string>();
+    const seenId = new Set<string>();
+    const deduplicated: Kennel[] = [];
+    for (const k of raw) {
+      if (!k || !k.id || !k.name) continue;
+      const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
+      if (!seenName.has(key) && !seenId.has(k.id)) {
+        seenName.add(key);
+        seenId.add(k.id);
+        deduplicated.push(k);
+      }
+    }
+    return deduplicated;
+  },
   getOccupations: (): KennelOccupation[] => JSON.parse(localStorage.getItem(KEYS.OCCUPATIONS) || '[]'),
   getKennelConfigs: (): KennelConfig[] => {
     const stored = localStorage.getItem(KEYS.KENNEL_CONFIGS);
@@ -1322,28 +1338,41 @@ export const db = {
   },
 
   syncKennelsWithConfigs: (configs: KennelConfig[]) => {
-    const kennels: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');
+    const rawKennels: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');
+    const occupations: KennelOccupation[] = JSON.parse(localStorage.getItem(KEYS.OCCUPATIONS) || '[]');
+    const activeOccKennelIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.kennelId));
+
     const newKennels: Kennel[] = [];
 
     configs.forEach(cfg => {
-      const currentByType = kennels.filter(k => k.type === cfg.type);
-      const updatedExisting = currentByType.map(k => ({
-        ...k,
-        capacity: cfg.capacity
-      }));
+      const currentByType = rawKennels.filter(k => k.type === cfg.type);
+      const byName = new Map<string, Kennel>();
+      currentByType.forEach(k => {
+        const key = k.name.trim().toLowerCase();
+        if (!byName.has(key) || activeOccKennelIds.has(k.id)) {
+          byName.set(key, k);
+        }
+      });
 
-      if (updatedExisting.length < cfg.count) {
-        newKennels.push(...updatedExisting);
-        for (let i = updatedExisting.length + 1; i <= cfg.count; i++) {
+      for (let i = 1; i <= cfg.count; i++) {
+        const expectedName = `${cfg.type} ${i.toString().padStart(2, '0')}`;
+        const key = expectedName.toLowerCase();
+        const existing = byName.get(key);
+
+        if (existing) {
           newKennels.push({
-            id: crypto.randomUUID(),
-            name: `${cfg.type} ${i.toString().padStart(2, '0')}`,
+            ...existing,
+            name: expectedName,
+            capacity: cfg.capacity
+          });
+        } else {
+          newKennels.push({
+            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `k-${cfg.type.toLowerCase().replace(/[^a-z0-9]/g, '')}-${i}`,
+            name: expectedName,
             type: cfg.type,
             capacity: cfg.capacity
           });
         }
-      } else {
-        newKennels.push(...updatedExisting.slice(0, cfg.count));
       }
     });
 

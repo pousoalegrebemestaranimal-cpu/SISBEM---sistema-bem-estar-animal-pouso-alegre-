@@ -2,19 +2,104 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { db } from '../services/db';
 import { KennelType, Kennel, KennelOccupation, AnimalJoined, AnimalCondicao } from '../types';
-import { Home, Users, Search, AlertTriangle, CheckCircle, ArrowRightLeft, User, ClipboardCheck, ArrowRight, Save, Info, Printer, History, LogOut, Layers, X, Check, Filter, RotateCw } from 'lucide-react';
+import { 
+  Home, Users, Search, AlertTriangle, CheckCircle, ArrowRightLeft, User, 
+  ClipboardCheck, ArrowRight, Save, Info, Printer, History, LogOut, Layers, 
+  X, Check, Filter, RotateCw, Dog, Cat, Plus, ChevronDown, ChevronUp, BedDouble, 
+  Sparkles, CheckCircle2 
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 
+export const SECTOR_META: Record<KennelType, {
+  name: string;
+  subtitle: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  colorText: string;
+  colorBg: string;
+  colorBorder: string;
+  colorBadge: string;
+}> = {
+  [KennelType.GATIL]: {
+    name: 'Gatil / Acomodação Felina',
+    subtitle: 'Acomodações verticais com prateleiras e enriquecimento ambiental exclusivo para felinos',
+    icon: Cat,
+    colorText: 'text-purple-700',
+    colorBg: 'bg-purple-50/60',
+    colorBorder: 'border-purple-200',
+    colorBadge: 'bg-purple-100 text-purple-800 border-purple-200'
+  },
+  [KennelType.INDIVIDUAL]: {
+    name: 'Baias Individuais',
+    subtitle: 'Canis individuais para recuperação, isolamento leve e animais em tratamento clínico',
+    icon: Home,
+    colorText: 'text-blue-700',
+    colorBg: 'bg-blue-50/60',
+    colorBorder: 'border-blue-200',
+    colorBadge: 'bg-blue-100 text-blue-800 border-blue-200'
+  },
+  [KennelType.COLETIVA]: {
+    name: 'Baias Coletivas',
+    subtitle: 'Canis compartilhados com solário para socialização e recreação de cães dóceis',
+    icon: Users,
+    colorText: 'text-indigo-700',
+    colorBg: 'bg-indigo-50/60',
+    colorBorder: 'border-indigo-200',
+    colorBadge: 'bg-indigo-100 text-indigo-800 border-indigo-200'
+  },
+  [KennelType.QUARENTENA]: {
+    name: 'Quarentena / Isolamento',
+    subtitle: 'Setor de biossegurança restrita para doenças infectocontagiosas e suspeitas epidemiológicas',
+    icon: AlertTriangle,
+    colorText: 'text-amber-700',
+    colorBg: 'bg-amber-50/60',
+    colorBorder: 'border-amber-200',
+    colorBadge: 'bg-amber-100 text-amber-800 border-amber-200'
+  },
+  [KennelType.PRE_OPERATORIO]: {
+    name: 'Pré-Operatório',
+    subtitle: 'Preparo cirúrgico imediato, monitoramento de jejum e triagem anestésica',
+    icon: ClipboardCheck,
+    colorText: 'text-rose-700',
+    colorBg: 'bg-rose-50/60',
+    colorBorder: 'border-rose-200',
+    colorBadge: 'bg-rose-100 text-rose-800 border-rose-200'
+  },
+  [KennelType.POS_OPERATORIO]: {
+    name: 'Pós-Operatório',
+    subtitle: 'Recuperação pós-cirúrgica assistida, analgesia contínua e controle de despertar anestésico',
+    icon: CheckCircle,
+    colorText: 'text-emerald-700',
+    colorBg: 'bg-emerald-50/60',
+    colorBorder: 'border-emerald-200',
+    colorBadge: 'bg-emerald-100 text-emerald-800 border-emerald-200'
+  }
+};
+
 const AccommodationDashboard: React.FC = () => {
   const [filterType, setFilterType] = useState<string>('TODOS');
+  const [statusFilter, setStatusFilter] = useState<'TODAS' | 'LIVRES' | 'OCUPADAS' | 'LOTADAS'>('TODAS');
   const [searchTerm, setSearchTerm] = useState('');
   const [allocatingAnimal, setAllocatingAnimal] = useState<AnimalJoined | null>(null);
   const [selectedKennelId, setSelectedKennelId] = useState('');
   const [justification, setJustification] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Alocação a partir do clique direto na baia
+  const [targetKennelForAllocation, setTargetKennelForAllocation] = useState<Kennel | null>(null);
+  const [selectedAnimalIdToAllocate, setSelectedAnimalIdToAllocate] = useState<string>('');
+
+  // Controle de setores recolhidos (collapse)
+  const [collapsedSectors, setCollapsedSectors] = useState<Record<string, boolean>>({});
+
+  const toggleSectorCollapse = (type: string) => {
+    setCollapsedSectors(prev => ({
+      ...prev,
+      [type]: !prev[type]
+    }));
+  };
 
   // Estados para modal de impressão de tratamentos
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
@@ -87,34 +172,162 @@ const AccommodationDashboard: React.FC = () => {
     );
   }, [allAnimals, occupations]);
 
+  // Animais aptos para serem alocados em baia (sem acomodação ativa)
+  const unaccommodatedAnimals = useMemo(() => {
+    const activeAnimalIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.animalId));
+    return allAnimals.filter(a => 
+      !activeAnimalIds.has(a.id) && 
+      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO].includes(a.condicao)
+    );
+  }, [allAnimals, occupations]);
+
+  // DEDUPLICAÇÃO ESTRITA: Garante que cada baia aparece exatamente 1 vez, ordenada alfanumericamente por número
+  const uniqueKennels = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Kennel[] = [];
+    for (const k of kennels) {
+      if (!k || !k.id || !k.name) continue;
+      const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        list.push(k);
+      }
+    }
+    return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  }, [kennels]);
+
+  const getKennelData = (kennelId: string) => {
+    const activeOccs = occupations.filter(o => o.kennelId === kennelId && !o.exitDate);
+    const occupants = activeOccs.map(o => allAnimals.find(a => a.id === o.animalId)).filter(Boolean) as AnimalJoined[];
+    return { count: activeOccs.length, occupants, activeOccs };
+  };
+
+  const globalSummary = useMemo(() => {
+    const totalKennels = uniqueKennels.length;
+    const totalCapacity = uniqueKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
+    const activeOccs = occupations.filter(o => !o.exitDate);
+    const totalOccupied = activeOccs.length;
+    const totalFree = Math.max(0, totalCapacity - totalOccupied);
+    const overallPercent = totalCapacity > 0 ? Math.round((totalOccupied / totalCapacity) * 100) : 0;
+    return { totalKennels, totalCapacity, totalOccupied, totalFree, overallPercent };
+  }, [uniqueKennels, occupations]);
+
   const stats = useMemo(() => {
-    const data = Object.values(KennelType).map(type => {
-      const typeKennels = kennels.filter(k => k.type === type);
+    return Object.values(KennelType).map(type => {
+      const typeKennels = uniqueKennels.filter(k => k.type === type);
       const typeOccupations = occupations.filter(o => !o.exitDate && typeKennels.some(k => k.id === o.kennelId));
-      const totalCapacity = typeKennels.reduce((acc, k) => acc + k.capacity, 0);
+      const totalCapacity = typeKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
       return {
         type,
         total: typeKennels.length,
         capacity: totalCapacity,
         occupied: typeOccupations.length,
+        available: Math.max(0, totalCapacity - typeOccupations.length),
         percent: totalCapacity > 0 ? (typeOccupations.length / totalCapacity) * 100 : 0
       };
     });
-    return data;
-  }, [kennels, occupations]);
+  }, [uniqueKennels, occupations]);
 
   const filteredKennels = useMemo(() => {
-    return kennels.filter(k => {
+    return uniqueKennels.filter(k => {
       const matchType = filterType === 'TODOS' || k.type === filterType;
-      const matchSearch = k.name.toLowerCase().includes(searchTerm.toLowerCase());
-      return matchType && matchSearch;
-    });
-  }, [kennels, filterType, searchTerm]);
+      
+      const { count, occupants } = getKennelData(k.id);
+      
+      // Filtro de status
+      let matchStatus = true;
+      if (statusFilter === 'LIVRES') {
+        matchStatus = count === 0;
+      } else if (statusFilter === 'OCUPADAS') {
+        matchStatus = count > 0;
+      } else if (statusFilter === 'LOTADAS') {
+        matchStatus = count >= k.capacity;
+      }
 
-  const getKennelData = (kennelId: string) => {
-    const activeOccs = occupations.filter(o => o.kennelId === kennelId && !o.exitDate);
-    const occupants = activeOccs.map(o => allAnimals.find(a => a.id === o.animalId)).filter(Boolean);
-    return { count: activeOccs.length, occupants };
+      // Busca por nome/número da baia OU nome do animal alojado
+      let matchSearch = true;
+      if (searchTerm.trim()) {
+        const query = searchTerm.toLowerCase().trim();
+        const matchesBaia = k.name.toLowerCase().includes(query) || (k.type && k.type.toLowerCase().includes(query));
+        const matchesAnimal = occupants.some(a => a && a.nome && a.nome.toLowerCase().includes(query));
+        matchSearch = matchesBaia || matchesAnimal;
+      }
+
+      return matchType && matchStatus && matchSearch;
+    });
+  }, [uniqueKennels, filterType, statusFilter, searchTerm, occupations, allAnimals]);
+
+  // Agrupamento ordenado por setor oficial
+  const groupedKennels = useMemo(() => {
+    const order = [
+      KennelType.GATIL,
+      KennelType.INDIVIDUAL,
+      KennelType.COLETIVA,
+      KennelType.QUARENTENA,
+      KennelType.PRE_OPERATORIO,
+      KennelType.POS_OPERATORIO
+    ];
+    const map = new Map<KennelType, Kennel[]>();
+    order.forEach(t => map.set(t, []));
+    filteredKennels.forEach(k => {
+      const list = map.get(k.type as KennelType);
+      if (list) list.push(k);
+      else {
+        if (!map.has(k.type as any)) map.set(k.type as any, []);
+        map.get(k.type as any)!.push(k);
+      }
+    });
+    return map;
+  }, [filteredKennels]);
+
+  const handleQuickAllocate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!allocatingAnimal || !selectedKennelId) return;
+
+    try {
+      await db.allocateAnimalAsync({
+        kennelId: selectedKennelId,
+        animalId: allocatingAnimal.id,
+        vetId: user!.id,
+        justification: justification || 'Alocação via Fila de Acomodação'
+      });
+      setAllocatingAnimal(null);
+      setSelectedKennelId('');
+      setJustification('');
+      refreshData();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleAllocateToSpecificKennel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetKennelForAllocation || !selectedAnimalIdToAllocate) return;
+
+    try {
+      await db.allocateAnimalAsync({
+        kennelId: targetKennelForAllocation.id,
+        animalId: selectedAnimalIdToAllocate,
+        vetId: user!.id,
+        justification: justification || `Alocação manual na ${targetKennelForAllocation.name}`
+      });
+      setTargetKennelForAllocation(null);
+      setSelectedAnimalIdToAllocate('');
+      setJustification('');
+      refreshData();
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const handleRelease = async (animalId: string, animalName: string) => {
+    if (!window.confirm(`Tem certeza que deseja desalocar o animal ${animalName} desta baia?`)) return;
+    try {
+      await db.releaseAnimalFromKennelAsync(animalId);
+      refreshData();
+    } catch (err: any) {
+      alert(err.message);
+    }
   };
 
   const KENNEL_TYPE_PRINT_OPTIONS = [
@@ -172,36 +385,6 @@ const AccommodationDashboard: React.FC = () => {
 
     return counts;
   }, [allAnimals]);
-
-  const handleQuickAllocate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!allocatingAnimal || !selectedKennelId) return;
-
-    try {
-      await db.allocateAnimalAsync({
-        kennelId: selectedKennelId,
-        animalId: allocatingAnimal.id,
-        vetId: user!.id,
-        justification: justification || 'Alocação via Fila de Acomodação'
-      });
-      setAllocatingAnimal(null);
-      setSelectedKennelId('');
-      setJustification('');
-      refreshData();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
-
-  const handleRelease = async (animalId: string, animalName: string) => {
-    if (!window.confirm(`Tem certeza que deseja desalocar o animal ${animalName} desta baia?`)) return;
-    try {
-      await db.releaseAnimalFromKennelAsync(animalId);
-      refreshData();
-    } catch (err: any) {
-      alert(err.message);
-    }
-  };
 
   const handlePrintTreatmentSheet = (selectedType: string = printKennelTypeFilter, onlyTreatment: boolean = printOnlyActiveTreatment) => {
     const freshAnimals = db.getAnimalsJoined();
@@ -1225,109 +1408,784 @@ const AccommodationDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Estatísticas Rápidas */}
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        {stats.map(s => (
-          <div key={s.type} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
-            <div className="flex justify-between items-start">
-              <p className="text-[10px] font-black uppercase text-slate-400 leading-none">{s.type}</p>
-              {s.percent >= 90 ? <AlertTriangle size={14} className="text-red-500" /> : <CheckCircle size={14} className="text-emerald-500" />}
-            </div>
-            <div>
-              <p className="text-xl font-bold text-slate-900">{s.occupied}/{s.capacity}</p>
-              <div className="w-full bg-slate-100 h-1.5 rounded-full mt-1 overflow-hidden">
-                <div 
-                  className={`h-full rounded-full transition-all duration-500 ${s.percent >= 90 ? 'bg-red-500' : s.percent >= 70 ? 'bg-amber-500' : 'bg-emerald-500'}`} 
-                  style={{ width: `${s.percent}%` }} 
-                />
-              </div>
-            </div>
+      {/* 1. Indicadores Globais do Centro */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
+        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-1">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Total de Baias</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-black text-slate-900">{globalSummary.totalKennels}</span>
+            <span className="text-xs font-semibold text-slate-500">unidades cadastradas</span>
           </div>
-        ))}
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-1">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Capacidade Configurada</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-black text-indigo-700">{globalSummary.totalCapacity}</span>
+            <span className="text-xs font-semibold text-slate-500">vagas totais</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-1">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Animais Alojados</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-black text-teal-700">{globalSummary.totalOccupied}</span>
+            <span className="text-xs font-semibold text-slate-500">pacientes no centro</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-1">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Vagas Livres</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-black text-emerald-600">{globalSummary.totalFree}</span>
+            <span className="text-xs font-semibold text-slate-500">vagas disponíveis</span>
+          </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-xs space-y-1 col-span-2 sm:col-span-1">
+          <div className="flex justify-between items-center">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Ocupação Geral</p>
+            <span className="text-xs font-black text-slate-700">{globalSummary.overallPercent}%</span>
+          </div>
+          <div className="w-full bg-slate-100 h-2.5 rounded-full mt-2 overflow-hidden">
+            <div 
+              className={`h-full rounded-full transition-all duration-500 ${
+                globalSummary.overallPercent >= 90 ? 'bg-rose-500' : globalSummary.overallPercent >= 70 ? 'bg-amber-500' : 'bg-teal-600'
+              }`}
+              style={{ width: `${Math.min(100, globalSummary.overallPercent)}%` }}
+            />
+          </div>
+        </div>
       </div>
 
-      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-4 items-center">
-        <div className="relative flex-1 w-full">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+      {/* 2. Barra de Navegação por Setor (Tabs com badges de lotação) */}
+      <div className="bg-white p-2.5 rounded-2xl border border-slate-200 shadow-xs overflow-x-auto">
+        <div className="flex items-center gap-1.5 min-w-max">
+          <button
+            type="button"
+            onClick={() => setFilterType('TODOS')}
+            className={`px-4 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+              filterType === 'TODOS'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <Layers size={14} />
+            <span>Todos os Setores</span>
+            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${filterType === 'TODOS' ? 'bg-slate-800 text-teal-300' : 'bg-slate-200 text-slate-700'}`}>
+              {uniqueKennels.length}
+            </span>
+          </button>
+
+          {stats.map(s => {
+            const meta = SECTOR_META[s.type];
+            const Icon = meta?.icon || Home;
+            const isSelected = filterType === s.type;
+            return (
+              <button
+                key={s.type}
+                type="button"
+                onClick={() => setFilterType(s.type)}
+                className={`px-3.5 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer ${
+                  isSelected
+                    ? `${meta?.colorBg || 'bg-slate-100'} ${meta?.colorText || 'text-slate-900'} ring-2 ring-current shadow-xs`
+                    : 'text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                <Icon size={14} className={meta?.colorText || 'text-slate-600'} />
+                <span>{s.type}</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                  s.occupied >= s.capacity && s.capacity > 0
+                    ? 'bg-rose-100 text-rose-700'
+                    : s.occupied > 0
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-emerald-100 text-emerald-800'
+                }`}>
+                  {s.occupied}/{s.capacity}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 3. Toolbar de Filtros: Status e Pesquisa Inteligente */}
+      <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 flex flex-col md:flex-row gap-3.5 items-stretch md:items-center justify-between">
+        {/* Campo de Busca Rápida */}
+        <div className="relative flex-1">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={17} />
           <input 
             type="text" 
-            placeholder="Buscar baia pelo nome..." 
-            className="w-full pl-10 pr-4 py-2 bg-slate-50 border rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm" 
+            placeholder="Buscar baia pelo número/nome ou pesquisar por animal alojado..." 
+            className="w-full pl-10 pr-9 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-teal-500 transition-all text-xs font-medium placeholder:text-slate-400 text-slate-900" 
             value={searchTerm} 
             onChange={e => setSearchTerm(e.target.value)} 
           />
+          {searchTerm && (
+            <button 
+              type="button"
+              onClick={() => setSearchTerm('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
-        <select 
-          className="bg-slate-50 border rounded-lg px-3 py-1.5 text-xs font-bold uppercase" 
-          value={filterType} 
-          onChange={e => setFilterType(e.target.value)}
-        >
-          <option value="TODOS">Todos os Tipos</option>
-          {Object.values(KennelType).map(t => <option key={t} value={t}>{t}</option>)}
-        </select>
+
+        {/* Filtros de Ocupação */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1 hidden sm:inline">Status:</span>
+          {(['TODAS', 'LIVRES', 'OCUPADAS', 'LOTADAS'] as const).map(st => (
+            <button
+              key={st}
+              type="button"
+              onClick={() => setStatusFilter(st)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                statusFilter === st
+                  ? 'bg-teal-600 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              {st === 'TODAS' && `Todas (${filteredKennels.length})`}
+              {st === 'LIVRES' && '🟢 Livres'}
+              {st === 'OCUPADAS' && '🟡 Ocupadas'}
+              {st === 'LOTADAS' && '🔴 Lotadas'}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-        {filteredKennels.map(kennel => {
-          const { count, occupants } = getKennelData(kennel.id);
-          const isFull = count >= kennel.capacity;
-          return (
-            <div key={kennel.id} className={`p-4 rounded-xl border-2 transition-all hover:shadow-md ${isFull ? 'bg-red-50 border-red-100' : count > 0 ? 'bg-amber-50 border-amber-100' : 'bg-white border-slate-100'}`}>
-              <div className="flex justify-between items-start mb-3">
-                <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded ${isFull ? 'bg-red-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
-                  {kennel.type}
-                </span>
-                <span className="text-[10px] font-bold text-slate-400">Cap: {kennel.capacity}</span>
+      {/* 4. Grade de Baias Organizadas com Capacidade Configurada e Animais Alojados */}
+      {filteredKennels.length === 0 ? (
+        <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center space-y-3 shadow-xs">
+          <AlertTriangle size={32} className="mx-auto text-amber-500" />
+          <h4 className="text-base font-bold text-slate-800">Nenhuma baia encontrada</h4>
+          <p className="text-xs text-slate-500 max-w-md mx-auto">
+            Nenhuma acomodação corresponde aos filtros selecionados. Tente limpar os filtros de status ou a busca.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setFilterType('TODOS');
+              setStatusFilter('TODAS');
+              setSearchTerm('');
+            }}
+            className="px-4 py-2 bg-teal-600 text-white text-xs font-bold rounded-xl hover:bg-teal-700 transition-colors cursor-pointer"
+          >
+            Limpar Todos os Filtros
+          </button>
+        </div>
+      ) : filterType === 'TODOS' ? (
+        /* Visualização Completa: Organizada por Setores Individuais */
+        <div className="space-y-8">
+          {Array.from(groupedKennels.entries()).map(([sectorType, kennelsInSector]) => {
+            if (kennelsInSector.length === 0) return null;
+            const meta = SECTOR_META[sectorType];
+            const SectorIcon = meta?.icon || Home;
+            const isCollapsed = !!collapsedSectors[sectorType];
+            const sectorStats = stats.find(s => s.type === sectorType);
+
+            return (
+              <div key={sectorType} className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden space-y-0">
+                {/* Banner do Setor */}
+                <div 
+                  onClick={() => toggleSectorCollapse(sectorType)}
+                  className={`p-4 sm:p-5 ${meta?.colorBg || 'bg-slate-50'} border-b border-slate-200/80 flex items-center justify-between cursor-pointer select-none transition-colors hover:bg-opacity-80`}
+                >
+                  <div className="flex items-center gap-3.5">
+                    <div className={`p-2.5 rounded-xl bg-white shadow-xs border ${meta?.colorBorder || 'border-slate-200'} ${meta?.colorText || 'text-slate-800'}`}>
+                      <SectorIcon size={20} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className={`text-base font-black ${meta?.colorText || 'text-slate-900'}`}>
+                          {meta?.name || sectorType}
+                        </h3>
+                        <span className="text-xs font-bold text-slate-500">
+                          ({kennelsInSector.length} {kennelsInSector.length === 1 ? 'baia' : 'baias'})
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 font-medium line-clamp-1 mt-0.5">
+                        {meta?.subtitle}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    {sectorStats && (
+                      <div className="hidden md:flex items-center gap-2 text-xs font-bold text-slate-700 bg-white/80 px-3 py-1.5 rounded-xl border border-slate-200/60 shadow-2xs">
+                        <span>Capacidade: <strong>{sectorStats.capacity}</strong> vagas</span>
+                        <span>•</span>
+                        <span className={sectorStats.occupied >= sectorStats.capacity ? 'text-rose-600' : 'text-teal-700'}>
+                          Ocupadas: <strong>{sectorStats.occupied}</strong>
+                        </span>
+                        <span>•</span>
+                        <span className="text-emerald-600">
+                          Livres: <strong>{sectorStats.available}</strong>
+                        </span>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="p-1.5 rounded-lg bg-white/90 text-slate-600 border border-slate-200 hover:bg-white transition-colors"
+                      title={isCollapsed ? 'Expandir setor' : 'Recolher setor'}
+                    >
+                      {isCollapsed ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Grid de Baias do Setor */}
+                {!isCollapsed && (
+                  <div className="p-4 sm:p-5 bg-slate-50/30">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+                      {kennelsInSector.map(kennel => {
+                        const { count, occupants } = getKennelData(kennel.id);
+                        const capacity = kennel.capacity || 1;
+                        const isFull = count >= capacity;
+                        const isPartial = count > 0 && count < capacity;
+                        const availableSlots = Math.max(0, capacity - count);
+
+                        return (
+                          <div 
+                            key={kennel.id} 
+                            className={`rounded-2xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-xs hover:shadow-md ${
+                              isFull 
+                                ? 'bg-rose-50/40 border-rose-200' 
+                                : isPartial 
+                                ? 'bg-amber-50/30 border-amber-200' 
+                                : 'bg-white border-slate-200 hover:border-slate-300'
+                            }`}
+                          >
+                            {/* Cabeçalho da Baia */}
+                            <div className="p-3.5 border-b border-slate-100 space-y-2.5">
+                              <div className="flex items-start justify-between gap-1.5">
+                                <div>
+                                  <span className={`inline-flex items-center gap-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-md border ${meta?.colorBadge || 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                                    <SectorIcon size={10} />
+                                    <span>{kennel.type}</span>
+                                  </span>
+                                  <h4 className="font-black text-slate-900 text-sm mt-1">
+                                    {kennel.name}
+                                  </h4>
+                                </div>
+
+                                <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full shrink-0 ${
+                                  isFull
+                                    ? 'bg-rose-600 text-white'
+                                    : isPartial
+                                    ? 'bg-amber-500 text-white'
+                                    : 'bg-emerald-600 text-white'
+                                }`}>
+                                  {isFull ? 'Lotada' : isPartial ? 'Ocupada' : 'Livre'}
+                                </span>
+                              </div>
+
+                              {/* Bloco de Capacidade Configurada */}
+                              <div className="bg-slate-50/90 p-2 rounded-xl border border-slate-100 space-y-1.5 text-xs">
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="font-bold text-slate-500">Capacidade Configurada:</span>
+                                  <span className="font-black text-slate-800">
+                                    {capacity} {capacity === 1 ? 'vaga' : 'vagas'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="text-slate-500 font-medium">Disponibilidade:</span>
+                                  <span className={`font-black ${isFull ? 'text-rose-600' : isPartial ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                    {count}/{capacity} ({availableSlots} livre{availableSlots === 1 ? '' : 's'})
+                                  </span>
+                                </div>
+
+                                {/* Barra de ocupação */}
+                                <div className="w-full bg-slate-200/80 h-1.5 rounded-full overflow-hidden">
+                                  <div 
+                                    className={`h-full rounded-full transition-all duration-300 ${
+                                      isFull ? 'bg-rose-500' : isPartial ? 'bg-amber-500' : 'bg-emerald-500'
+                                    }`}
+                                    style={{ width: `${Math.min(100, (count / capacity) * 100)}%` }}
+                                  />
+                                </div>
+
+                                {/* Cápsulas individuais de cada vaga */}
+                                <div className="pt-0.5 flex flex-wrap gap-1">
+                                  {Array.from({ length: capacity }).map((_, slotIdx) => {
+                                    const resident = occupants[slotIdx];
+                                    if (resident) {
+                                      return (
+                                        <div 
+                                          key={slotIdx}
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-[9px] font-bold text-indigo-900 truncate max-w-full"
+                                          title={`Vaga ${slotIdx + 1} ocupada por ${resident.nome}`}
+                                        >
+                                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
+                                          <span className="truncate">{resident.nome}</span>
+                                        </div>
+                                      );
+                                    }
+                                    return (
+                                      <div 
+                                        key={slotIdx}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-dashed border-slate-300 text-[9px] font-medium text-slate-400"
+                                        title={`Vaga ${slotIdx + 1} disponível`}
+                                      >
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                                        <span>Livre</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Animais Alojados nesta Baia */}
+                            <div className="p-3 space-y-2 flex-1 flex flex-col justify-between">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                  <span>Alojados ({count})</span>
+                                  {availableSlots > 0 && user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setTargetKennelForAllocation(kennel);
+                                        setSelectedAnimalIdToAllocate('');
+                                        setJustification(`Alocação na ${kennel.name}`);
+                                      }}
+                                      className="text-teal-600 hover:text-teal-700 flex items-center gap-0.5 font-bold cursor-pointer"
+                                    >
+                                      <Plus size={11} /> Alocar
+                                    </button>
+                                  )}
+                                </div>
+
+                                {count === 0 ? (
+                                  <div className="p-2.5 bg-emerald-50/50 border border-emerald-100 rounded-xl text-center space-y-1.5">
+                                    <p className="text-[11px] text-emerald-800 font-medium">
+                                      Baia livre e pronta.
+                                    </p>
+                                    {user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setTargetKennelForAllocation(kennel);
+                                          setSelectedAnimalIdToAllocate('');
+                                          setJustification(`Alocação na ${kennel.name}`);
+                                        }}
+                                        className="w-full py-1 px-2 bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-lg text-[10px] font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                                      >
+                                        <Plus size={11} /> Alocar Animal
+                                      </button>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="space-y-1.5">
+                                    {occupants.map((occ, idx) => {
+                                      if (!occ) return null;
+                                      const isCat = occ.especie?.toUpperCase().includes('GATO') || occ.especie?.toUpperCase().includes('FEL');
+                                      const AnimalIcon = isCat ? Cat : Dog;
+
+                                      return (
+                                        <div 
+                                          key={occ.id || idx} 
+                                          className="p-2 bg-white border border-slate-200 rounded-xl shadow-2xs space-y-1 transition-all hover:border-slate-300"
+                                        >
+                                          <div className="flex items-start justify-between gap-1">
+                                            <Link 
+                                              to={`/animais/ficha/${occ.id}`}
+                                              className="flex items-center gap-1.5 hover:text-teal-600 transition-colors truncate flex-1 min-w-0"
+                                              title="Ver ficha do animal"
+                                            >
+                                              <div className="w-5 h-5 rounded-md bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-700 shrink-0">
+                                                <AnimalIcon size={11} />
+                                              </div>
+                                              <div className="truncate">
+                                                <p className="font-extrabold text-slate-900 text-xs truncate">
+                                                  {occ.nome}
+                                                </p>
+                                                <p className="text-[9px] text-slate-500 font-medium truncate">
+                                                  {occ.especie} • {occ.sexo || 'Indef.'}
+                                                </p>
+                                              </div>
+                                            </Link>
+
+                                            {user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                                              <div className="flex items-center gap-0.5 shrink-0">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => {
+                                                    setAllocatingAnimal(occ);
+                                                    setSelectedKennelId('');
+                                                    setJustification(`Transferência de baia para melhor manejo.`);
+                                                  }}
+                                                  className="p-1 hover:bg-slate-100 rounded text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+                                                  title="Transferir para outra baia"
+                                                >
+                                                  <ArrowRightLeft size={11} />
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleRelease(occ.id, occ.nome)}
+                                                  className="p-1 hover:bg-rose-50 rounded text-rose-500 hover:text-rose-700 transition-colors cursor-pointer"
+                                                  title="Desalocar"
+                                                >
+                                                  <LogOut size={11} />
+                                                </button>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                                            <span className="text-[8px] font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-100">
+                                              {occ.condicao}
+                                            </span>
+                                            {occ.temTutor && (
+                                              <span className="text-[8px] font-black px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                                Tutor
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+
+                              {isPartial && availableSlots > 0 && user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setTargetKennelForAllocation(kennel);
+                                    setSelectedAnimalIdToAllocate('');
+                                    setJustification(`Alocação de companheiro na ${kennel.name}`);
+                                  }}
+                                  className="w-full mt-2 py-1 px-2 bg-amber-50 border border-amber-200 text-amber-800 hover:bg-amber-600 hover:text-white rounded-lg text-[10px] font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                                >
+                                  <Plus size={11} /> +{availableSlots} vaga{availableSlots > 1 ? 's' : ''} disponível{availableSlots > 1 ? 'is' : ''}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
-              <h4 className="font-bold text-slate-900 text-sm mb-1">{kennel.name}</h4>
-              <p className="text-[10px] text-slate-500 font-medium mb-4">
-                {count === 0 ? 'Disponível' : `${count} ocupante(s)`}
-              </p>
-              
-              <div className="space-y-1.5">
-                {occupants.map(occ => {
-                  if (!occ) return null;
-                  return (
-                    <div key={occ.id} className="flex items-center justify-between gap-1 p-1.5 bg-white border border-slate-200 rounded-lg text-[10px] font-bold text-slate-700">
-                      <Link 
-                        to={`/animais/ficha/${occ.id}`}
-                        className="flex items-center gap-1.5 hover:text-teal-600 transition-colors truncate flex-1"
-                        title="Ver Ficha"
-                      >
-                        <User size={10} className="text-teal-600 shrink-0" />
-                        <span className="truncate">{occ.nome}</span>
-                      </Link>
-                      
-                      {user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            onClick={() => {
-                              setAllocatingAnimal(occ);
-                              setSelectedKennelId('');
-                              setJustification(`Transferência de baia para melhor manejo.`);
-                            }}
-                            className="p-1 hover:bg-slate-100 rounded text-indigo-600 hover:text-indigo-800 transition-colors"
-                            title="Trocar de Baia"
+            );
+          })}
+        </div>
+      ) : (
+        /* Visualização de Setor Específico */
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          {filteredKennels.map(kennel => {
+            const meta = SECTOR_META[kennel.type as KennelType];
+            const SectorIcon = meta?.icon || Home;
+            const { count, occupants } = getKennelData(kennel.id);
+            const capacity = kennel.capacity || 1;
+            const isFull = count >= capacity;
+            const isPartial = count > 0 && count < capacity;
+            const availableSlots = Math.max(0, capacity - count);
+
+            return (
+              <div 
+                key={kennel.id} 
+                className={`rounded-2xl border transition-all duration-200 flex flex-col justify-between overflow-hidden shadow-xs hover:shadow-md ${
+                  isFull 
+                    ? 'bg-rose-50/40 border-rose-200' 
+                    : isPartial 
+                    ? 'bg-amber-50/30 border-amber-200' 
+                    : 'bg-white border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                {/* Cabeçalho da Baia */}
+                <div className="p-4 border-b border-slate-100 space-y-2.5">
+                  <div className="flex items-start justify-between gap-1.5">
+                    <div>
+                      <span className={`inline-flex items-center gap-1 text-[9px] font-black uppercase px-2 py-0.5 rounded-md border ${meta?.colorBadge || 'bg-slate-100 text-slate-700 border-slate-200'}`}>
+                        <SectorIcon size={10} />
+                        <span>{kennel.type}</span>
+                      </span>
+                      <h4 className="font-black text-slate-900 text-sm mt-1">
+                        {kennel.name}
+                      </h4>
+                    </div>
+
+                    <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full shrink-0 ${
+                      isFull
+                        ? 'bg-rose-600 text-white'
+                        : isPartial
+                        ? 'bg-amber-500 text-white'
+                        : 'bg-emerald-600 text-white'
+                    }`}>
+                      {isFull ? 'Lotada' : isPartial ? 'Ocupada' : 'Livre'}
+                    </span>
+                  </div>
+
+                  {/* Bloco de Capacidade Configurada */}
+                  <div className="bg-slate-50/90 p-2.5 rounded-xl border border-slate-100 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-bold text-slate-500">Capacidade Configurada:</span>
+                      <span className="font-black text-slate-800">
+                        {capacity} {capacity === 1 ? 'vaga' : 'vagas'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-500 font-medium">Disponibilidade:</span>
+                      <span className={`font-black ${isFull ? 'text-rose-600' : isPartial ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        {count}/{capacity} ({availableSlots} livre{availableSlots === 1 ? '' : 's'})
+                      </span>
+                    </div>
+
+                    {/* Barra de ocupação */}
+                    <div className="w-full bg-slate-200/80 h-1.5 rounded-full overflow-hidden">
+                      <div 
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          isFull ? 'bg-rose-500' : isPartial ? 'bg-amber-500' : 'bg-emerald-500'
+                        }`}
+                        style={{ width: `${Math.min(100, (count / capacity) * 100)}%` }}
+                      />
+                    </div>
+
+                    {/* Cápsulas individuais de cada vaga */}
+                    <div className="pt-0.5 flex flex-wrap gap-1">
+                      {Array.from({ length: capacity }).map((_, slotIdx) => {
+                        const resident = occupants[slotIdx];
+                        if (resident) {
+                          return (
+                            <div 
+                              key={slotIdx}
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-[9px] font-bold text-indigo-900 truncate max-w-full"
+                              title={`Vaga ${slotIdx + 1} ocupada por ${resident.nome}`}
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />
+                              <span className="truncate">{resident.nome}</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div 
+                            key={slotIdx}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-white border border-dashed border-slate-300 text-[9px] font-medium text-slate-400"
+                            title={`Vaga ${slotIdx + 1} disponível`}
                           >
-                            <ArrowRightLeft size={10} />
-                          </button>
-                          <button
-                            onClick={() => handleRelease(occ.id, occ.nome)}
-                            className="p-1 hover:bg-slate-100 rounded text-red-500 hover:text-red-700 transition-colors"
-                            title="Desalocar"
-                          >
-                            <LogOut size={10} />
-                          </button>
-                        </div>
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                            <span>Livre</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Animais Alojados nesta Baia */}
+                <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
+                      <span>Alojados ({count})</span>
+                      {availableSlots > 0 && user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTargetKennelForAllocation(kennel);
+                            setSelectedAnimalIdToAllocate('');
+                            setJustification(`Alocação na ${kennel.name}`);
+                          }}
+                          className="text-teal-600 hover:text-teal-700 flex items-center gap-0.5 font-bold cursor-pointer"
+                        >
+                          <Plus size={11} /> Alocar
+                        </button>
                       )}
                     </div>
-                  );
-                })}
+
+                    {count === 0 ? (
+                      <div className="p-3 bg-emerald-50/50 border border-emerald-100 rounded-xl text-center space-y-2">
+                        <p className="text-xs text-emerald-800 font-medium">
+                          Baia totalmente livre.
+                        </p>
+                        {user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTargetKennelForAllocation(kennel);
+                              setSelectedAnimalIdToAllocate('');
+                              setJustification(`Alocação na ${kennel.name}`);
+                            }}
+                            className="w-full py-1.5 px-2 bg-white border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white rounded-lg text-xs font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                          >
+                            <Plus size={12} /> Alocar Animal
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {occupants.map((occ, idx) => {
+                          if (!occ) return null;
+                          const isCat = occ.especie?.toUpperCase().includes('GATO') || occ.especie?.toUpperCase().includes('FEL');
+                          const AnimalIcon = isCat ? Cat : Dog;
+
+                          return (
+                            <div 
+                              key={occ.id || idx} 
+                              className="p-2 bg-white border border-slate-200 rounded-xl shadow-2xs space-y-1 transition-all hover:border-slate-300"
+                            >
+                              <div className="flex items-start justify-between gap-1">
+                                <Link 
+                                  to={`/animais/ficha/${occ.id}`}
+                                  className="flex items-center gap-1.5 hover:text-teal-600 transition-colors truncate flex-1 min-w-0"
+                                  title="Ver ficha do animal"
+                                >
+                                  <div className="w-5 h-5 rounded-md bg-teal-50 border border-teal-100 flex items-center justify-center text-teal-700 shrink-0">
+                                    <AnimalIcon size={11} />
+                                  </div>
+                                  <div className="truncate">
+                                    <p className="font-extrabold text-slate-900 text-xs truncate">
+                                      {occ.nome}
+                                    </p>
+                                    <p className="text-[9px] text-slate-500 font-medium truncate">
+                                      {occ.especie} • {occ.sexo || 'Indef.'}
+                                    </p>
+                                  </div>
+                                </Link>
+
+                                {user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                                  <div className="flex items-center gap-0.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setAllocatingAnimal(occ);
+                                        setSelectedKennelId('');
+                                        setJustification(`Transferência de baia para melhor manejo.`);
+                                      }}
+                                      className="p-1 hover:bg-slate-100 rounded text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+                                      title="Transferir para outra baia"
+                                    >
+                                      <ArrowRightLeft size={11} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRelease(occ.id, occ.nome)}
+                                      className="p-1 hover:bg-rose-50 rounded text-rose-500 hover:text-rose-700 transition-colors cursor-pointer"
+                                      title="Desalocar"
+                                    >
+                                      <LogOut size={11} />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                                <span className="text-[8px] font-bold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-100">
+                                  {occ.condicao}
+                                </span>
+                                {occ.temTutor && (
+                                  <span className="text-[8px] font-black px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                    Tutor
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {isPartial && availableSlots > 0 && user && (user.role === 'ADMIN' || user.role === 'VETERINARIO') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTargetKennelForAllocation(kennel);
+                        setSelectedAnimalIdToAllocate('');
+                        setJustification(`Alocação de companheiro na ${kennel.name}`);
+                      }}
+                      className="w-full mt-2 py-1.5 px-2 bg-amber-50 border border-amber-200 text-amber-800 hover:bg-amber-600 hover:text-white rounded-lg text-[10px] font-bold transition-all shadow-2xs flex items-center justify-center gap-1 cursor-pointer"
+                    >
+                      <Plus size={11} /> +{availableSlots} vaga{availableSlots > 1 ? 's' : ''} disponível{availableSlots > 1 ? 'is' : ''}
+                    </button>
+                  )}
+                </div>
               </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Modal de Alocação Direta na Baia Selecionada */}
+      {targetKennelForAllocation && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden animate-in zoom-in-95 border border-slate-200">
+            <div className="p-6 bg-slate-900 text-white">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Plus size={20} className="text-teal-400" /> Alocar Animal em {targetKennelForAllocation.name}
+                </h3>
+                <span className="bg-teal-600 text-white text-[10px] font-black px-2 py-0.5 rounded uppercase">
+                  {targetKennelForAllocation.type}
+                </span>
+              </div>
+              <p className="text-slate-300 text-xs mt-1">
+                Capacidade: {targetKennelForAllocation.capacity} animal(is) • Vagas disponíveis: {Math.max(0, targetKennelForAllocation.capacity - getKennelData(targetKennelForAllocation.id).count)}
+              </p>
             </div>
-          );
-        })}
-      </div>
+
+            <form onSubmit={handleAllocateToSpecificKennel} className="p-6 space-y-5">
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                    Selecione o Animal para Acomodar
+                  </label>
+                  <select
+                    required
+                    value={selectedAnimalIdToAllocate}
+                    onChange={e => setSelectedAnimalIdToAllocate(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-teal-500 font-bold text-sm text-slate-800"
+                  >
+                    <option value="">-- Selecione um paciente ({unaccommodatedAnimals.length} disponíveis) --</option>
+                    {unaccommodatedAnimals.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.nome} ({a.especie} • {a.condicao}{a.temTutor ? ' • Com Tutor' : ''})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                    Justificativa ou Observações
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={justification}
+                    onChange={e => setJustification(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-teal-500 text-sm font-medium"
+                    placeholder="Ex: Acomodação clínica pós-triagem"
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setTargetKennelForAllocation(null)}
+                  className="flex-1 px-5 py-3 text-slate-600 font-bold hover:bg-slate-100 rounded-xl transition-colors cursor-pointer text-sm"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={!selectedAnimalIdToAllocate}
+                  className="flex-1 flex items-center justify-center gap-2 px-5 py-3 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl shadow-lg transition-all disabled:opacity-50 cursor-pointer text-sm"
+                >
+                  <Save size={16} /> Confirmar Alocação
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Seção de Histórico de Movimentações */}
       <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in">

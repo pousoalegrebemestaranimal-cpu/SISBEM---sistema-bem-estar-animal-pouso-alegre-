@@ -1228,7 +1228,17 @@ export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
     // 6. Baias (Kennels)
     const { data: remKennels } = await supabase.from('kennels').select('*');
     if (remKennels && remKennels.length > 0) {
-      const merged = remKennels.map(mapSupabaseToKennel);
+      const raw = remKennels.map(mapSupabaseToKennel);
+      const seen = new Set<string>();
+      const merged: Kennel[] = [];
+      for (const k of raw) {
+        if (!k || !k.id || !k.name) continue;
+        const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(k);
+        }
+      }
       localStorage.setItem('sisbem_kennels', JSON.stringify(merged));
       syncedCounts.kennels = merged.length;
       if (typeof window !== 'undefined') {
@@ -1269,28 +1279,41 @@ export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
 
 export function syncLocalKennelsWithConfigs(configs: KennelConfig[]) {
   try {
-    const existingKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+    const rawKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+    const occupations: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+    const activeOccKennelIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.kennelId));
+
     const newKennels: Kennel[] = [];
 
     configs.forEach(cfg => {
-      const typeKennels = existingKennels.filter(k => k.type === cfg.type);
-      const updatedExisting = typeKennels.map(k => ({
-        ...k,
-        capacity: cfg.capacity
-      }));
+      const currentByType = rawKennels.filter(k => k.type === cfg.type);
+      const byName = new Map<string, Kennel>();
+      currentByType.forEach(k => {
+        const key = k.name.trim().toLowerCase();
+        if (!byName.has(key) || activeOccKennelIds.has(k.id)) {
+          byName.set(key, k);
+        }
+      });
 
-      if (updatedExisting.length < cfg.count) {
-        newKennels.push(...updatedExisting);
-        for (let i = updatedExisting.length + 1; i <= cfg.count; i++) {
+      for (let i = 1; i <= cfg.count; i++) {
+        const expectedName = `${cfg.type} ${i.toString().padStart(2, '0')}`;
+        const key = expectedName.toLowerCase();
+        const existing = byName.get(key);
+
+        if (existing) {
           newKennels.push({
-            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `kennel-${Date.now()}-${Math.random()}`,
-            name: `${cfg.type} ${i.toString().padStart(2, '0')}`,
+            ...existing,
+            name: expectedName,
+            capacity: cfg.capacity
+          });
+        } else {
+          newKennels.push({
+            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `k-${cfg.type.toLowerCase().replace(/[^a-z0-9]/g, '')}-${i}`,
+            name: expectedName,
             type: cfg.type,
             capacity: cfg.capacity
           });
         }
-      } else {
-        newKennels.push(...updatedExisting.slice(0, cfg.count));
       }
     });
 
