@@ -1,11 +1,12 @@
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { db } from '../services/db';
 import { KennelType, Kennel, KennelOccupation, AnimalJoined, AnimalCondicao } from '../types';
-import { Home, Users, Search, AlertTriangle, CheckCircle, ArrowRightLeft, User, ClipboardCheck, ArrowRight, Save, Info, Printer, History, LogOut, Layers, X, Check, Filter } from 'lucide-react';
+import { Home, Users, Search, AlertTriangle, CheckCircle, ArrowRightLeft, User, ClipboardCheck, ArrowRight, Save, Info, Printer, History, LogOut, Layers, X, Check, Filter, RotateCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 
 const AccommodationDashboard: React.FC = () => {
   const [filterType, setFilterType] = useState<string>('TODOS');
@@ -13,6 +14,7 @@ const AccommodationDashboard: React.FC = () => {
   const [allocatingAnimal, setAllocatingAnimal] = useState<AnimalJoined | null>(null);
   const [selectedKennelId, setSelectedKennelId] = useState('');
   const [justification, setJustification] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Estados para modal de impressão de tratamentos
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
@@ -20,9 +22,54 @@ const AccommodationDashboard: React.FC = () => {
   const [printOnlyActiveTreatment, setPrintOnlyActiveTreatment] = useState<boolean>(true);
 
   const user = db.getCurrentUser();
-  const kennels = useMemo(() => db.getKennels(), []);
-  const [occupations, setOccupations] = useState(() => db.getOccupations());
-  const [allAnimals, setAllAnimals] = useState(() => db.getAnimalsJoined());
+  const [kennels, setKennels] = useState<Kennel[]>(() => db.getKennels());
+  const [occupations, setOccupations] = useState<KennelOccupation[]>(() => db.getOccupations());
+  const [allAnimals, setAllAnimals] = useState<AnimalJoined[]>(() => db.getAnimalsJoined());
+
+  const refreshData = () => {
+    setKennels(db.getKennels());
+    setOccupations(db.getOccupations());
+    setAllAnimals(db.getAnimalsJoined());
+  };
+
+  useEffect(() => {
+    refreshData();
+
+    // Sincroniza em segundo plano ao abrir a tela
+    pullFromSupabaseToLocal(db).then(() => {
+      refreshData();
+    }).catch(() => {});
+
+    const handleUpdate = () => {
+      refreshData();
+    };
+
+    window.addEventListener('sisbem-occupations-changed', handleUpdate);
+    window.addEventListener('sisbem-animals-changed', handleUpdate);
+    window.addEventListener('sisbem-kennels-changed', handleUpdate);
+    window.addEventListener('sisbem-settings-changed', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
+
+    return () => {
+      window.removeEventListener('sisbem-occupations-changed', handleUpdate);
+      window.removeEventListener('sisbem-animals-changed', handleUpdate);
+      window.removeEventListener('sisbem-kennels-changed', handleUpdate);
+      window.removeEventListener('sisbem-settings-changed', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
+    };
+  }, []);
+
+  const handleManualSync = async () => {
+    setIsSyncing(true);
+    try {
+      await pullFromSupabaseToLocal(db);
+      refreshData();
+    } catch (e) {
+      console.warn('Erro ao sincronizar baias:', e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const latestAllocatingRecord = useMemo(() => {
     if (!allocatingAnimal?.historico || allocatingAnimal.historico.length === 0) return null;
@@ -126,12 +173,12 @@ const AccommodationDashboard: React.FC = () => {
     return counts;
   }, [allAnimals]);
 
-  const handleQuickAllocate = (e: React.FormEvent) => {
+  const handleQuickAllocate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!allocatingAnimal || !selectedKennelId) return;
 
     try {
-      db.allocateAnimal({
+      await db.allocateAnimalAsync({
         kennelId: selectedKennelId,
         animalId: allocatingAnimal.id,
         vetId: user!.id,
@@ -140,21 +187,17 @@ const AccommodationDashboard: React.FC = () => {
       setAllocatingAnimal(null);
       setSelectedKennelId('');
       setJustification('');
-      // Update local states reactively
-      setOccupations(db.getOccupations());
-      setAllAnimals(db.getAnimalsJoined());
+      refreshData();
     } catch (err: any) {
       alert(err.message);
     }
   };
 
-  const handleRelease = (animalId: string, animalName: string) => {
+  const handleRelease = async (animalId: string, animalName: string) => {
     if (!window.confirm(`Tem certeza que deseja desalocar o animal ${animalName} desta baia?`)) return;
     try {
-      db.releaseAnimalFromKennel(animalId);
-      // Update local states reactively
-      setOccupations(db.getOccupations());
-      setAllAnimals(db.getAnimalsJoined());
+      await db.releaseAnimalFromKennelAsync(animalId);
+      refreshData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -813,12 +856,23 @@ const AccommodationDashboard: React.FC = () => {
           </h2>
           <p className="text-slate-500">Gestão física e ocupacional das estruturas do centro.</p>
         </div>
-        <button 
-          onClick={() => setIsPrintModalOpen(true)}
-          className="flex items-center gap-2 px-5 py-2.5 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all cursor-pointer"
-        >
-          <Printer size={18} className="text-teal-600" /> Planilha de Tratamentos
-        </button>
+        <div className="flex items-center gap-3 w-full md:w-auto">
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            title="Sincronizar baias e ocupações com o servidor agora"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-slate-700 font-semibold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 active:scale-95 transition-all text-sm disabled:opacity-50"
+          >
+            <RotateCw size={16} className={`text-teal-600 ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>{isSyncing ? 'Sincronizando...' : 'Atualizar Baias'}</span>
+          </button>
+          <button 
+            onClick={() => setIsPrintModalOpen(true)}
+            className="flex items-center gap-2 px-5 py-2.5 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all cursor-pointer text-sm"
+          >
+            <Printer size={18} className="text-teal-600" /> Planilha de Tratamentos
+          </button>
+        </div>
       </div>
 
       {/* Fila de Acomodação (Pós-Veterinário) */}

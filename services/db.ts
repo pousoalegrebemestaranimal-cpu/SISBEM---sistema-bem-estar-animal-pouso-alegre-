@@ -13,6 +13,8 @@ import {
   deleteRecordFromSupabase,
   syncKennelToSupabase,
   syncOccupationToSupabase,
+  syncKennelConfigsToSupabase,
+  syncKennelsFullToSupabase,
   syncUserToSupabase,
   deleteUserFromSupabase,
   syncAllLocalDataToSupabase,
@@ -1192,13 +1194,41 @@ export const db = {
   },
 
   getAnimals: (): Animal[] => JSON.parse(localStorage.getItem(KEYS.ANIMALS) || '[]'),
-  getSolicitantes: (): Solicitante[] => JSON.parse(localStorage.getItem(KEYS.SOLICITANTES) || '[]'),
+  getSolicitantes: (): Solicitante[] => {
+    const list: Solicitante[] = JSON.parse(localStorage.getItem(KEYS.SOLICITANTES) || '[]');
+    return list.filter(s => s.id !== 'system-configs-v1' && !s.id.startsWith('__sys_'));
+  },
   getTutores: (): Tutor[] => JSON.parse(localStorage.getItem(KEYS.TUTORES) || '[]'),
   getRecords: (): ClinicalRecord[] => JSON.parse(localStorage.getItem(KEYS.RECORDS) || '[]'),
   getStatusLogs: (): StatusLog[] => JSON.parse(localStorage.getItem(KEYS.STATUS_LOGS) || '[]'),
   getKennels: (): Kennel[] => JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]'),
   getOccupations: (): KennelOccupation[] => JSON.parse(localStorage.getItem(KEYS.OCCUPATIONS) || '[]'),
-  getKennelConfigs: (): KennelConfig[] => JSON.parse(localStorage.getItem(KEYS.KENNEL_CONFIGS) || '[]'),
+  getKennelConfigs: (): KennelConfig[] => {
+    const stored = localStorage.getItem(KEYS.KENNEL_CONFIGS);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+    const kennels = db.getKennels();
+    const types = [
+      KennelType.INDIVIDUAL,
+      KennelType.COLETIVA,
+      KennelType.QUARENTENA,
+      KennelType.GATIL,
+      KennelType.PRE_OPERATORIO,
+      KennelType.POS_OPERATORIO
+    ];
+    return types.map(t => {
+      const ofType = kennels.filter(k => k.type === t);
+      return {
+        type: t,
+        count: ofType.length,
+        capacity: ofType[0]?.capacity || (t === KennelType.COLETIVA ? 5 : (t === KennelType.GATIL ? 3 : 1))
+      };
+    });
+  },
 
   getAnimalsBySolicitante: (solicitanteId: string): AnimalJoined[] => {
     const animals = db.getAnimalsJoined();
@@ -1323,6 +1353,31 @@ export const db = {
   saveKennelConfigs: (configs: KennelConfig[]) => {
     localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(configs));
     db.syncKennelsWithConfigs(configs);
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', { detail: { configs } }));
+      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+    }
+
+    syncKennelConfigsToSupabase(configs).catch(err => console.warn('Supabase syncConfigs:', err));
+    const currentKennels = db.getKennels();
+    syncKennelsFullToSupabase(currentKennels).catch(err => console.warn('Supabase syncKennelsFull:', err));
+  },
+
+  saveKennelConfigsAsync: async (configs: KennelConfig[]) => {
+    localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(configs));
+    db.syncKennelsWithConfigs(configs);
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', { detail: { configs } }));
+      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+    }
+
+    await syncKennelConfigsToSupabase(configs);
+    const currentKennels = db.getKennels();
+    await syncKennelsFullToSupabase(currentKennels);
   },
 
   getAnimalsJoined: (): AnimalJoined[] => {
@@ -1365,8 +1420,10 @@ export const db = {
     if (active.length >= kennel.capacity) throw new Error("Capacidade máxima da baia atingida.");
 
     const prevIdx = occupations.findIndex(o => o.animalId === allocation.animalId && !o.exitDate);
+    let prevOcc: KennelOccupation | null = null;
     if (prevIdx > -1) {
       occupations[prevIdx].exitDate = new Date().toISOString();
+      prevOcc = occupations[prevIdx];
     }
 
     const newOcc: KennelOccupation = {
@@ -1377,7 +1434,29 @@ export const db = {
 
     occupations.push(newOcc);
     localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
+
+    if (prevOcc) {
+      syncOccupationToSupabase(prevOcc).catch(err => console.warn('Supabase syncOccupation (prev):', err));
+    }
     syncOccupationToSupabase(newOcc).catch(err => console.warn('Supabase syncOccupation:', err));
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+        detail: { action: 'allocated', occupation: newOcc }
+      }));
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+    }
+
+    return newOcc;
+  },
+
+  allocateAnimalAsync: async (allocation: Omit<KennelOccupation, 'id' | 'entryDate'>) => {
+    const newOcc = db.allocateAnimal(allocation);
+    try {
+      await syncOccupationToSupabase(newOcc);
+    } catch (e) {
+      console.warn('Erro ao sincronizar alocação de baia:', e);
+    }
     return newOcc;
   },
 
@@ -1393,6 +1472,26 @@ export const db = {
       }
       localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
       syncOccupationToSupabase(occupations[idx]).catch(err => console.warn('Supabase syncOccupation:', err));
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+          detail: { action: 'released', occupation: occupations[idx] }
+        }));
+        window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+      }
+    }
+  },
+
+  releaseAnimalFromKennelAsync: async (animalId: string, releaseJustification?: string) => {
+    db.releaseAnimalFromKennel(animalId, releaseJustification);
+    const occupations = db.getOccupations();
+    const updated = occupations.find(o => o.animalId === animalId && !!o.exitDate);
+    if (updated) {
+      try {
+        await syncOccupationToSupabase(updated);
+      } catch (e) {
+        console.warn('Erro ao sincronizar desocupação:', e);
+      }
     }
   },
 

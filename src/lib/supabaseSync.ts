@@ -15,6 +15,7 @@ import {
   Porte,
   Sexo,
   KennelType,
+  KennelConfig,
   CirurgiaStatus,
   CirurgiaPrioridade
 } from '../../types';
@@ -760,10 +761,70 @@ export async function syncKennelToSupabase(kennel: Kennel) {
   }
 }
 
-export async function syncOccupationToSupabase(occupation: KennelOccupation) {
+export async function syncOccupationToSupabase(occupation: KennelOccupation): Promise<boolean> {
   try {
-    const payload = mapOccupationToSupabase(occupation);
+    // 1. Prevenção de FK: Garantir que o animal existe no Supabase
+    let validAnimalId = occupation.animalId;
+    const { data: animalExists } = await supabase.from('animals').select('id').eq('id', validAnimalId).single();
+    if (!animalExists) {
+      const localAnimals: Animal[] = JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
+      const foundAnimal = localAnimals.find(a => a.id === validAnimalId);
+      if (foundAnimal) {
+        await syncAnimalToSupabase(foundAnimal);
+      }
+    }
+
+    // 2. Prevenção de FK: Garantir que a baia existe no Supabase
+    let validKennelId = occupation.kennelId;
+    const { data: kennelExists } = await supabase.from('kennels').select('id').eq('id', validKennelId).single();
+    if (!kennelExists) {
+      const localKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+      const foundKennel = localKennels.find(k => k.id === validKennelId);
+      if (foundKennel) {
+        const { data: sameNameKennel } = await supabase.from('kennels').select('id').eq('name', foundKennel.name).limit(1).single();
+        if (sameNameKennel?.id) {
+          validKennelId = sameNameKennel.id;
+          occupation.kennelId = validKennelId;
+        } else {
+          await supabase.from('kennels').upsert([mapKennelToSupabase(foundKennel)]);
+        }
+      }
+    }
+
+    const payload = mapOccupationToSupabase({
+      ...occupation,
+      kennelId: validKennelId
+    });
+
     const { error } = await supabase.from('kennel_occupations').upsert([payload]);
+    if (error) {
+      console.warn('Supabase syncOccupation error:', error.message, error);
+      return false;
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+        detail: { action: 'saved', occupation }
+      }));
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Supabase syncOccupation exception:', err);
+    return false;
+  }
+}
+
+export async function deleteOccupationFromSupabase(id: string): Promise<boolean> {
+  try {
+    const { error } = await supabase.from('kennel_occupations').delete().eq('id', id);
+    if (!error && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+        detail: { action: 'deleted', id }
+      }));
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+    }
     return !error;
   } catch (err) {
     return false;
@@ -793,6 +854,63 @@ export async function deleteUserFromSupabase(id: string) {
     await supabase.from('users').delete().eq('id', id);
     return true;
   } catch (err) {
+    return false;
+  }
+}
+
+export async function syncKennelConfigsToSupabase(configs: KennelConfig[]): Promise<boolean> {
+  try {
+    const payload = {
+      id: 'system-configs-v1',
+      nome_completo: 'Configurações do Sistema (SISBEM)',
+      cpf: 'CONFIG-SYSTEM',
+      telefone: '0000',
+      tipo: 'ORGAO_PUBLICO',
+      observacoes: JSON.stringify(configs),
+      created_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('solicitantes').upsert([payload]);
+    if (error) {
+      console.warn('Supabase syncKennelConfigs aviso:', error.message);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('Erro syncKennelConfigsToSupabase:', err);
+    return false;
+  }
+}
+
+export async function syncKennelsFullToSupabase(kennels: Kennel[]): Promise<boolean> {
+  try {
+    if (!kennels || kennels.length === 0) return true;
+
+    // 1. Mapeia e insere/atualiza todas as baias no Supabase em lotes
+    const payload = kennels.map(mapKennelToSupabase);
+    for (let i = 0; i < payload.length; i += 50) {
+      const batch = payload.slice(i, i + 50);
+      const { error } = await supabase.from('kennels').upsert(batch);
+      if (error) {
+        console.warn('Erro ao salvar lote de baias no Supabase:', error.message);
+      }
+    }
+
+    // 2. Busca os IDs remotos para remover as que foram excluídas (redução de quantidade)
+    const { data: remoteKennels } = await supabase.from('kennels').select('id');
+    if (remoteKennels && remoteKennels.length > 0) {
+      const localIds = new Set(kennels.map(k => k.id));
+      const toDelete = remoteKennels.map((rk: any) => rk.id).filter(id => !localIds.has(id));
+      if (toDelete.length > 0) {
+        for (let i = 0; i < toDelete.length; i += 50) {
+          const delBatch = toDelete.slice(i, i + 50);
+          await supabase.from('kennels').delete().in('id', delBatch);
+        }
+      }
+    }
+
+    return true;
+  } catch (err) {
+    console.warn('Erro syncKennelsFullToSupabase:', err);
     return false;
   }
 }
@@ -991,6 +1109,29 @@ export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
   try {
     const syncedCounts: Partial<SyncStats['counts']> = {};
 
+    // 0. Configurações de Baias e Sistema
+    try {
+      const { data: configRow } = await supabase
+        .from('solicitantes')
+        .select('observacoes')
+        .eq('id', 'system-configs-v1')
+        .maybeSingle();
+
+      if (configRow?.observacoes) {
+        const parsedConfigs = JSON.parse(configRow.observacoes);
+        if (Array.isArray(parsedConfigs) && parsedConfigs.length > 0) {
+          localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsedConfigs));
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+              detail: { configs: parsedConfigs, source: 'supabase-pull' }
+            }));
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Aviso ao puxar configurações de baias:', e);
+    }
+
     // 1. Solicitantes
     const { data: remSol } = await supabase.from('solicitantes').select('*');
     if (remSol && remSol.length > 0) {
@@ -998,8 +1139,12 @@ export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
         ? dbInstance.getSolicitantes()
         : JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
       const map = new Map<string, Solicitante>();
-      localSol.forEach((s: Solicitante) => map.set(s.id, s));
-      remSol.forEach((r: any) => map.set(r.id, mapSupabaseToSolicitante(r)));
+      localSol.forEach((s: Solicitante) => {
+        if (s.id !== 'system-configs-v1' && !s.id.startsWith('__sys_')) map.set(s.id, s);
+      });
+      remSol
+        .filter((r: any) => r.id !== 'system-configs-v1' && !r.id.startsWith('__sys_'))
+        .forEach((r: any) => map.set(r.id, mapSupabaseToSolicitante(r)));
       const merged = Array.from(map.values());
       localStorage.setItem('sisbem_solicitantes', JSON.stringify(merged));
       syncedCounts.solicitantes = merged.length;
@@ -1080,10 +1225,78 @@ export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
       syncedCounts.users = merged.length;
     }
 
+    // 6. Baias (Kennels)
+    const { data: remKennels } = await supabase.from('kennels').select('*');
+    if (remKennels && remKennels.length > 0) {
+      const merged = remKennels.map(mapSupabaseToKennel);
+      localStorage.setItem('sisbem_kennels', JSON.stringify(merged));
+      syncedCounts.kennels = merged.length;
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
+          detail: { source: 'supabase-pull', count: merged.length }
+        }));
+        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+      }
+    }
+
+    // 7. Ocupações de Baias (Kennel Occupations)
+    const { data: remOccs } = await supabase.from('kennel_occupations').select('*');
+    if (remOccs) {
+      const localOccs = (dbInstance && typeof dbInstance.getOccupations === 'function')
+        ? dbInstance.getOccupations()
+        : JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+      const map = new Map<string, KennelOccupation>();
+      localOccs.forEach((o: KennelOccupation) => map.set(o.id, o));
+      remOccs.forEach((r: any) => map.set(r.id, mapSupabaseToOccupation(r)));
+      const merged = Array.from(map.values());
+      localStorage.setItem('sisbem_occupations', JSON.stringify(merged));
+      syncedCounts.occupations = merged.length;
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+          detail: { source: 'supabase-pull', count: merged.length }
+        }));
+        window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+      }
+    }
+
     return { success: true, syncedCounts };
   } catch (err) {
     console.warn('Erro ao puxar dados do Supabase:', err);
     return { success: false, syncedCounts: {} };
+  }
+}
+
+export function syncLocalKennelsWithConfigs(configs: KennelConfig[]) {
+  try {
+    const existingKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+    const newKennels: Kennel[] = [];
+
+    configs.forEach(cfg => {
+      const typeKennels = existingKennels.filter(k => k.type === cfg.type);
+      const updatedExisting = typeKennels.map(k => ({
+        ...k,
+        capacity: cfg.capacity
+      }));
+
+      if (updatedExisting.length < cfg.count) {
+        newKennels.push(...updatedExisting);
+        for (let i = updatedExisting.length + 1; i <= cfg.count; i++) {
+          newKennels.push({
+            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `kennel-${Date.now()}-${Math.random()}`,
+            name: `${cfg.type} ${i.toString().padStart(2, '0')}`,
+            type: cfg.type,
+            capacity: cfg.capacity
+          });
+        }
+      } else {
+        newKennels.push(...updatedExisting.slice(0, cfg.count));
+      }
+    });
+
+    localStorage.setItem('sisbem_kennels', JSON.stringify(newKennels));
+  } catch (e) {
+    console.warn('Erro ao sincronizar baias locais com configs:', e);
   }
 }
 
@@ -1092,8 +1305,8 @@ let realtimeInitialized = false;
 
 /**
  * Inicializa a escuta em tempo real (Realtime Channel) do Supabase
- * Permite que múltiplos usuários visualizem novos animais, cadastros e edições
- * instantaneamente sem necessidade de recarregar a página manualmente.
+ * Permite que múltiplos usuários visualizem novos animais, cadastros, edições
+ * e locações de baia instantaneamente sem necessidade de recarregar a página manualmente.
  */
 export function initRealtimeSync(onUpdate?: (table: string, payload: any) => void): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -1141,6 +1354,29 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
         { event: '*', schema: 'public', table: 'solicitantes' },
         (payload: any) => {
           try {
+            const rowId = payload.new?.id || payload.old?.id;
+            if (rowId === 'system-configs-v1') {
+              if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+                if (payload.new && payload.new.observacoes) {
+                  try {
+                    const configs = JSON.parse(payload.new.observacoes);
+                    if (Array.isArray(configs)) {
+                      localStorage.setItem('sisbem_kennel_configs', JSON.stringify(configs));
+                      syncLocalKennelsWithConfigs(configs);
+                      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+                        detail: { configs, source: 'realtime' }
+                      }));
+                      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
+                      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+                    }
+                  } catch (e) {
+                    console.warn('Erro ao decodificar configs realtime:', e);
+                  }
+                }
+              }
+              return;
+            }
+
             const list: Solicitante[] = JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
             if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
               const mapped = mapSupabaseToSolicitante(payload.new);
@@ -1183,6 +1419,63 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
             if (onUpdate) onUpdate('tutores', payload);
           } catch (e) {
             console.warn('Erro ao processar realtime de tutores:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kennel_occupations' },
+        (payload: any) => {
+          try {
+            const list: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToOccupation(payload.new);
+              const idx = list.findIndex(o => o.id === mapped.id);
+              if (idx > -1) list[idx] = mapped;
+              else list.push(mapped);
+              localStorage.setItem('sisbem_occupations', JSON.stringify(list));
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                localStorage.setItem('sisbem_occupations', JSON.stringify(list.filter(o => o.id !== deletedId)));
+              }
+            }
+
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+              detail: { type: payload.eventType, data: payload }
+            }));
+            window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+
+            if (onUpdate) onUpdate('kennel_occupations', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de ocupações de baias:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kennels' },
+        (payload: any) => {
+          try {
+            const list: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToKennel(payload.new);
+              const idx = list.findIndex(k => k.id === mapped.id);
+              if (idx > -1) list[idx] = mapped;
+              else list.push(mapped);
+              localStorage.setItem('sisbem_kennels', JSON.stringify(list));
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                localStorage.setItem('sisbem_kennels', JSON.stringify(list.filter(k => k.id !== deletedId)));
+              }
+            }
+            window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
+            window.dispatchEvent(new CustomEvent('sisbem-settings-changed'));
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+            if (onUpdate) onUpdate('kennels', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de baias:', e);
           }
         }
       )

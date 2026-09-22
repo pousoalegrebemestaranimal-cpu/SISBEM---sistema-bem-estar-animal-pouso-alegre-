@@ -114,6 +114,24 @@ const AnimalDetail: React.FC = () => {
 
   useEffect(() => {
     loadAnimalData();
+
+    const handleUpdate = () => {
+      reloadAnimal();
+    };
+
+    window.addEventListener('sisbem-occupations-changed', handleUpdate);
+    window.addEventListener('sisbem-animals-changed', handleUpdate);
+    window.addEventListener('sisbem-kennels-changed', handleUpdate);
+    window.addEventListener('sisbem-settings-changed', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
+
+    return () => {
+      window.removeEventListener('sisbem-occupations-changed', handleUpdate);
+      window.removeEventListener('sisbem-animals-changed', handleUpdate);
+      window.removeEventListener('sisbem-kennels-changed', handleUpdate);
+      window.removeEventListener('sisbem-settings-changed', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
+    };
   }, [id]);
 
   const reloadAnimal = () => {
@@ -127,12 +145,12 @@ const AnimalDetail: React.FC = () => {
       .sort((a, b) => new Date(b.entryDate).getTime() - new Date(a.entryDate).getTime());
   }, [occupations, id]);
 
-  const handleTransfer = (e: React.FormEvent) => {
+  const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!animal || !selectedKennelId) return;
 
     try {
-      db.allocateAnimal({
+      await db.allocateAnimalAsync({
         kennelId: selectedKennelId,
         animalId: animal.id,
         vetId: user!.id,
@@ -1730,9 +1748,9 @@ const AnimalDetail: React.FC = () => {
                     <div className="flex gap-2 w-full sm:w-auto">
                       {animal.currentOccupation && (
                         <button
-                          onClick={() => {
+                          onClick={async () => {
                             if (window.confirm(`Deseja retirar ${animal.nome} da baia atual?`)) {
-                              db.releaseAnimalFromKennel(animal.id);
+                              await db.releaseAnimalFromKennelAsync(animal.id);
                               reloadAnimal();
                             }
                           }}

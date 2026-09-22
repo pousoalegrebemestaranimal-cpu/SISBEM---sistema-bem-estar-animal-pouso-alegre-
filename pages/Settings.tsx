@@ -4,6 +4,7 @@ import { db } from '../services/db';
 import { KennelConfig, KennelType } from '../types';
 import { Settings, Save, AlertTriangle, CheckCircle2, Info, RefreshCw, Database, Sparkles, Copy, Check, Download, Terminal, Server, Code2, Layers, Globe, Key, Eye, EyeOff, ExternalLink, Trash2 } from 'lucide-react';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, testSupabaseConnection } from '../src/lib/supabase';
+import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 
 const SettingsPage: React.FC = () => {
   const [configs, setConfigs] = useState<KennelConfig[]>([]);
@@ -16,7 +17,21 @@ const SettingsPage: React.FC = () => {
   const [showKey, setShowKey] = useState(false);
   const [showSqlPreview, setShowSqlPreview] = useState(false);
   const [testingSupabase, setTestingSupabase] = useState(false);
+  const [syncingCloud, setSyncingCloud] = useState(false);
   const [supabaseTestResult, setSupabaseTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const handleSyncCloud = async () => {
+    setSyncingCloud(true);
+    try {
+      await pullFromSupabaseToLocal(db);
+      setConfigs(db.getKennelConfigs());
+      setMessage({ type: 'success', text: 'Configurações e baias sincronizadas com o banco em tempo real!' });
+    } catch (err: any) {
+      setMessage({ type: 'error', text: 'Erro ao sincronizar com nuvem: ' + err.message });
+    } finally {
+      setSyncingCloud(false);
+    }
+  };
 
   const handleTestSupabase = async () => {
     setTestingSupabase(true);
@@ -336,6 +351,31 @@ END $$;`;
 
   useEffect(() => {
     setConfigs(db.getKennelConfigs());
+
+    const handleSettingsChanged = (e: any) => {
+      const newConfigs = e.detail?.configs || db.getKennelConfigs();
+      setConfigs(newConfigs);
+      if (e.detail?.source === 'realtime') {
+        setMessage({ 
+          type: 'success', 
+          text: 'Configurações de infraestrutura atualizadas em tempo real a partir de outro usuário/dispositivo!' 
+        });
+      }
+    };
+
+    const handleKennelsChanged = () => {
+      setConfigs(db.getKennelConfigs());
+    };
+
+    window.addEventListener('sisbem-settings-changed', handleSettingsChanged);
+    window.addEventListener('sisbem-kennels-changed', handleKennelsChanged);
+    window.addEventListener('storage', handleKennelsChanged);
+
+    return () => {
+      window.removeEventListener('sisbem-settings-changed', handleSettingsChanged);
+      window.removeEventListener('sisbem-kennels-changed', handleKennelsChanged);
+      window.removeEventListener('storage', handleKennelsChanged);
+    };
   }, []);
 
   const handleCountChange = (type: KennelType, value: string) => {
@@ -384,7 +424,7 @@ END $$;`;
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
     setLoading(true);
@@ -410,8 +450,8 @@ END $$;`;
       });
 
       if (!hasError) {
-        db.saveKennelConfigs(configs);
-        setMessage({ type: 'success', text: 'Configurações de infraestrutura atualizadas com sucesso!' });
+        await db.saveKennelConfigsAsync(configs);
+        setMessage({ type: 'success', text: 'Configurações de infraestrutura atualizadas e propagadas automaticamente para todos os usuários em tempo real!' });
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message });
@@ -422,11 +462,31 @@ END $$;`;
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-          <Settings className="text-slate-400" /> Configurações do Centro
-        </h2>
-        <p className="text-slate-500">Ajuste as capacidades físicas, quantitativas das baias e gerencie os dados do sistema.</p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+            <Settings className="text-slate-400" /> Configurações do Centro
+          </h2>
+          <p className="text-slate-500">Ajuste as capacidades físicas, quantitativas das baias e gerencie os dados do sistema.</p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-semibold border border-emerald-200">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            Sync em Tempo Real Ativo
+          </span>
+
+          <button
+            type="button"
+            onClick={handleSyncCloud}
+            disabled={syncingCloud}
+            className="flex items-center gap-2 px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+            title="Sincronizar configurações com o banco agora"
+          >
+            <RefreshCw size={14} className={syncingCloud ? 'animate-spin text-teal-600' : 'text-slate-500'} />
+            {syncingCloud ? 'Sincronizando...' : 'Atualizar da Nuvem'}
+          </button>
+        </div>
       </div>
 
       {message && (
@@ -534,13 +594,16 @@ END $$;`;
           </div>
         </div>
 
-        <div className="flex justify-end gap-4">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+          <p className="text-xs text-slate-500">
+            * As alterações serão sincronizadas e aplicadas para <strong>todos os usuários logados</strong> automaticamente em tempo real.
+          </p>
           <button 
             type="submit" 
             disabled={loading}
-            className="flex items-center gap-2 px-10 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:bg-teal-700 disabled:opacity-50 transition-all cursor-pointer"
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:bg-teal-700 disabled:opacity-50 transition-all cursor-pointer"
           >
-            <Save size={18} /> {loading ? 'Sincronizando...' : 'Salvar Alterações'}
+            <Save size={18} /> {loading ? 'Sincronizando em tempo real...' : 'Salvar Alterações'}
           </button>
         </div>
       </form>
