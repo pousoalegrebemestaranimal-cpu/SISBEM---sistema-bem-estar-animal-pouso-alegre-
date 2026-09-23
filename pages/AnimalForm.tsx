@@ -6,6 +6,7 @@ const { useParams, useNavigate } = ReactRouterDOM as any;
 import { db } from '../services/db';
 import { Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
 import { syncAnimalToSupabase } from '../src/lib/supabaseSync';
+import { uploadAnimalPhoto, compressImage } from '../src/lib/storageService';
 import { validateCPF, formatCPF, formatTelefone } from '../utils/validation';
 import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock } from 'lucide-react';
 
@@ -265,18 +266,27 @@ const AnimalForm: React.FC = () => {
     });
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (file.size > 2 * 1024 * 1024) {
-        alert("A foto é muito grande. Escolha uma imagem de até 2MB.");
+      if (file.size > 10 * 1024 * 1024) {
+        alert("A foto é muito grande. Escolha uma imagem de até 10MB.");
         return;
       }
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setAnimal({ ...animal, foto: reader.result as string });
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressedBlob = await compressImage(file, 1200, 0.82);
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setAnimal({ ...animal, foto: reader.result as string });
+        };
+        reader.readAsDataURL(compressedBlob);
+      } catch {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setAnimal({ ...animal, foto: reader.result as string });
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
 
@@ -330,8 +340,24 @@ const AnimalForm: React.FC = () => {
 
     try {
       setLoading(true);
+
+      // Upload de foto para o Supabase Storage (se for Base64 nova)
+      let finalFoto = animal.foto;
+      if (animal.foto && animal.foto.startsWith('data:image/')) {
+        try {
+          const photoTargetId = id || `temp_${Date.now()}`;
+          const uploadedUrl = await uploadAnimalPhoto(photoTargetId, animal.foto);
+          if (uploadedUrl && !uploadedUrl.startsWith('data:image/')) {
+            finalFoto = uploadedUrl;
+          }
+        } catch (uploadErr) {
+          console.warn('Erro ao enviar foto para storage, mantendo original:', uploadErr);
+        }
+      }
+
       const personaData = isExterno ? tutor : solicitante;
-      const savedAnimal = db.saveAnimal(animal, personaData, user!.id);
+      const animalToSave = { ...animal, foto: finalFoto };
+      const savedAnimal = db.saveAnimal(animalToSave, personaData, user!.id);
       
       try {
         await syncAnimalToSupabase(savedAnimal);

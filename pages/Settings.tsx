@@ -5,6 +5,7 @@ import { KennelConfig, KennelType } from '../types';
 import { Settings, Save, AlertTriangle, CheckCircle2, Info, RefreshCw, Database, Sparkles, Copy, Check, Download, Terminal, Server, Code2, Layers, Globe, Key, Eye, EyeOff, ExternalLink, Trash2 } from 'lucide-react';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, testSupabaseConnection } from '../src/lib/supabase';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
+import { isBase64Image, migrateLegacyPhotosToStorage, ANIMAL_PHOTOS_BUCKET } from '../src/lib/storageService';
 
 const SettingsPage: React.FC = () => {
   const [configs, setConfigs] = useState<KennelConfig[]>([]);
@@ -19,6 +20,37 @@ const SettingsPage: React.FC = () => {
   const [testingSupabase, setTestingSupabase] = useState(false);
   const [syncingCloud, setSyncingCloud] = useState(false);
   const [supabaseTestResult, setSupabaseTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [migratingPhotos, setMigratingPhotos] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<{ current: number; total: number } | null>(null);
+  const [migrationResult, setMigrationResult] = useState<{ migrated: number; skipped: number; errors: string[] } | null>(null);
+
+  const localAnimals = db.getAnimals();
+  const base64PhotosCount = localAnimals.filter(a => isBase64Image(a.foto)).length;
+  const storagePhotosCount = localAnimals.filter(a => a.foto && !isBase64Image(a.foto)).length;
+
+  const handleMigratePhotos = async () => {
+    if (base64PhotosCount === 0) {
+      alert('Não há fotos em Base64 pendentes para migração.');
+      return;
+    }
+    if (!window.confirm(`Deseja iniciar a migração de ${base64PhotosCount} foto(s) em Base64 para o Supabase Storage? O processo é seguro e manterá as fotos protegidas.`)) {
+      return;
+    }
+    setMigratingPhotos(true);
+    setMigrationResult(null);
+    try {
+      const res = await migrateLegacyPhotosToStorage(localAnimals, (current, total) => {
+        setMigrationProgress({ current, total });
+      });
+      setMigrationResult(res);
+      setMessage({ type: 'success', text: `Migração finalizada: ${res.migrated} fotos enviadas para o Supabase Storage com sucesso!` });
+    } catch (err: any) {
+      setMessage({ type: 'error', text: 'Erro durante migração: ' + err.message });
+    } finally {
+      setMigratingPhotos(false);
+      setMigrationProgress(null);
+    }
+  };
 
   const handleSyncCloud = async () => {
     setSyncingCloud(true);
@@ -331,6 +363,24 @@ BEGIN
 
     DROP POLICY IF EXISTS "Permitir acesso completo a arquivos de exame" ON public.exam_files;
     CREATE POLICY "Permitir acesso completo a arquivos de exame" ON public.exam_files FOR ALL USING (true) WITH CHECK (true);
+END $$;
+
+-- CONFIGURAÇÃO DO SUPABASE STORAGE (BUCKET 'animal-photos' P/ CONTROLE DE EGRESS)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('animal-photos', 'animal-photos', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- POLÍTICAS DE ACESSO DO STORAGE PARA FOTOS
+DO $$ 
+BEGIN
+    DROP POLICY IF EXISTS "Fotos públicas para leitura" ON storage.objects;
+    CREATE POLICY "Fotos públicas para leitura" ON storage.objects FOR SELECT USING (bucket_id = 'animal-photos');
+
+    DROP POLICY IF EXISTS "Permitir upload de fotos" ON storage.objects;
+    CREATE POLICY "Permitir upload de fotos" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'animal-photos');
+
+    DROP POLICY IF EXISTS "Permitir atualização de fotos" ON storage.objects;
+    CREATE POLICY "Permitir atualização de fotos" ON storage.objects FOR UPDATE USING (bucket_id = 'animal-photos');
 END $$;`;
 
   const handleCopyMigration = () => {
@@ -739,6 +789,55 @@ END $$;`;
               }`}>
                 {supabaseTestResult.success ? <CheckCircle2 size={14} className="text-emerald-600" /> : <AlertTriangle size={14} className="text-amber-600" />}
                 {supabaseTestResult.message}
+              </div>
+            )}
+          </div>
+
+          {/* OTIMIZAÇÃO DE EGRESS E STORAGE DE FOTOS */}
+          <div className="mt-4 p-4 bg-teal-50/70 border border-teal-200 rounded-xl space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h4 className="text-xs font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
+                  <Database size={14} className="text-teal-600" />
+                  Otimização de Egress & Supabase Storage (Bucket <code className="font-mono">{ANIMAL_PHOTOS_BUCKET}</code>)
+                </h4>
+                <p className="text-[11px] text-teal-700 mt-0.5">
+                  Evita tráfego excessivo (Egress) convertendo fotos Base64 em arquivos WebP compactados no Supabase Storage com CDN.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-600 bg-white px-2.5 py-1 rounded-lg border border-teal-200">
+                  {storagePhotosCount} no Storage CDN | {base64PhotosCount} em Base64
+                </span>
+                <button
+                  type="button"
+                  onClick={handleMigratePhotos}
+                  disabled={migratingPhotos || base64PhotosCount === 0}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-teal-700 hover:bg-teal-800 disabled:bg-teal-300 text-white font-bold text-xs rounded-lg transition shadow-sm"
+                >
+                  {migratingPhotos ? <RefreshCw size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                  {migratingPhotos ? `Migrando (${migrationProgress?.current || 0}/${migrationProgress?.total || 0})...` : 'Migrar Fotos p/ Storage'}
+                </button>
+              </div>
+            </div>
+
+            {migrationProgress && (
+              <div className="w-full bg-teal-200/60 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-teal-600 h-2 transition-all duration-300 rounded-full"
+                  style={{ width: `${Math.round((migrationProgress.current / migrationProgress.total) * 100)}%` }}
+                />
+              </div>
+            )}
+
+            {migrationResult && (
+              <div className="text-[11px] text-teal-900 bg-white/80 p-2.5 rounded-lg border border-teal-200">
+                ✅ <strong>{migrationResult.migrated}</strong> fotos migradas com sucesso. {migrationResult.skipped > 0 && `(${migrationResult.skipped} ignoradas)`}
+                {migrationResult.errors.length > 0 && (
+                  <p className="text-red-600 mt-1 font-mono text-[10px]">
+                    Avisos: {migrationResult.errors.join(' | ')}
+                  </p>
+                )}
               </div>
             )}
           </div>

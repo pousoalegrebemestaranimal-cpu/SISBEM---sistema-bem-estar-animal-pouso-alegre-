@@ -69,16 +69,15 @@ const App: React.FC = () => {
         const appUser = mapSupabaseUserToAppUser(data.session.user);
         db.setCurrentUser(appUser);
       }
-      if (data?.session?.user) {
-        pullFromSupabaseToLocal(db).catch(() => {});
-      }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
         const appUser = mapSupabaseUserToAppUser(session.user);
         db.setCurrentUser(appUser);
-        pullFromSupabaseToLocal(db).catch(() => {});
+        if (event === 'SIGNED_IN') {
+          pullFromSupabaseToLocal(db).catch(() => {});
+        }
       } else if (event === 'SIGNED_OUT') {
         db.logout();
       }

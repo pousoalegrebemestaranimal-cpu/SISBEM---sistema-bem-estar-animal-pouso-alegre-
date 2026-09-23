@@ -326,3 +326,22 @@ BEGIN
     DROP POLICY IF EXISTS "Permitir acesso completo a arquivos de exame" ON public.exam_files;
     CREATE POLICY "Permitir acesso completo a arquivos de exame" ON public.exam_files FOR ALL USING (true) WITH CHECK (true);
 END $$;
+
+-- CONFIGURAÇÃO DO SUPABASE STORAGE (BUCKET 'animal-photos' P/ CONTROLE DE EGRESS)
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('animal-photos', 'animal-photos', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- POLÍTICAS DE ACESSO DO STORAGE PARA FOTOS
+DO $$ 
+BEGIN
+    DROP POLICY IF EXISTS "Fotos públicas para leitura" ON storage.objects;
+    CREATE POLICY "Fotos públicas para leitura" ON storage.objects FOR SELECT USING (bucket_id = 'animal-photos');
+
+    DROP POLICY IF EXISTS "Permitir upload de fotos" ON storage.objects;
+    CREATE POLICY "Permitir upload de fotos" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'animal-photos');
+
+    DROP POLICY IF EXISTS "Permitir atualização de fotos" ON storage.objects;
+    CREATE POLICY "Permitir atualização de fotos" ON storage.objects FOR UPDATE USING (bucket_id = 'animal-photos');
+END $$;
+

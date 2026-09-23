@@ -1,14 +1,24 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { db } from '../services/db';
 import { Solicitante } from '../types';
 import { Search, UserSearch, Eye, Phone, IdCard, Plus, Building2, User, Copy, Check, Edit2, Trash2, X, Sparkles, Filter, QrCode } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { formatCPF, formatTelefone } from '../utils/validation';
+import { useDebounce } from '../src/hooks/useDebounce';
+import { Pagination } from '../components/Pagination';
+import { fetchSolicitantesPaginated } from '../src/lib/supabaseQueries';
+
+const PAGE_SIZE = 20;
 
 const SolicitanteList: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
   const [activeFilter, setActiveFilter] = useState<'ALL' | 'ONG' | 'CIDADAO' | 'ORGAO_PUBLICO'>('ALL');
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [solicitantes, setSolicitantes] = useState<(Solicitante & { rescueCount: number })[]>([]);
+  const [totalCount, setTotalCount] = useState<number>(0);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
   
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -25,52 +35,43 @@ const SolicitanteList: React.FC = () => {
     observacoes: ''
   });
   const [formError, setFormError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  const solicitantes = useMemo(() => {
-    const list = db.getSolicitantes();
-    const animals = db.getAnimals();
-    
-    return list.map(s => ({
-      ...s,
-      rescueCount: animals.filter(a => a.solicitanteId === s.id).length
-    })).sort((a, b) => {
-      // Prioritize ONGs then by rescue count
-      if (a.tipo === 'ONG' && b.tipo !== 'ONG') return -1;
-      if (a.tipo !== 'ONG' && b.tipo === 'ONG') return 1;
-      return b.rescueCount - a.rescueCount;
-    });
-  }, [refreshKey]);
+  // Paginação e filtros REAIS no Supabase (range/limit e ilike)
+  const loadSolicitantes = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const res = await fetchSolicitantesPaginated({
+        page: currentPage,
+        pageSize: PAGE_SIZE,
+        search: debouncedSearch,
+        tipo: activeFilter
+      });
+      setSolicitantes(res.data);
+      setTotalCount(res.totalCount);
+    } catch (e) {
+      console.warn('Erro ao carregar solicitantes:', e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentPage, debouncedSearch, activeFilter]);
 
-  // Counts
+  useEffect(() => {
+    loadSolicitantes();
+  }, [loadSolicitantes]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, activeFilter]);
+
+  // Contadores globais leves a partir do cache local
   const stats = useMemo(() => {
-    const total = solicitantes.length;
-    const ongs = solicitantes.filter(s => s.tipo === 'ONG' || !!s.codigoOng).length;
-    const cidadaos = solicitantes.filter(s => s.tipo === 'CIDADAO' || (!s.tipo && !s.codigoOng)).length;
-    const orgaos = solicitantes.filter(s => s.tipo === 'ORGAO_PUBLICO').length;
+    const list = db.getSolicitantes();
+    const total = list.length;
+    const ongs = list.filter(s => s.tipo === 'ONG' || !!s.codigoOng).length;
+    const cidadaos = list.filter(s => s.tipo === 'CIDADAO' || (!s.tipo && !s.codigoOng)).length;
+    const orgaos = list.filter(s => s.tipo === 'ORGAO_PUBLICO').length;
     return { total, ongs, cidadaos, orgaos };
-  }, [solicitantes]);
-
-  const filtered = useMemo(() => {
-    return solicitantes.filter(s => {
-      // Filter tab
-      if (activeFilter === 'ONG' && s.tipo !== 'ONG' && !s.codigoOng) return false;
-      if (activeFilter === 'CIDADAO' && s.tipo !== 'CIDADAO' && (s.tipo || s.codigoOng)) return false;
-      if (activeFilter === 'ORGAO_PUBLICO' && s.tipo !== 'ORGAO_PUBLICO') return false;
-
-      // Search
-      const search = searchTerm.toLowerCase().trim();
-      if (!search) return true;
-
-      const matchNome = s.nomeCompleto?.toLowerCase().includes(search);
-      const matchCpf = s.cpf?.toLowerCase().includes(search);
-      const matchCodigo = s.codigoOng?.toLowerCase().includes(search);
-      const matchResp = s.responsavel?.toLowerCase().includes(search);
-      const matchTel = s.telefone?.toLowerCase().includes(search);
-
-      return matchNome || matchCpf || matchCodigo || matchResp || matchTel;
-    });
-  }, [solicitantes, activeFilter, searchTerm]);
+  }, [totalCount]);
 
   const handleCopyCode = (codigo: string) => {
     navigator.clipboard.writeText(codigo);
@@ -159,7 +160,7 @@ const SolicitanteList: React.FC = () => {
       });
 
       setIsModalOpen(false);
-      setRefreshKey(k => k + 1);
+      loadSolicitantes();
     } catch (err: any) {
       setFormError(err.message || 'Erro ao salvar solicitante.');
     }
@@ -168,7 +169,7 @@ const SolicitanteList: React.FC = () => {
   const handleDelete = (id: string, name: string) => {
     if (window.confirm(`Tem certeza que deseja excluir o solicitante "${name}"?`)) {
       db.deleteSolicitante(id);
-      setRefreshKey(k => k + 1);
+      loadSolicitantes();
     }
   };
 
@@ -273,7 +274,7 @@ const SolicitanteList: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filtered.map(s => {
+              {solicitantes.map(s => {
                 const isOng = s.tipo === 'ONG' || !!s.codigoOng;
                 const isOrgao = s.tipo === 'ORGAO_PUBLICO';
 
@@ -362,7 +363,7 @@ const SolicitanteList: React.FC = () => {
                   </tr>
                 );
               })}
-              {filtered.length === 0 && (
+              {solicitantes.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-6 py-12 text-center text-slate-400 italic">
                     Nenhum solicitante ou ONG encontrado com os filtros informados.
@@ -372,6 +373,14 @@ const SolicitanteList: React.FC = () => {
             </tbody>
           </table>
         </div>
+
+        <Pagination
+          currentPage={currentPage}
+          totalItems={totalCount}
+          pageSize={PAGE_SIZE}
+          onPageChange={setCurrentPage}
+          itemName="solicitantes"
+        />
       </div>
 
       {/* MODAL CADASTRO / EDIÇÃO */}

@@ -1099,182 +1099,318 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
   }
 }
 
+export type SyncModule = 'animals' | 'solicitantes' | 'tutores' | 'surgeries' | 'users' | 'kennels' | 'occupations' | 'configs';
+
+export interface PullOptions {
+  modules?: SyncModule[];
+  force?: boolean;
+}
+
+// Controle de Cache e Throttling no Frontend para Redução Drástica de Egress
+const moduleCacheTimestamps: Partial<Record<SyncModule, number>> = {};
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos de cache em memória
+let inFlightPullPromise: Promise<{
+  success: boolean;
+  syncedCounts: Partial<SyncStats['counts']>;
+}> | null = null;
+
 /**
  * Puxa dados do Supabase e mescla com o armazenamento local
+ * Otimizado: seleciona apenas as colunas necessárias, exclui fotos pesadas em base64 da busca geral,
+ * respeita cache de 5 minutos e reutiliza requisições em voo (in-flight deduplication).
  */
-export async function pullFromSupabaseToLocal(dbInstance?: any): Promise<{
+export async function pullFromSupabaseToLocal(
+  dbInstance?: any,
+  options?: PullOptions
+): Promise<{
   success: boolean;
   syncedCounts: Partial<SyncStats['counts']>;
 }> {
-  try {
-    const syncedCounts: Partial<SyncStats['counts']> = {};
+  // Deduplicação de requisições paralelas idênticas
+  if (inFlightPullPromise && !options?.force) {
+    return inFlightPullPromise;
+  }
 
-    // 0. Configurações de Baias e Sistema
+  const execPull = async () => {
     try {
-      const { data: configRow } = await supabase
-        .from('solicitantes')
-        .select('observacoes')
-        .eq('id', 'system-configs-v1')
-        .maybeSingle();
+      const now = Date.now();
+      const isForce = !!options?.force;
+      const requestedModules = options?.modules || [
+        'configs',
+        'solicitantes',
+        'tutores',
+        'animals',
+        'surgeries',
+        'users',
+        'kennels',
+        'occupations'
+      ];
 
-      if (configRow?.observacoes) {
-        const parsedConfigs = JSON.parse(configRow.observacoes);
-        if (Array.isArray(parsedConfigs) && parsedConfigs.length > 0) {
-          localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsedConfigs));
+      const shouldSync = (mod: SyncModule) => {
+        if (!requestedModules.includes(mod)) return false;
+        if (isForce) return true;
+        const lastSync = moduleCacheTimestamps[mod] || 0;
+        return (now - lastSync) > CACHE_TTL_MS;
+      };
+
+      const syncedCounts: Partial<SyncStats['counts']> = {};
+
+      // 0. Configurações de Baias e Sistema
+      if (shouldSync('configs')) {
+        try {
+          const { data: configRow } = await supabase
+            .from('solicitantes')
+            .select('observacoes')
+            .eq('id', 'system-configs-v1')
+            .maybeSingle();
+
+          if (configRow?.observacoes) {
+            const parsedConfigs = JSON.parse(configRow.observacoes);
+            if (Array.isArray(parsedConfigs) && parsedConfigs.length > 0) {
+              localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsedConfigs));
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+                  detail: { configs: parsedConfigs, source: 'supabase-pull' }
+                }));
+              }
+            }
+          }
+          moduleCacheTimestamps.configs = now;
+        } catch (e) {
+          console.warn('Aviso ao puxar configurações de baias:', e);
+        }
+      }
+
+      // 1. Solicitantes (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('solicitantes')) {
+        const { data: remSol } = await supabase
+          .from('solicitantes')
+          .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email, observacoes');
+
+        if (remSol && remSol.length > 0) {
+          const localSol = (dbInstance && typeof dbInstance.getSolicitantes === 'function')
+            ? dbInstance.getSolicitantes()
+            : JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
+          const map = new Map<string, Solicitante>();
+          localSol.forEach((s: Solicitante) => {
+            if (s.id !== 'system-configs-v1' && !s.id.startsWith('__sys_')) map.set(s.id, s);
+          });
+          remSol
+            .filter((r: any) => r.id !== 'system-configs-v1' && !r.id.startsWith('__sys_'))
+            .forEach((r: any) => map.set(r.id, mapSupabaseToSolicitante(r)));
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_solicitantes', JSON.stringify(merged));
+          syncedCounts.solicitantes = merged.length;
+        }
+        moduleCacheTimestamps.solicitantes = now;
+      }
+
+      // 2. Tutores (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('tutores')) {
+        const { data: remTutores } = await supabase
+          .from('tutores')
+          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro');
+
+        if (remTutores && remTutores.length > 0) {
+          const localTut = (dbInstance && typeof dbInstance.getTutores === 'function')
+            ? dbInstance.getTutores()
+            : JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
+          const map = new Map<string, Tutor>();
+          localTut.forEach((t: Tutor) => map.set(t.id, t));
+          remTutores.forEach((r: any) => map.set(r.id, mapSupabaseToTutor(r)));
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_tutores', JSON.stringify(merged));
+          syncedCounts.tutores = merged.length;
+        }
+        moduleCacheTimestamps.tutores = now;
+      }
+
+      // 3. Animais (EXCLUI fotos pesadas em Base64 da listagem geral; preserva fotos locais existentes)
+      if (shouldSync('animals')) {
+        const { data: remAnimals, error: animErr } = await supabase
+          .from('animals')
+          .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, usuario_responsavel_id, solicitante_id, tutor_id, condicao, resgate_samuvet, responsavel_samuvet, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao');
+
+        if (!animErr && remAnimals && remAnimals.length > 0) {
+          const localAnimals = (dbInstance && typeof dbInstance.getAnimals === 'function')
+            ? dbInstance.getAnimals()
+            : JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
+          const map = new Map<string, Animal>();
+          localAnimals.forEach((a: Animal) => map.set(a.id, a));
+
+          remAnimals.forEach((r: any) => {
+            const mapped = mapSupabaseToAnimal(r);
+            const existing = map.get(r.id);
+            // Preserva a foto armazenada localmente para não precisar rebaixar megabytes
+            if (existing?.foto && !mapped.foto) {
+              mapped.foto = existing.foto;
+            }
+            map.set(r.id, mapped);
+          });
+
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_animals', JSON.stringify(merged));
+          syncedCounts.animals = merged.length;
+
           if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
-              detail: { configs: parsedConfigs, source: 'supabase-pull' }
+            window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
+              detail: { source: 'supabase-pull', count: merged.length }
             }));
           }
         }
+        moduleCacheTimestamps.animals = now;
       }
-    } catch (e) {
-      console.warn('Aviso ao puxar configurações de baias:', e);
-    }
 
-    // 1. Solicitantes
-    const { data: remSol } = await supabase.from('solicitantes').select('*');
-    if (remSol && remSol.length > 0) {
-      const localSol = (dbInstance && typeof dbInstance.getSolicitantes === 'function')
-        ? dbInstance.getSolicitantes()
-        : JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
-      const map = new Map<string, Solicitante>();
-      localSol.forEach((s: Solicitante) => {
-        if (s.id !== 'system-configs-v1' && !s.id.startsWith('__sys_')) map.set(s.id, s);
-      });
-      remSol
-        .filter((r: any) => r.id !== 'system-configs-v1' && !r.id.startsWith('__sys_'))
-        .forEach((r: any) => map.set(r.id, mapSupabaseToSolicitante(r)));
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_solicitantes', JSON.stringify(merged));
-      syncedCounts.solicitantes = merged.length;
-    }
+      // 4. Cirurgias (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('surgeries')) {
+        const { data: remCirurgias } = await supabase
+          .from('surgeries')
+          .select('id, animal_id, data_agendada, horario, turno, tipo_cirurgia, status, prioridade, veterinario_responsavel_id, veterinario_responsavel_nome, observacoes_pre_operatorias, observacoes_pos_operatorias, receitas_pos_operatorias, data_realizacao, realizada_por_id, realizada_por_nome, motivo_cancelamento, data_cadastro, usuario_criador_id');
 
-    // 2. Tutores
-    const { data: remTutores } = await supabase.from('tutores').select('*');
-    if (remTutores && remTutores.length > 0) {
-      const localTut = (dbInstance && typeof dbInstance.getTutores === 'function')
-        ? dbInstance.getTutores()
-        : JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
-      const map = new Map<string, Tutor>();
-      localTut.forEach((t: Tutor) => map.set(t.id, t));
-      remTutores.forEach((r: any) => map.set(r.id, mapSupabaseToTutor(r)));
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_tutores', JSON.stringify(merged));
-      syncedCounts.tutores = merged.length;
-    }
-
-    // 3. Animais
-    const { data: remAnimals, error: animErr } = await supabase.from('animals').select('*');
-    if (!animErr && remAnimals && remAnimals.length > 0) {
-      const localAnimals = (dbInstance && typeof dbInstance.getAnimals === 'function')
-        ? dbInstance.getAnimals()
-        : JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
-      const map = new Map<string, Animal>();
-      localAnimals.forEach((a: Animal) => map.set(a.id, a));
-      remAnimals.forEach((r: any) => map.set(r.id, mapSupabaseToAnimal(r)));
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_animals', JSON.stringify(merged));
-      syncedCounts.animals = merged.length;
-
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
-          detail: { source: 'supabase-pull', count: merged.length }
-        }));
-      }
-    }
-
-    // 4. Cirurgias
-    const { data: remCirurgias } = await supabase.from('surgeries').select('*');
-    if (remCirurgias && remCirurgias.length > 0) {
-      const localCir = (dbInstance && typeof dbInstance.getCirurgias === 'function')
-        ? dbInstance.getCirurgias()
-        : JSON.parse(localStorage.getItem('sisbem_cirurgias') || '[]');
-      const map = new Map<string, AgendamentoCirurgia>();
-      localCir.forEach((c: AgendamentoCirurgia) => map.set(c.id, c));
-      remCirurgias.forEach((r: any) => map.set(r.id, mapSupabaseToSurgery(r)));
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_cirurgias', JSON.stringify(merged));
-      syncedCounts.surgeries = merged.length;
-    }
-
-    // 5. Usuários
-    const { data: remUsers } = await supabase.from('users').select('*');
-    if (remUsers && remUsers.length > 0) {
-      const localUsers = (dbInstance && typeof dbInstance.getUsers === 'function')
-        ? (dbInstance.getUsers() || [])
-        : JSON.parse(localStorage.getItem('sisbem_users') || '[]');
-      const map = new Map<string, any>();
-      localUsers.forEach((u: any) => map.set(u.id, u));
-      remUsers.forEach((r: any) => {
-        const existing = map.get(r.id);
-        map.set(r.id, {
-          id: r.id,
-          name: r.name,
-          username: r.username,
-          role: r.role,
-          crmv: r.crmv || undefined,
-          matricula: r.matricula || undefined,
-          email: r.email || undefined,
-          uid: r.uid || undefined,
-          password: existing?.password || undefined,
-        });
-      });
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_users', JSON.stringify(merged));
-      syncedCounts.users = merged.length;
-    }
-
-    // 6. Baias (Kennels)
-    const { data: remKennels } = await supabase.from('kennels').select('*');
-    if (remKennels && remKennels.length > 0) {
-      const raw = remKennels.map(mapSupabaseToKennel);
-      const seen = new Set<string>();
-      const merged: Kennel[] = [];
-      for (const k of raw) {
-        if (!k || !k.id || !k.name) continue;
-        const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          merged.push(k);
+        if (remCirurgias && remCirurgias.length > 0) {
+          const localCir = (dbInstance && typeof dbInstance.getCirurgias === 'function')
+            ? dbInstance.getCirurgias()
+            : JSON.parse(localStorage.getItem('sisbem_cirurgias') || '[]');
+          const map = new Map<string, AgendamentoCirurgia>();
+          localCir.forEach((c: AgendamentoCirurgia) => map.set(c.id, c));
+          remCirurgias.forEach((r: any) => map.set(r.id, mapSupabaseToSurgery(r)));
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_cirurgias', JSON.stringify(merged));
+          syncedCounts.surgeries = merged.length;
         }
+        moduleCacheTimestamps.surgeries = now;
       }
-      localStorage.setItem('sisbem_kennels', JSON.stringify(merged));
-      syncedCounts.kennels = merged.length;
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
-          detail: { source: 'supabase-pull', count: merged.length }
-        }));
-        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+
+      // 5. Usuários (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('users')) {
+        const { data: remUsers } = await supabase
+          .from('users')
+          .select('id, name, username, role, crmv, matricula, email, uid');
+
+        if (remUsers && remUsers.length > 0) {
+          const localUsers = (dbInstance && typeof dbInstance.getUsers === 'function')
+            ? (dbInstance.getUsers() || [])
+            : JSON.parse(localStorage.getItem('sisbem_users') || '[]');
+          const map = new Map<string, any>();
+          localUsers.forEach((u: any) => map.set(u.id, u));
+          remUsers.forEach((r: any) => {
+            const existing = map.get(r.id);
+            map.set(r.id, {
+              id: r.id,
+              name: r.name,
+              username: r.username,
+              role: r.role,
+              crmv: r.crmv || undefined,
+              matricula: r.matricula || undefined,
+              email: r.email || undefined,
+              uid: r.uid || undefined,
+              password: existing?.password || undefined,
+            });
+          });
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_users', JSON.stringify(merged));
+          syncedCounts.users = merged.length;
+        }
+        moduleCacheTimestamps.users = now;
       }
+
+      // 6. Baias (Kennels) (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('kennels')) {
+        const { data: remKennels } = await supabase
+          .from('kennels')
+          .select('id, name, type, capacity');
+
+        if (remKennels && remKennels.length > 0) {
+          const raw = remKennels.map(mapSupabaseToKennel);
+          const seen = new Set<string>();
+          const merged: Kennel[] = [];
+          for (const k of raw) {
+            if (!k || !k.id || !k.name) continue;
+            const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push(k);
+            }
+          }
+          localStorage.setItem('sisbem_kennels', JSON.stringify(merged));
+          syncedCounts.kennels = merged.length;
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
+              detail: { source: 'supabase-pull', count: merged.length }
+            }));
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+          }
+        }
+        moduleCacheTimestamps.kennels = now;
+      }
+
+      // 7. Ocupações de Baias (apenas colunas necessárias, sem SELECT *)
+      if (shouldSync('occupations')) {
+        const { data: remOccs } = await supabase
+          .from('kennel_occupations')
+          .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification');
+
+        if (remOccs) {
+          const localOccs = (dbInstance && typeof dbInstance.getOccupations === 'function')
+            ? dbInstance.getOccupations()
+            : JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+          const map = new Map<string, KennelOccupation>();
+          localOccs.forEach((o: KennelOccupation) => map.set(o.id, o));
+          remOccs.forEach((r: any) => map.set(r.id, mapSupabaseToOccupation(r)));
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_occupations', JSON.stringify(merged));
+          syncedCounts.occupations = merged.length;
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+              detail: { source: 'supabase-pull', count: merged.length }
+            }));
+            window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+          }
+        }
+        moduleCacheTimestamps.occupations = now;
+      }
+
+      return { success: true, syncedCounts };
+    } catch (err) {
+      console.warn('Erro ao puxar dados do Supabase:', err);
+      return { success: false, syncedCounts: {} };
+    } finally {
+      inFlightPullPromise = null;
     }
+  };
 
-    // 7. Ocupações de Baias (Kennel Occupations)
-    const { data: remOccs } = await supabase.from('kennel_occupations').select('*');
-    if (remOccs) {
-      const localOccs = (dbInstance && typeof dbInstance.getOccupations === 'function')
-        ? dbInstance.getOccupations()
-        : JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
-      const map = new Map<string, KennelOccupation>();
-      localOccs.forEach((o: KennelOccupation) => map.set(o.id, o));
-      remOccs.forEach((r: any) => map.set(r.id, mapSupabaseToOccupation(r)));
-      const merged = Array.from(map.values());
-      localStorage.setItem('sisbem_occupations', JSON.stringify(merged));
-      syncedCounts.occupations = merged.length;
+  inFlightPullPromise = execPull();
+  return inFlightPullPromise;
+}
 
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
-          detail: { source: 'supabase-pull', count: merged.length }
-        }));
-        window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+/**
+ * Carrega a foto de um animal sob demanda caso ainda não esteja em cache local.
+ * Evita o download desnecessário de imagens em Base64 durante listagens e navegação comum.
+ */
+export async function ensureAnimalPhoto(animalId: string): Promise<string | null> {
+  try {
+    const localAnimals: Animal[] = JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
+    const existing = localAnimals.find(a => a.id === animalId);
+    if (existing?.foto) return existing.foto;
+
+    const { data, error } = await supabase
+      .from('animals')
+      .select('foto')
+      .eq('id', animalId)
+      .maybeSingle();
+
+    if (!error && data?.foto) {
+      if (existing) {
+        existing.foto = data.foto;
+        localStorage.setItem('sisbem_animals', JSON.stringify(localAnimals));
       }
+      return data.foto;
     }
-
-    return { success: true, syncedCounts };
-  } catch (err) {
-    console.warn('Erro ao puxar dados do Supabase:', err);
-    return { success: false, syncedCounts: {} };
+  } catch (e) {
+    console.warn('Erro ao carregar foto sob demanda:', e);
   }
+  return null;
 }
 
 export function syncLocalKennelsWithConfigs(configs: KennelConfig[]) {
@@ -1327,9 +1463,9 @@ let realtimeChannel: any = null;
 let realtimeInitialized = false;
 
 /**
- * Inicializa a escuta em tempo real (Realtime Channel) do Supabase
- * Permite que múltiplos usuários visualizem novos animais, cadastros, edições
- * e locações de baia instantaneamente sem necessidade de recarregar a página manualmente.
+ * Inicializa a escuta em tempo real (Realtime Channel) do Supabase apenas para tabelas operacionais críticas.
+ * Atualiza registros pontuais em memória sem disparar re-consultas totais do banco.
+ * NÃO utiliza polling periódica nem re-consultas ao focar na janela.
  */
 export function initRealtimeSync(onUpdate?: (table: string, payload: any) => void): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -1349,6 +1485,10 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
               const mapped = mapSupabaseToAnimal(payload.new);
               const idx = localAnimals.findIndex(a => a.id === mapped.id);
               if (idx > -1) {
+                // Preserva foto se payload não trouxe foto nova
+                if (!mapped.foto && localAnimals[idx].foto) {
+                  mapped.foto = localAnimals[idx].foto;
+                }
                 localAnimals[idx] = mapped;
               } else {
                 localAnimals.unshift(mapped);
@@ -1369,79 +1509,6 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
             if (onUpdate) onUpdate('animals', payload);
           } catch (e) {
             console.warn('Erro ao processar realtime de animais:', e);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'solicitantes' },
-        (payload: any) => {
-          try {
-            const rowId = payload.new?.id || payload.old?.id;
-            if (rowId === 'system-configs-v1') {
-              if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-                if (payload.new && payload.new.observacoes) {
-                  try {
-                    const configs = JSON.parse(payload.new.observacoes);
-                    if (Array.isArray(configs)) {
-                      localStorage.setItem('sisbem_kennel_configs', JSON.stringify(configs));
-                      syncLocalKennelsWithConfigs(configs);
-                      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
-                        detail: { configs, source: 'realtime' }
-                      }));
-                      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
-                      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
-                    }
-                  } catch (e) {
-                    console.warn('Erro ao decodificar configs realtime:', e);
-                  }
-                }
-              }
-              return;
-            }
-
-            const list: Solicitante[] = JSON.parse(localStorage.getItem('sisbem_solicitantes') || '[]');
-            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-              const mapped = mapSupabaseToSolicitante(payload.new);
-              const idx = list.findIndex(s => s.id === mapped.id);
-              if (idx > -1) list[idx] = mapped;
-              else list.push(mapped);
-              localStorage.setItem('sisbem_solicitantes', JSON.stringify(list));
-            } else if (payload.eventType === 'DELETE') {
-              const deletedId = payload.old?.id;
-              if (deletedId) {
-                localStorage.setItem('sisbem_solicitantes', JSON.stringify(list.filter(s => s.id !== deletedId)));
-              }
-            }
-            window.dispatchEvent(new CustomEvent('sisbem-solicitantes-changed'));
-            if (onUpdate) onUpdate('solicitantes', payload);
-          } catch (e) {
-            console.warn('Erro ao processar realtime de solicitantes:', e);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'tutores' },
-        (payload: any) => {
-          try {
-            const list: Tutor[] = JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
-            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-              const mapped = mapSupabaseToTutor(payload.new);
-              const idx = list.findIndex(t => t.id === mapped.id);
-              if (idx > -1) list[idx] = mapped;
-              else list.push(mapped);
-              localStorage.setItem('sisbem_tutores', JSON.stringify(list));
-            } else if (payload.eventType === 'DELETE') {
-              const deletedId = payload.old?.id;
-              if (deletedId) {
-                localStorage.setItem('sisbem_tutores', JSON.stringify(list.filter(t => t.id !== deletedId)));
-              }
-            }
-            window.dispatchEvent(new CustomEvent('sisbem-tutores-changed'));
-            if (onUpdate) onUpdate('tutores', payload);
-          } catch (e) {
-            console.warn('Erro ao processar realtime de tutores:', e);
           }
         }
       )
@@ -1475,56 +1542,17 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
           }
         }
       )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'kennels' },
-        (payload: any) => {
-          try {
-            const list: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
-            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-              const mapped = mapSupabaseToKennel(payload.new);
-              const idx = list.findIndex(k => k.id === mapped.id);
-              if (idx > -1) list[idx] = mapped;
-              else list.push(mapped);
-              localStorage.setItem('sisbem_kennels', JSON.stringify(list));
-            } else if (payload.eventType === 'DELETE') {
-              const deletedId = payload.old?.id;
-              if (deletedId) {
-                localStorage.setItem('sisbem_kennels', JSON.stringify(list.filter(k => k.id !== deletedId)));
-              }
-            }
-            window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
-            window.dispatchEvent(new CustomEvent('sisbem-settings-changed'));
-            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
-            if (onUpdate) onUpdate('kennels', payload);
-          } catch (e) {
-            console.warn('Erro ao processar realtime de baias:', e);
-          }
-        }
-      )
       .subscribe();
   } catch (err) {
     console.warn('Erro ao inicializar canal realtime Supabase:', err);
   }
 
-  // Ao focar na aba do navegador, efetua uma busca rápida por dados novos
-  const handleFocus = () => {
-    pullFromSupabaseToLocal().catch(() => {});
-  };
-  window.addEventListener('focus', handleFocus);
-
-  // Sincronização periódica suave em background a cada 20 segundos
-  const intervalId = setInterval(() => {
-    pullFromSupabaseToLocal().catch(() => {});
-  }, 20000);
-
+  // Cleanup: cancela a assinatura realtime. Sem polling e sem listeners de focus.
   return () => {
     if (realtimeChannel) {
       realtimeChannel.unsubscribe();
       realtimeChannel = null;
     }
     realtimeInitialized = false;
-    window.removeEventListener('focus', handleFocus);
-    clearInterval(intervalId);
   };
 }

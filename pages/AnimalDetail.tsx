@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
+import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -96,6 +97,13 @@ const AnimalDetail: React.FC = () => {
     const data = db.getAnimalsJoined().find(a => a.id === id);
     setAnimal(data);
     if (data) {
+      if (!data.foto && id) {
+        ensureAnimalPhoto(id).then(foto => {
+          if (foto) {
+            setAnimal(prev => prev ? { ...prev, foto } : prev);
+          }
+        }).catch(() => {});
+      }
       if (data.adotante) setFormAdocao({ ...formAdocao, nome: data.adotante.nome, cpf: data.adotante.cpf, telefone: data.adotante.telefone });
       if (data.localSoltura) setFormSoltura({ ...formSoltura, local: data.localSoltura });
       if (data.causaObito) {

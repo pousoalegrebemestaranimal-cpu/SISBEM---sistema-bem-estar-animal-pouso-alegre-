@@ -1,34 +1,52 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { db } from '../services/db';
 import { Tutor } from '../types';
 import { Search, UserCircle, Eye, Phone, IdCard, HeartPulse, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { useDebounce } from '../src/hooks/useDebounce';
+import { Pagination } from '../components/Pagination';
+import { fetchTutoresPaginated } from '../src/lib/supabaseQueries';
+
+const PAGE_SIZE = 20;
 
 const TutorList: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
-  
-  const tutores = useMemo(() => {
-    const list = db.getTutores();
-    const animals = db.getAnimals();
-    
-    return list.map(t => ({
-      ...t,
-      animalCount: animals.filter(a => a.tutorId === t.id).length
-    })).sort((a, b) => b.animalCount - a.animalCount);
-  }, []);
+  const debouncedSearch = useDebounce(searchTerm, 300);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [tutores, setTutores] = useState<(Tutor & { animalCount: number })[]>([]);
+  const [totalCount, setTotalCount] = useState<number>(0);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
-  const filtered = useMemo(() => {
-    return tutores.filter(t => 
-      t.nomeCompleto.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      t.cpf.includes(searchTerm)
-    );
-  }, [tutores, searchTerm]);
+  const loadTutores = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const res = await fetchTutoresPaginated({
+        page: currentPage,
+        pageSize: PAGE_SIZE,
+        search: debouncedSearch
+      });
+      setTutores(res.data);
+      setTotalCount(res.totalCount);
+    } catch (e) {
+      console.warn('Erro ao carregar tutores:', e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentPage, debouncedSearch]);
+
+  useEffect(() => {
+    loadTutores();
+  }, [loadTutores]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch]);
 
   const handleDelete = (id: string, name: string) => {
     if (confirm(`Atenção: Ao remover o tutor "${name}", todos os seus animais cadastrados perderão o vínculo legal de responsabilidade. Deseja prosseguir?`)) {
       db.deleteTutor(id);
-      window.location.reload();
+      loadTutores();
     }
   };
 
@@ -43,7 +61,7 @@ const TutorList: React.FC = () => {
         </div>
         <div className="bg-indigo-50 px-4 py-2 rounded-xl border border-indigo-100">
           <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Base de Dados</p>
-          <p className="text-sm font-black text-indigo-700">{tutores.length} Tutores Ativos</p>
+          <p className="text-sm font-black text-indigo-700">{totalCount} Tutores Ativos</p>
         </div>
       </div>
 
@@ -72,7 +90,7 @@ const TutorList: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filtered.map(t => (
+            {tutores.map(t => (
               <tr key={t.id} className="hover:bg-slate-50 transition-colors group">
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
@@ -102,13 +120,21 @@ const TutorList: React.FC = () => {
                 </td>
               </tr>
             ))}
-            {filtered.length === 0 && (
+            {tutores.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-6 py-12 text-center text-slate-400 italic font-medium">Nenhum tutor localizado na base de dados.</td>
               </tr>
             )}
           </tbody>
         </table>
+
+        <Pagination
+          currentPage={currentPage}
+          totalItems={totalCount}
+          pageSize={PAGE_SIZE}
+          onPageChange={setCurrentPage}
+          itemName="tutores"
+        />
       </div>
     </div>
   );

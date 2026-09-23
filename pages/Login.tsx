@@ -108,8 +108,9 @@ const Login: React.FC = () => {
       // 3. Consulta na tabela 'users' do Supabase (para usuários criados no app em qualquer dispositivo)
       const { data: remoteUsers, error: sbError } = await supabase
         .from('users')
-        .select('*')
-        .or(`username.ilike.${cleanInput},email.ilike.${cleanInput}`);
+        .select('id, name, username, role, crmv, matricula, email, uid')
+        .or(`username.ilike.${cleanInput},email.ilike.${cleanInput}`)
+        .limit(1);
 
       if (remoteUsers && remoteUsers.length > 0) {
         const foundUser = remoteUsers[0];

@@ -1,52 +1,62 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { db } from '../services/db';
 import { AnimalJoined, Especie, AnimalCondicao } from '../types';
-import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
+import { useDebounce } from '../src/hooks/useDebounce';
+import { Pagination } from '../components/Pagination';
+import { fetchAnimalsPaginated } from '../src/lib/supabaseQueries';
+import { getThumbnailUrl } from '../src/lib/storageService';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-// Added MapPin to the imports list
 import { Search, Plus, Edit2, Trash2, Filter, Heart, Stethoscope, Clock, Eye, AlertCircle, Camera, Leaf, UserCheck, Skull, UserCircle, MapPin, CheckCircle2, Home, Cpu, Printer, Scissors, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 
+const PAGE_SIZE = 20;
+
 const AnimalList: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
+
   const [filterEspecie, setFilterEspecie] = useState<string>('TODOS');
   const [filterCondicao, setFilterCondicao] = useState<string>('TODOS');
   const [filterOrigem, setFilterOrigem] = useState<string>('TODOS');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [animals, setAnimals] = useState<AnimalJoined[]>([]);
+  const [totalCount, setTotalCount] = useState<number>(0);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [currentPage, setCurrentPage] = useState<number>(1);
 
-  const refreshAnimals = () => {
-    setAnimals(db.getAnimalsJoined());
-  };
-
-  const handleManualSync = async () => {
+  // Consulta paginada REAL NO BANCO SUPABASE com LIMIT/RANGE e FILTROS no servidor PostgREST
+  const loadPaginatedAnimals = useCallback(async () => {
+    setIsSyncing(true);
     try {
-      setIsSyncing(true);
-      await pullFromSupabaseToLocal(db);
-      refreshAnimals();
+      const res = await fetchAnimalsPaginated({
+        page: currentPage,
+        pageSize: PAGE_SIZE,
+        search: debouncedSearch,
+        especie: filterEspecie,
+        condicao: filterCondicao,
+        origem: filterOrigem
+      });
+
+      setAnimals(res.data);
+      setTotalCount(res.totalCount);
     } catch (e) {
-      console.warn('Erro ao atualizar animais:', e);
+      console.warn('Erro ao carregar página de animais:', e);
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, [currentPage, debouncedSearch, filterEspecie, filterCondicao, filterOrigem]);
 
-  // Busca os dados ao montar, ao deletar ou quando eventos de sincronização acontecerem
   useEffect(() => {
-    refreshAnimals();
+    loadPaginatedAnimals();
+  }, [loadPaginatedAnimals]);
 
-    // Sincroniza em segundo plano ao abrir a lista para garantir os registros de outros usuários
-    pullFromSupabaseToLocal(db).then(() => {
-      refreshAnimals();
-    }).catch(() => {});
-
-    // Escuta alterações de animais vindas de outros usuários ou abas
+  // Escuta alterações de animais vindas de outros usuários ou abas
+  useEffect(() => {
     const handleAnimalsChanged = () => {
-      refreshAnimals();
+      loadPaginatedAnimals();
     };
 
     window.addEventListener('sisbem-animals-changed', handleAnimalsChanged);
@@ -56,32 +66,21 @@ const AnimalList: React.FC = () => {
       window.removeEventListener('sisbem-animals-changed', handleAnimalsChanged);
       window.removeEventListener('storage', handleAnimalsChanged);
     };
-  }, [showDeleteConfirm]);
+  }, [loadPaginatedAnimals]);
 
-  const filteredAnimals = animals.filter(animal => {
-    const tutorName = animal.tutor?.nomeCompleto || '';
-    const solicitanteName = animal.solicitante?.nomeCompleto || '';
-    
-    const matchSearch = 
-      animal.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      animal.raca.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (animal.numeroMicrochip && animal.numeroMicrochip.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      tutorName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      solicitanteName.toLowerCase().includes(searchTerm.toLowerCase());
-    
-    const matchEspecie = filterEspecie === 'TODOS' || animal.especie === filterEspecie;
-    const matchCondicao = filterCondicao === 'TODOS' || animal.condicao === filterCondicao;
-    const matchOrigem = 
-      filterOrigem === 'TODOS' || 
-      (filterOrigem === 'EXTERNO' && animal.temTutor) || 
-      (filterOrigem === 'INTERNO' && !animal.temTutor);
+  // Reseta para a página 1 ao alterar filtros ou busca
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, filterEspecie, filterCondicao, filterOrigem]);
 
-    return matchSearch && matchEspecie && matchCondicao && matchOrigem;
-  });
+  const handleManualSync = async () => {
+    await loadPaginatedAnimals();
+  };
 
   const handleDelete = (id: string) => {
     db.deleteAnimal(id);
     setShowDeleteConfirm(null);
+    loadPaginatedAnimals();
   };
 
   const renderCondicaoBadge = (condicao: AnimalCondicao) => {
@@ -192,13 +191,13 @@ const AnimalList: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filteredAnimals.map(animal => (
+            {animals.map(animal => (
               <tr key={animal.id} className="hover:bg-slate-50 transition-colors group">
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
                     <div className="w-12 h-12 rounded-lg bg-slate-100 overflow-hidden shrink-0 border border-slate-200 flex items-center justify-center text-slate-300">
                       {animal.foto ? (
-                        <img src={animal.foto} alt={animal.nome} className="w-full h-full object-cover" />
+                        <img src={getThumbnailUrl(animal.foto)} alt={animal.nome} loading="lazy" className="w-full h-full object-cover" />
                       ) : (
                         <Camera size={16} />
                       )}
@@ -279,13 +278,21 @@ const AnimalList: React.FC = () => {
                 </td>
               </tr>
             ))}
-            {filteredAnimals.length === 0 && (
+            {animals.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-6 py-12 text-center text-slate-400 italic">Nenhum registro encontrado no sistema.</td>
               </tr>
             )}
           </tbody>
         </table>
+
+        <Pagination
+          currentPage={currentPage}
+          totalItems={totalCount}
+          pageSize={PAGE_SIZE}
+          onPageChange={setCurrentPage}
+          itemName="animais"
+        />
       </div>
 
       {showDeleteConfirm && (

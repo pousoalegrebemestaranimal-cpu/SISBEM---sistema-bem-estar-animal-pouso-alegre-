@@ -12,6 +12,7 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
+import { useDebounce } from '../src/hooks/useDebounce';
 
 export const SECTOR_META: Record<KennelType, {
   name: string;
@@ -82,6 +83,7 @@ const AccommodationDashboard: React.FC = () => {
   const [filterType, setFilterType] = useState<string>('TODOS');
   const [statusFilter, setStatusFilter] = useState<'TODAS' | 'LIVRES' | 'OCUPADAS' | 'LOTADAS'>('TODAS');
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearch = useDebounce(searchTerm, 300);
   const [allocatingAnimal, setAllocatingAnimal] = useState<AnimalJoined | null>(null);
   const [selectedKennelId, setSelectedKennelId] = useState('');
   const [justification, setJustification] = useState('');
@@ -120,8 +122,8 @@ const AccommodationDashboard: React.FC = () => {
   useEffect(() => {
     refreshData();
 
-    // Sincroniza em segundo plano ao abrir a tela
-    pullFromSupabaseToLocal(db).then(() => {
+    // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela (com cache)
+    pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'] }).then(() => {
       refreshData();
     }).catch(() => {});
 
@@ -147,7 +149,7 @@ const AccommodationDashboard: React.FC = () => {
   const handleManualSync = async () => {
     setIsSyncing(true);
     try {
-      await pullFromSupabaseToLocal(db);
+      await pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true });
       refreshData();
     } catch (e) {
       console.warn('Erro ao sincronizar baias:', e);
@@ -246,8 +248,8 @@ const AccommodationDashboard: React.FC = () => {
 
       // Busca por nome/número da baia OU nome do animal alojado
       let matchSearch = true;
-      if (searchTerm.trim()) {
-        const query = searchTerm.toLowerCase().trim();
+      if (debouncedSearch.trim()) {
+        const query = debouncedSearch.toLowerCase().trim();
         const matchesBaia = k.name.toLowerCase().includes(query) || (k.type && k.type.toLowerCase().includes(query));
         const matchesAnimal = occupants.some(a => a && a.nome && a.nome.toLowerCase().includes(query));
         matchSearch = matchesBaia || matchesAnimal;
@@ -255,7 +257,7 @@ const AccommodationDashboard: React.FC = () => {
 
       return matchType && matchStatus && matchSearch;
     });
-  }, [uniqueKennels, filterType, statusFilter, searchTerm, occupations, allAnimals]);
+  }, [uniqueKennels, filterType, statusFilter, debouncedSearch, occupations, allAnimals]);
 
   // Agrupamento ordenado por setor oficial
   const groupedKennels = useMemo(() => {

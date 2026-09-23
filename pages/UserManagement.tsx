@@ -73,7 +73,9 @@ NOTIFY pgrst, 'reload schema';`;
   const refreshUsers = async () => {
     const localUsers = db.getUsers() || [];
     try {
-      const { data: remoteUsers } = await supabase.from('users').select('*');
+      const { data: remoteUsers } = await supabase
+        .from('users')
+        .select('id, name, username, role, crmv, matricula, email, uid');
       if (remoteUsers && remoteUsers.length > 0) {
         const map = new Map<string, any>();
         localUsers.forEach((u: any) => map.set(u.id, u));
@@ -107,9 +109,9 @@ NOTIFY pgrst, 'reload schema';`;
     setSupabaseTableStatus('checking');
     setSupabaseErrorDetails(null);
     try {
-      const { data, error, status } = await supabase
+      const { count, error } = await supabase
         .from('users')
-        .select('id', { count: 'exact' });
+        .select('id', { count: 'exact', head: true });
 
       if (error) {
         if (error.code === 'PGRST205' || error.message.includes('not find the table')) {
@@ -122,7 +124,7 @@ NOTIFY pgrst, 'reload schema';`;
         setSupabaseUsersCount(null);
       } else {
         setSupabaseTableStatus('exists');
-        setSupabaseUsersCount(data?.length ?? 0);
+        setSupabaseUsersCount(count ?? 0);
       }
     } catch (err: any) {
       setSupabaseTableStatus('error');
