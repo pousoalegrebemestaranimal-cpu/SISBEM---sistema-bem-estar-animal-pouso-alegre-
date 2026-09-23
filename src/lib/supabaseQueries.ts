@@ -269,3 +269,46 @@ export async function fetchSolicitantesPaginated(params: FetchSolicitantesParams
     };
   }
 }
+
+/**
+ * Busca os dados de um animal específico diretamente no Supabase por ID com relacionamentos.
+ * Usado para abrir a ficha completa mesmo que o animal não esteja no cache local recente.
+ */
+export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> {
+  try {
+    const { data: row, error } = await supabase
+      .from('animals')
+      .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao, foto, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, resgate_samuvet, responsavel_samuvet')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !row) return null;
+
+    const animal = mapSupabaseToAnimal(row);
+    const solicitantes = db.getSolicitantes();
+    const tutores = db.getTutores();
+    const users = db.getUsers();
+    const records = db.getRecords();
+    const logs = db.getStatusLogs();
+    const occupations = db.getOccupations();
+    const kennels = db.getKennels();
+    const cirurgias = db.getCirurgias();
+
+    const currentOcc = occupations.find((o: KennelOccupation) => o.animalId === animal.id && !o.exitDate);
+    const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id);
+
+    return {
+      ...animal,
+      solicitante: solicitantes.find(s => s.id === animal.solicitanteId),
+      tutor: animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined,
+      usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
+      historico: records.filter(r => r.animalId === animal.id && !r.inativo),
+      statusLogs: logs.filter(l => l.animalId === animal.id),
+      currentOccupation: currentOcc ? { ...currentOcc, kennel: kennels.find(k => k.id === currentOcc.kennelId) } : undefined,
+      cirurgias: animalCirurgias
+    };
+  } catch (err) {
+    console.warn('Erro ao buscar animal por id no Supabase:', err);
+    return null;
+  }
+}

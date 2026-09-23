@@ -4,6 +4,7 @@ import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { db } from './services/db';
 import { supabase, mapSupabaseUserToAppUser } from './src/lib/supabase';
 import { pullFromSupabaseToLocal, initRealtimeSync } from './src/lib/supabaseSync';
+import { sanitizeExistingLocalStorage } from './src/lib/safeStorage';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AnimalList from './pages/AnimalList';
@@ -57,6 +58,9 @@ const AppRoutes = () => {
 
 const App: React.FC = () => {
   useEffect(() => {
+    // 0. Saneamento preventivo de cota do localStorage (elimina Base64 e corta excedentes sem apagar nada do Supabase)
+    sanitizeExistingLocalStorage();
+
     // Sincroniza dados do Supabase imediatamente ao carregar o aplicativo
     pullFromSupabaseToLocal(db).catch(err => console.warn('Supabase initial pull error:', err));
 

@@ -20,6 +20,7 @@ import {
   syncAllLocalDataToSupabase,
   pullFromSupabaseToLocal
 } from '../src/lib/supabaseSync';
+import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal } from '../src/lib/safeStorage';
 
 const KEYS = {
   USERS: 'sisbem_users',
@@ -535,7 +536,7 @@ export const resetAndSeedAllData = () => {
       resgateSamuvet: false
     }
   ];
-  localStorage.setItem(KEYS.ANIMALS, JSON.stringify(animals));
+  safeSetLocalAnimals(animals);
 
   // 6. Prontuários e Prescrições Clínicas
   const records: ClinicalRecord[] = [
@@ -1076,7 +1077,7 @@ export const resetAndSeedAllData = () => {
 
 export const clearAllFictitiousData = () => {
   // 1. Apaga todos os animais fictícios
-  localStorage.setItem(KEYS.ANIMALS, JSON.stringify([]));
+  safeSetLocalAnimals([]);
 
   // 2. Apaga todos os tutores fictícios de teste
   localStorage.setItem(KEYS.TUTORES, JSON.stringify([]));
@@ -1307,7 +1308,7 @@ export const db = {
 
     const animals = db.getAnimals();
     const updatedAnimals = animals.map(a => a.solicitanteId === id ? { ...a, solicitanteId: '' } : a);
-    localStorage.setItem(KEYS.ANIMALS, JSON.stringify(updatedAnimals));
+    safeSetLocalAnimals(updatedAnimals);
     deleteSolicitanteFromSupabase(id).catch(err => console.warn('Supabase deleteSolicitante:', err));
   },
 
@@ -1679,10 +1680,15 @@ export const db = {
     if (existingIndex >= 0) {
       animals[existingIndex] = newAnimal;
     } else {
-      animals.push(newAnimal);
+      animals.unshift(newAnimal);
     }
     
-    localStorage.setItem(KEYS.ANIMALS, JSON.stringify(animals));
+    try {
+      safeSetLocalAnimals(animals);
+    } catch (err) {
+      console.warn('[db.saveAnimal] Não foi possível persistir no localStorage (mantido em memória):', err);
+    }
+
     syncAnimalToSupabase(newAnimal).catch(err => console.warn('Supabase syncAnimal:', err));
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('sisbem-animals-changed', { detail: { animal: newAnimal } }));
@@ -1691,18 +1697,18 @@ export const db = {
   },
 
   saveAnimalAsync: async (data: Partial<Animal>, personaData: any, userId: string) => {
-    const newAnimal = db.saveAnimal(data, personaData, userId);
     try {
-      await syncAnimalToSupabase(newAnimal);
+      await syncAnimalToSupabase(data as Animal);
     } catch (err) {
       console.warn('Supabase syncAnimal error:', err);
     }
+    const newAnimal = db.saveAnimal(data, personaData, userId);
     return newAnimal;
   },
 
   deleteAnimal: (id: string) => {
     const animals = db.getAnimals().filter(a => a.id !== id);
-    localStorage.setItem(KEYS.ANIMALS, JSON.stringify(animals));
+    safeSetLocalAnimals(animals);
     
     const records = db.getRecords().filter(r => r.animalId !== id);
     localStorage.setItem(KEYS.RECORDS, JSON.stringify(records));
@@ -1926,7 +1932,7 @@ export const db = {
     
     const animals = db.getAnimals();
     const updatedAnimals = animals.map(a => a.tutorId === id ? { ...a, tutorId: undefined, temTutor: false } : a);
-    localStorage.setItem(KEYS.ANIMALS, JSON.stringify(updatedAnimals));
+    safeSetLocalAnimals(updatedAnimals);
     deleteTutorFromSupabase(id).catch(err => console.warn('Supabase deleteTutor:', err));
   },
 

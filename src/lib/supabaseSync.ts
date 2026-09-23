@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { hashPassword } from './authCrypto';
+import { safeSetLocalAnimals, isBase64Photo, safeSetItem } from './safeStorage';
 import {
   Animal,
   Solicitante,
@@ -1225,36 +1226,22 @@ export async function pullFromSupabaseToLocal(
         moduleCacheTimestamps.tutores = now;
       }
 
-      // 3. Animais (EXCLUI fotos pesadas em Base64 da listagem geral; preserva fotos locais existentes)
+      // 3. Animais (Cache local leve: apenas 30 mais recentes, sem Base64 no localStorage)
       if (shouldSync('animals')) {
         const { data: remAnimals, error: animErr } = await supabase
           .from('animals')
-          .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, usuario_responsavel_id, solicitante_id, tutor_id, condicao, resgate_samuvet, responsavel_samuvet, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao');
+          .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, usuario_responsavel_id, solicitante_id, tutor_id, condicao, resgate_samuvet, responsavel_samuvet, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao')
+          .order('data_cadastro', { ascending: false })
+          .limit(30);
 
         if (!animErr && remAnimals && remAnimals.length > 0) {
-          const localAnimals = (dbInstance && typeof dbInstance.getAnimals === 'function')
-            ? dbInstance.getAnimals()
-            : JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
-          const map = new Map<string, Animal>();
-          localAnimals.forEach((a: Animal) => map.set(a.id, a));
-
-          remAnimals.forEach((r: any) => {
-            const mapped = mapSupabaseToAnimal(r);
-            const existing = map.get(r.id);
-            // Preserva a foto armazenada localmente para não precisar rebaixar megabytes
-            if (existing?.foto && !mapped.foto) {
-              mapped.foto = existing.foto;
-            }
-            map.set(r.id, mapped);
-          });
-
-          const merged = Array.from(map.values());
-          localStorage.setItem('sisbem_animals', JSON.stringify(merged));
-          syncedCounts.animals = merged.length;
+          const mapped = remAnimals.map(mapSupabaseToAnimal);
+          safeSetLocalAnimals(mapped);
+          syncedCounts.animals = mapped.length;
 
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
-              detail: { source: 'supabase-pull', count: merged.length }
+              detail: { source: 'supabase-pull', count: mapped.length }
             }));
           }
         }
@@ -1392,7 +1379,7 @@ export async function ensureAnimalPhoto(animalId: string): Promise<string | null
   try {
     const localAnimals: Animal[] = JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
     const existing = localAnimals.find(a => a.id === animalId);
-    if (existing?.foto) return existing.foto;
+    if (existing?.foto && !isBase64Photo(existing.foto)) return existing.foto;
 
     const { data, error } = await supabase
       .from('animals')
@@ -1401,10 +1388,12 @@ export async function ensureAnimalPhoto(animalId: string): Promise<string | null
       .maybeSingle();
 
     if (!error && data?.foto) {
-      if (existing) {
+      // Se for URL do Supabase Storage / CDN (não Base64), pode salvar no cache local com segurança
+      if (!isBase64Photo(data.foto) && existing) {
         existing.foto = data.foto;
-        localStorage.setItem('sisbem_animals', JSON.stringify(localAnimals));
+        safeSetLocalAnimals(localAnimals);
       }
+      // Se for foto em Base64 legada, retorna em memória para renderizar a tela, mas NUNCA grava Base64 no localStorage!
       return data.foto;
     }
   } catch (e) {
@@ -1485,7 +1474,7 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
               const mapped = mapSupabaseToAnimal(payload.new);
               const idx = localAnimals.findIndex(a => a.id === mapped.id);
               if (idx > -1) {
-                // Preserva foto se payload não trouxe foto nova
+                // Preserva foto se payload não trouxe foto nova e se não for base64
                 if (!mapped.foto && localAnimals[idx].foto) {
                   mapped.foto = localAnimals[idx].foto;
                 }
@@ -1493,12 +1482,12 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
               } else {
                 localAnimals.unshift(mapped);
               }
-              localStorage.setItem('sisbem_animals', JSON.stringify(localAnimals));
+              safeSetLocalAnimals(localAnimals);
             } else if (payload.eventType === 'DELETE') {
               const deletedId = payload.old?.id;
               if (deletedId) {
                 const filtered = localAnimals.filter(a => a.id !== deletedId);
-                localStorage.setItem('sisbem_animals', JSON.stringify(filtered));
+                safeSetLocalAnimals(filtered);
               }
             }
 

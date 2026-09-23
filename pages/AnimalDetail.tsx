@@ -13,6 +13,7 @@ import {
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
+import { fetchAnimalById } from '../src/lib/supabaseQueries';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -93,10 +94,27 @@ const AnimalDetail: React.FC = () => {
     }
   };
 
+  const applyDataForms = (data: AnimalJoined) => {
+    if (data.adotante) setFormAdocao({ nome: data.adotante.nome, cpf: data.adotante.cpf, telefone: data.adotante.telefone });
+    if (data.localSoltura) setFormSoltura({ local: data.localSoltura });
+    if (data.causaObito) {
+      if (data.causaObito.toLowerCase().startsWith('eutanásia') || data.causaObito.toLowerCase().startsWith('eutanasia')) {
+        const causaClean = data.causaObito.replace(/^eutana[sś]ia\s*[-–:]?\s*/i, '');
+        setFormObito({ tipo: 'Eutanásia', causa: causaClean, data: data.dataObito || new Date().toISOString().split('T')[0] });
+      } else if (data.causaObito.toLowerCase().startsWith('óbito natural') || data.causaObito.toLowerCase().startsWith('obito natural')) {
+        const causaClean = data.causaObito.replace(/^óbito natural\s*[-–:]?\s*/i, '');
+        setFormObito({ tipo: 'Óbito Natural', causa: causaClean, data: data.dataObito || new Date().toISOString().split('T')[0] });
+      } else {
+        setFormObito({ tipo: 'Óbito Natural', causa: data.causaObito, data: data.dataObito || new Date().toISOString().split('T')[0] });
+      }
+    }
+  };
+
   const loadAnimalData = () => {
     const data = db.getAnimalsJoined().find(a => a.id === id);
-    setAnimal(data);
     if (data) {
+      setAnimal(data);
+      applyDataForms(data);
       if (!data.foto && id) {
         ensureAnimalPhoto(id).then(foto => {
           if (foto) {
@@ -104,19 +122,13 @@ const AnimalDetail: React.FC = () => {
           }
         }).catch(() => {});
       }
-      if (data.adotante) setFormAdocao({ ...formAdocao, nome: data.adotante.nome, cpf: data.adotante.cpf, telefone: data.adotante.telefone });
-      if (data.localSoltura) setFormSoltura({ ...formSoltura, local: data.localSoltura });
-      if (data.causaObito) {
-        if (data.causaObito.toLowerCase().startsWith('eutanásia') || data.causaObito.toLowerCase().startsWith('eutanasia')) {
-          const causaClean = data.causaObito.replace(/^eutana[sś]ia\s*[-–:]?\s*/i, '');
-          setFormObito({ tipo: 'Eutanásia', causa: causaClean, data: data.dataObito || new Date().toISOString().split('T')[0] });
-        } else if (data.causaObito.toLowerCase().startsWith('óbito natural') || data.causaObito.toLowerCase().startsWith('obito natural')) {
-          const causaClean = data.causaObito.replace(/^óbito natural\s*[-–:]?\s*/i, '');
-          setFormObito({ tipo: 'Óbito Natural', causa: causaClean, data: data.dataObito || new Date().toISOString().split('T')[0] });
-        } else {
-          setFormObito({ tipo: 'Óbito Natural', causa: data.causaObito, data: data.dataObito || new Date().toISOString().split('T')[0] });
+    } else if (id) {
+      fetchAnimalById(id).then(remoteAnimal => {
+        if (remoteAnimal) {
+          setAnimal(remoteAnimal);
+          applyDataForms(remoteAnimal);
         }
-      }
+      }).catch(err => console.warn('Erro ao carregar animal do Supabase:', err));
     }
   };
 

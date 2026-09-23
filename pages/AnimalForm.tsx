@@ -5,7 +5,7 @@ import * as ReactRouterDOM from 'react-router-dom';
 const { useParams, useNavigate } = ReactRouterDOM as any;
 import { db } from '../services/db';
 import { Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
-import { syncAnimalToSupabase } from '../src/lib/supabaseSync';
+import { syncAnimalToSupabase, syncTutorToSupabase, syncSolicitanteToSupabase } from '../src/lib/supabaseSync';
 import { uploadAnimalPhoto, compressImage } from '../src/lib/storageService';
 import { validateCPF, formatCPF, formatTelefone } from '../utils/validation';
 import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock } from 'lucide-react';
@@ -341,11 +341,11 @@ const AnimalForm: React.FC = () => {
     try {
       setLoading(true);
 
-      // Upload de foto para o Supabase Storage (se for Base64 nova)
+      // 1. Upload de foto para o Supabase Storage (se for Base64 nova)
       let finalFoto = animal.foto;
       if (animal.foto && animal.foto.startsWith('data:image/')) {
         try {
-          const photoTargetId = id || `temp_${Date.now()}`;
+          const photoTargetId = id || animal.id || `anim_${Date.now()}`;
           const uploadedUrl = await uploadAnimalPhoto(photoTargetId, animal.foto);
           if (uploadedUrl && !uploadedUrl.startsWith('data:image/')) {
             finalFoto = uploadedUrl;
@@ -356,14 +356,42 @@ const AnimalForm: React.FC = () => {
       }
 
       const personaData = isExterno ? tutor : solicitante;
-      const animalToSave = { ...animal, foto: finalFoto };
-      const savedAnimal = db.saveAnimal(animalToSave, personaData, user!.id);
-      
+      const targetAnimalId = animal.id || id || crypto.randomUUID();
+      const animalToSave = {
+        ...animal,
+        id: targetAnimalId,
+        foto: finalFoto,
+        peso: Number(animal.peso) || 0,
+        usuarioResponsavelId: animal.usuarioResponsavelId || user!.id,
+        dataCadastro: animal.dataCadastro || new Date().toISOString()
+      };
+
+      // 2. SALVAR PRIMEIRO NO SUPABASE (Fonte oficial dos dados)
+      let supabaseSuccess = false;
       try {
-        await syncAnimalToSupabase(savedAnimal);
-        setMessage({ type: 'success', text: 'Registro salvo e sincronizado na nuvem com sucesso!' });
+        if (personaData && personaData.cpf) {
+          if (isExterno) {
+            await syncTutorToSupabase(personaData as Tutor);
+          } else {
+            await syncSolicitanteToSupabase(personaData as Solicitante);
+          }
+        }
+        supabaseSuccess = await syncAnimalToSupabase(animalToSave);
       } catch (syncErr) {
-        setMessage({ type: 'success', text: 'Registro salvo localmente. Sincronização em nuvem em andamento.' });
+        console.warn('Falha preliminar no sync do Supabase:', syncErr);
+      }
+
+      // 3. ATUALIZA CACHE LOCAL (Cópia secundária, resiliente e protegida de QuotaExceededError)
+      try {
+        db.saveAnimal(animalToSave, personaData, user!.id);
+      } catch (cacheErr) {
+        console.warn('Falha ao atualizar cache secundário (ignorado com segurança):', cacheErr);
+      }
+
+      if (supabaseSuccess) {
+        setMessage({ type: 'success', text: 'Registro salvo no Supabase com sucesso!' });
+      } else {
+        setMessage({ type: 'success', text: 'Registro salvo com sucesso. Sincronização em nuvem em andamento.' });
       }
 
       setTimeout(() => navigate('/animais'), 1200);
