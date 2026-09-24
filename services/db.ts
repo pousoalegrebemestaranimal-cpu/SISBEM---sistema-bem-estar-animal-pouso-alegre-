@@ -13,6 +13,8 @@ import {
   deleteRecordFromSupabase,
   syncKennelToSupabase,
   syncOccupationToSupabase,
+  allocateKennelInSupabase,
+  releaseKennelInSupabase,
   syncKennelConfigsToSupabase,
   syncKennelsFullToSupabase,
   syncUserToSupabase,
@@ -21,6 +23,7 @@ import {
   pullFromSupabaseToLocal
 } from '../src/lib/supabaseSync';
 import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal } from '../src/lib/safeStorage';
+import { isOccupationActive, getActiveOccupation, getAllActiveOccupations } from '../src/lib/supabaseQueries';
 
 const KEYS = {
   USERS: 'sisbem_users',
@@ -1118,6 +1121,7 @@ export const clearAllFictitiousData = () => {
 };
 
 const initSystem = () => {
+  if (typeof localStorage === 'undefined') return;
   // 1. Inicializa usuários básicos de acesso se não existirem
   const existingUsers = localStorage.getItem(KEYS.USERS);
   if (!existingUsers || JSON.parse(existingUsers || '[]').length === 0) {
@@ -1220,6 +1224,12 @@ export const db = {
     return deduplicated;
   },
   getOccupations: (): KennelOccupation[] => JSON.parse(localStorage.getItem(KEYS.OCCUPATIONS) || '[]'),
+  getActiveOccupation: (animalId: string): KennelOccupation | undefined => {
+    return getActiveOccupation(db.getOccupations(), animalId);
+  },
+  getAllActiveOccupations: (): KennelOccupation[] => {
+    return getAllActiveOccupations(db.getOccupations());
+  },
   getKennelConfigs: (): KennelConfig[] => {
     const stored = localStorage.getItem(KEYS.KENNEL_CONFIGS);
     if (stored) {
@@ -1341,7 +1351,7 @@ export const db = {
   syncKennelsWithConfigs: (configs: KennelConfig[]) => {
     const rawKennels: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');
     const occupations: KennelOccupation[] = JSON.parse(localStorage.getItem(KEYS.OCCUPATIONS) || '[]');
-    const activeOccKennelIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.kennelId));
+    const activeOccKennelIds = new Set(occupations.filter(o => isOccupationActive(o)).map(o => o.kennelId));
 
     const newKennels: Kennel[] = [];
 
@@ -1422,9 +1432,10 @@ export const db = {
     const cirurgias = db.getCirurgias();
 
     return animals.map(animal => {
-      const currentOcc = occupations.find(o => o.animalId === animal.id && !o.exitDate);
+      const currentOcc = getActiveOccupation(occupations, animal.id);
       const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id).sort((a, b) => new Date(b.dataAgendada).getTime() - new Date(a.dataAgendada).getTime());
       const activeCirurgia = animalCirurgias.find(c => c.status === CirurgiaStatus.AGENDADA || c.status === CirurgiaStatus.EM_PREPARO);
+      const matchedKennel = currentOcc ? (kennels.find(k => k.id === currentOcc.kennelId) || (currentOcc as any).kennel) : undefined;
 
       return {
         ...animal,
@@ -1433,7 +1444,7 @@ export const db = {
         usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
         historico: records.filter(r => r.animalId === animal.id && !r.inativo),
         statusLogs: logs.filter(l => l.animalId === animal.id).sort((a,b) => new Date(b.dataAlteracao).getTime() - new Date(a.dataAlteracao).getTime()),
-        currentOccupation: currentOcc ? { ...currentOcc, kennel: kennels.find(k => k.id === currentOcc.kennelId) } : undefined,
+        currentOccupation: currentOcc ? { ...currentOcc, kennel: matchedKennel } : undefined,
         cirurgias: animalCirurgias,
         agendamentoCastracaoAtivo: activeCirurgia
       };
@@ -1443,36 +1454,40 @@ export const db = {
   allocateAnimal: (allocation: Omit<KennelOccupation, 'id' | 'entryDate'>) => {
     const occupations = db.getOccupations();
     const kennels = db.getKennels();
-    const active = occupations.filter(o => o.kennelId === allocation.kennelId && !o.exitDate);
+    const active = occupations.filter(o => o.kennelId === allocation.kennelId && isOccupationActive(o));
     const kennel = kennels.find(k => k.id === allocation.kennelId);
 
     if (!kennel) throw new Error("Baia não encontrada.");
     if (active.length >= kennel.capacity) throw new Error("Capacidade máxima da baia atingida.");
 
-    const prevIdx = occupations.findIndex(o => o.animalId === allocation.animalId && !o.exitDate);
-    let prevOcc: KennelOccupation | null = null;
-    if (prevIdx > -1) {
-      occupations[prevIdx].exitDate = new Date().toISOString();
-      prevOcc = occupations[prevIdx];
-    }
+    const now = new Date().toISOString();
+    // Encerra qualquer ocupação ativa anterior do animal
+    occupations.forEach(o => {
+      if (o.animalId === allocation.animalId && isOccupationActive(o)) {
+        o.exitDate = now;
+      }
+    });
 
     const newOcc: KennelOccupation = {
       ...allocation,
       id: crypto.randomUUID(),
-      entryDate: new Date().toISOString()
+      entryDate: now
     };
 
     occupations.push(newOcc);
     localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
 
-    if (prevOcc) {
-      syncOccupationToSupabase(prevOcc).catch(err => console.warn('Supabase syncOccupation (prev):', err));
-    }
-    syncOccupationToSupabase(newOcc).catch(err => console.warn('Supabase syncOccupation:', err));
+    allocateKennelInSupabase({
+      kennelId: allocation.kennelId,
+      animalId: allocation.animalId,
+      vetId: allocation.vetId,
+      justification: allocation.justification,
+      id: newOcc.id
+    }).catch(err => console.warn('Supabase allocateKennelInSupabase async catch:', err));
 
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
-        detail: { action: 'allocated', occupation: newOcc }
+        detail: { action: 'allocated', occupation: newOcc, animalId: allocation.animalId }
       }));
       window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
     }
@@ -1481,31 +1496,49 @@ export const db = {
   },
 
   allocateAnimalAsync: async (allocation: Omit<KennelOccupation, 'id' | 'entryDate'>) => {
-    const newOcc = db.allocateAnimal(allocation);
+    // 1. Tentar alocação primária no Supabase (autoritativo)
     try {
-      await syncOccupationToSupabase(newOcc);
+      const res = await allocateKennelInSupabase({
+        kennelId: allocation.kennelId,
+        animalId: allocation.animalId,
+        vetId: allocation.vetId,
+        justification: allocation.justification
+      });
+      if (res.success && res.occupation) {
+        return res.occupation;
+      }
     } catch (e) {
-      console.warn('Erro ao sincronizar alocação de baia:', e);
+      console.warn('Erro ao alocar baia no Supabase, aplicando fallback local:', e);
     }
-    return newOcc;
+
+    // 2. Fallback local
+    return db.allocateAnimal(allocation);
   },
 
   releaseAnimalFromKennel: (animalId: string, releaseJustification?: string) => {
     const occupations = db.getOccupations();
-    const idx = occupations.findIndex(o => o.animalId === animalId && !o.exitDate);
-    if (idx > -1) {
-      occupations[idx].exitDate = new Date().toISOString();
-      if (releaseJustification) {
-        occupations[idx].justification = occupations[idx].justification 
-          ? `${occupations[idx].justification} (Desalocado: ${releaseJustification})`
-          : `Desalocado: ${releaseJustification}`;
+    const now = new Date().toISOString();
+    let foundAny = false;
+
+    occupations.forEach(o => {
+      if (o.animalId === animalId && isOccupationActive(o)) {
+        o.exitDate = now;
+        foundAny = true;
+        if (releaseJustification) {
+          o.justification = o.justification 
+            ? `${o.justification} (Desalocado: ${releaseJustification})`
+            : `Desalocado: ${releaseJustification}`;
+        }
       }
+    });
+
+    if (foundAny) {
       localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
-      syncOccupationToSupabase(occupations[idx]).catch(err => console.warn('Supabase syncOccupation:', err));
+      releaseKennelInSupabase(animalId, releaseJustification).catch(err => console.warn('Supabase releaseKennel:', err));
 
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
-          detail: { action: 'released', occupation: occupations[idx] }
+          detail: { action: 'released', animalId }
         }));
         window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
       }
@@ -1513,16 +1546,15 @@ export const db = {
   },
 
   releaseAnimalFromKennelAsync: async (animalId: string, releaseJustification?: string) => {
-    db.releaseAnimalFromKennel(animalId, releaseJustification);
-    const occupations = db.getOccupations();
-    const updated = occupations.find(o => o.animalId === animalId && !!o.exitDate);
-    if (updated) {
-      try {
-        await syncOccupationToSupabase(updated);
-      } catch (e) {
-        console.warn('Erro ao sincronizar desocupação:', e);
+    try {
+      const res = await releaseKennelInSupabase(animalId, releaseJustification);
+      if (res.success) {
+        return;
       }
+    } catch (e) {
+      console.warn('Erro ao desalocar no Supabase:', e);
     }
+    db.releaseAnimalFromKennel(animalId, releaseJustification);
   },
 
   saveAnimal: (animalData: Partial<Animal>, personaData: Partial<Solicitante | Tutor> | null, userId: string) => {
@@ -2048,12 +2080,8 @@ export const db = {
     const animal = animals.find(a => a.id === animalId);
     if (!animal) throw new Error("Animal não encontrado.");
 
-    // Se estiver ocupando baia, desaloca
-    const occupations = db.getOccupations();
-    const activeOcc = occupations.find(o => o.animalId === animalId && !o.exitDate);
-    if (activeOcc) {
-      db.releaseAnimalFromKennel(animalId, observacoes || 'Alta hospitalar pós-internação concedida pelo médico veterinário');
-    }
+    // Se estiver ocupando baia, desaloca todas as ocupações ativas
+    db.releaseAnimalFromKennel(animalId, observacoes || 'Alta hospitalar pós-internação concedida pelo médico veterinário');
 
     const logs = db.getStatusLogs();
     logs.push({
@@ -2071,6 +2099,15 @@ export const db = {
       condicao: AnimalCondicao.ATENDIDO,
       necessitaInternacao: false
     }, null, vetId);
+  },
+
+  darAltaAnimalExternoAsync: async (animalId: string, vetId: string, observacoes?: string) => {
+    db.darAltaAnimalExterno(animalId, vetId, observacoes);
+    try {
+      await releaseKennelInSupabase(animalId, observacoes || 'Alta hospitalar pós-internação concedida pelo médico veterinário');
+    } catch (err) {
+      console.warn('Erro ao sincronizar alta no Supabase:', err);
+    }
   },
 
   setCurrentUser: (user: User | null) => {

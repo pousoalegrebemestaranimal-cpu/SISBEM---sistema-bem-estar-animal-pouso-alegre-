@@ -12,6 +12,7 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
+import { isOccupationActive, getAllActiveOccupations } from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
 
 export const SECTOR_META: Record<KennelType, {
@@ -169,14 +170,14 @@ const AccommodationDashboard: React.FC = () => {
   // 3. Estão em condições que exigem abrigo no centro
   const waitingAnimals = useMemo(() => {
     return allAnimals.filter(a => 
-      !occupations.some(o => o.animalId === a.id && !o.exitDate) && 
+      !occupations.some(o => o.animalId === a.id && isOccupationActive(o)) && 
       ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
     );
   }, [allAnimals, occupations]);
 
   // Animais aptos para serem alocados em baia (sem acomodação ativa)
   const unaccommodatedAnimals = useMemo(() => {
-    const activeAnimalIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.animalId));
+    const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
     return allAnimals.filter(a => 
       !activeAnimalIds.has(a.id) && 
       ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO].includes(a.condicao)
@@ -199,7 +200,7 @@ const AccommodationDashboard: React.FC = () => {
   }, [kennels]);
 
   const getKennelData = (kennelId: string) => {
-    const activeOccs = occupations.filter(o => o.kennelId === kennelId && !o.exitDate);
+    const activeOccs = getAllActiveOccupations(occupations).filter(o => o.kennelId === kennelId);
     const occupants = activeOccs.map(o => allAnimals.find(a => a.id === o.animalId)).filter(Boolean) as AnimalJoined[];
     return { count: activeOccs.length, occupants, activeOccs };
   };
@@ -207,7 +208,7 @@ const AccommodationDashboard: React.FC = () => {
   const globalSummary = useMemo(() => {
     const totalKennels = uniqueKennels.length;
     const totalCapacity = uniqueKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
-    const activeOccs = occupations.filter(o => !o.exitDate);
+    const activeOccs = getAllActiveOccupations(occupations);
     const totalOccupied = activeOccs.length;
     const totalFree = Math.max(0, totalCapacity - totalOccupied);
     const overallPercent = totalCapacity > 0 ? Math.round((totalOccupied / totalCapacity) * 100) : 0;
@@ -215,9 +216,10 @@ const AccommodationDashboard: React.FC = () => {
   }, [uniqueKennels, occupations]);
 
   const stats = useMemo(() => {
+    const activeOccs = getAllActiveOccupations(occupations);
     return Object.values(KennelType).map(type => {
       const typeKennels = uniqueKennels.filter(k => k.type === type);
-      const typeOccupations = occupations.filter(o => !o.exitDate && typeKennels.some(k => k.id === o.kennelId));
+      const typeOccupations = activeOccs.filter(o => typeKennels.some(k => k.id === o.kennelId));
       const totalCapacity = typeKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
       return {
         type,
@@ -1186,14 +1188,17 @@ const AccommodationDashboard: React.FC = () => {
                     <option value="">-- Selecione uma baia --</option>
                     {kennels
                       .filter(k => {
-                        const activeCount = occupations.filter(o => o.kennelId === k.id && !o.exitDate).length;
+                        const activeCount = getAllActiveOccupations(occupations).filter(o => o.kennelId === k.id).length;
                         return activeCount < k.capacity;
                       })
-                      .map(k => (
-                        <option key={k.id} value={k.id}>
-                          {k.name} - {k.type} (Vagas: {k.capacity - (occupations.filter(o => o.kennelId === k.id && !o.exitDate).length)})
-                        </option>
-                      ))
+                      .map(k => {
+                        const activeCount = getAllActiveOccupations(occupations).filter(o => o.kennelId === k.id).length;
+                        return (
+                          <option key={k.id} value={k.id}>
+                            {k.name} - {k.type} (Vagas: {k.capacity - activeCount})
+                          </option>
+                        );
+                      })
                     }
                   </select>
                 </div>
@@ -2247,14 +2252,14 @@ const AccommodationDashboard: React.FC = () => {
                           {format(new Date(occ.entryDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })}
                         </td>
                         <td className="p-4 text-xs text-slate-600 font-medium">
-                          {occ.exitDate ? (
+                          {!isOccupationActive(occ) && occ.exitDate ? (
                             format(new Date(occ.exitDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })
                           ) : (
                             <span className="text-slate-400 italic">--</span>
                           )}
                         </td>
                         <td className="p-4">
-                          {occ.exitDate ? (
+                          {!isOccupationActive(occ) ? (
                             <span className="bg-slate-100 text-slate-500 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded uppercase">
                               Histórico
                             </span>

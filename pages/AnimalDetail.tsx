@@ -13,7 +13,7 @@ import {
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
-import { fetchAnimalById } from '../src/lib/supabaseQueries';
+import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId } from '../src/lib/supabaseQueries';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -83,11 +83,11 @@ const AnimalDetail: React.FC = () => {
     }
   };
 
-  const handleDarAltaHospitalar = () => {
+  const handleDarAltaHospitalar = async () => {
     if (!animal || !user) return;
     if (!window.confirm(`Confirma a alta médica/hospitalar para o paciente ${animal.nome}? O paciente será liberado para o tutor e desalocado de qualquer baia ativa.`)) return;
     try {
-      db.darAltaAnimalExterno(animal.id, user.id);
+      await db.darAltaAnimalExternoAsync(animal.id, user.id);
       reloadAnimal();
     } catch (err: any) {
       alert(err.message || 'Erro ao dar alta.');
@@ -122,13 +122,28 @@ const AnimalDetail: React.FC = () => {
           }
         }).catch(() => {});
       }
-    } else if (id) {
+    }
+    if (id) {
       fetchAnimalById(id).then(remoteAnimal => {
         if (remoteAnimal) {
           setAnimal(remoteAnimal);
           applyDataForms(remoteAnimal);
+          if (remoteAnimal.currentOccupation) {
+            setOccupations(db.getOccupations());
+          }
         }
       }).catch(err => console.warn('Erro ao carregar animal do Supabase:', err));
+
+      fetchOccupationsByAnimalId(id).then(remoteOccs => {
+        if (remoteOccs && remoteOccs.length > 0) {
+          setOccupations(prev => {
+            const map = new Map<string, any>();
+            prev.forEach(o => map.set(o.id, o));
+            remoteOccs.forEach(r => map.set(r.id, r));
+            return Array.from(map.values());
+          });
+        }
+      }).catch(() => {});
     }
   };
 
@@ -164,6 +179,40 @@ const AnimalDetail: React.FC = () => {
       .filter(o => o.animalId === id)
       .sort((a, b) => new Date(b.entryDate).getTime() - new Date(a.entryDate).getTime());
   }, [occupations, id]);
+
+  const activeOccupation = useMemo(() => {
+    return getActiveOccupation(animalOccupations);
+  }, [animalOccupations]);
+
+  const activeKennel = useMemo(() => {
+    if (!activeOccupation) return null;
+    if ((activeOccupation as any).kennel?.name) return (activeOccupation as any).kennel;
+    const kennelsList = db.getKennels();
+    const found = kennelsList.find(k => k.id === activeOccupation.kennelId);
+    if (found) return found;
+    if (animal?.currentOccupation?.kennel?.name && animal.currentOccupation.kennelId === activeOccupation.kennelId) {
+      return animal.currentOccupation.kennel;
+    }
+    if (activeOccupation.kennelId) {
+      return {
+        id: activeOccupation.kennelId,
+        name: `Baia (${activeOccupation.kennelId.slice(0, 8)})`,
+        type: 'Acomodação',
+        capacity: 1
+      };
+    }
+    return null;
+  }, [activeOccupation, animal?.currentOccupation]);
+
+  const effectiveCurrentOccupation = useMemo(() => {
+    if (activeOccupation) {
+      return {
+        ...activeOccupation,
+        kennel: activeKennel || (activeOccupation as any).kennel || animal?.currentOccupation?.kennel || undefined
+      };
+    }
+    return animal?.currentOccupation || undefined;
+  }, [activeOccupation, activeKennel, animal?.currentOccupation]);
 
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -417,7 +466,7 @@ const AnimalDetail: React.FC = () => {
           <div class="grid">
             <div class="box"><div class="label">Animal / Espécie</div><div class="val">${animal.nome} (${animal.especie})</div></div>
             <div class="box"><div class="label">Raça / Sexo / Peso</div><div class="val">${animal.raca} • ${animal.sexo} • ${animal.peso}kg</div></div>
-            <div class="box" style="grid-column: span 2"><div class="label">${animal.temTutor ? 'Responsável Legal' : 'Acomodação Interna'}</div><div class="val">${animal.temTutor ? (animal.tutor?.nomeCompleto || 'Não informado') : (animal.currentOccupation?.kennel?.name || 'Centro de Bem-Estar Animal')}</div></div>
+            <div class="box" style="grid-column: span 2"><div class="label">${animal.temTutor ? 'Responsável Legal' : 'Acomodação Interna'}</div><div class="val">${animal.temTutor ? (animal.tutor?.nomeCompleto || 'Não informado') : (effectiveCurrentOccupation?.kennel?.name || 'Centro de Bem-Estar Animal')}</div></div>
           </div>
         </div>
         <div class="section">
@@ -866,7 +915,7 @@ const AnimalDetail: React.FC = () => {
           {/* Internação & Acomodação Card para Animal Externo */}
           {animal.temTutor ? (
             <div className={`p-6 rounded-2xl border-2 shadow-sm space-y-4 transition-all ${
-              animal.currentOccupation 
+              effectiveCurrentOccupation 
                 ? 'bg-teal-50 border-teal-200 text-teal-950' 
                 : (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO)
                   ? 'bg-amber-50 border-amber-200 text-amber-950'
@@ -875,7 +924,7 @@ const AnimalDetail: React.FC = () => {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="flex items-start sm:items-center gap-4">
                   <div className={`p-3.5 rounded-2xl shrink-0 shadow-md ${
-                    animal.currentOccupation 
+                    effectiveCurrentOccupation 
                       ? 'bg-teal-600 text-white shadow-teal-600/20' 
                       : (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO)
                         ? 'bg-amber-500 text-white shadow-amber-500/20'
@@ -886,7 +935,7 @@ const AnimalDetail: React.FC = () => {
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full bg-white/90 border border-slate-200">
-                        {animal.currentOccupation 
+                        {effectiveCurrentOccupation 
                           ? 'Paciente Internado' 
                           : (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO)
                             ? 'Fila de Acomodação (Internação)'
@@ -898,16 +947,16 @@ const AnimalDetail: React.FC = () => {
                     </div>
 
                     <h4 className="text-base font-black uppercase tracking-tight">
-                      {animal.currentOccupation 
-                        ? `Acomodado na Baia: ${animal.currentOccupation.kennel?.name} (${animal.currentOccupation.kennel?.type})`
+                      {effectiveCurrentOccupation 
+                        ? `Acomodado na Baia: ${effectiveCurrentOccupation.kennel?.name} (${effectiveCurrentOccupation.kennel?.type || 'Baia'})`
                         : (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO)
                           ? `Aguardando Vaga na Fila • Indicado: ${animal.tipoAcomodacaoSugerida || (animal.historico && animal.historico[0]?.recommendedKennelType) || 'Acomodação Clínica'}`
                           : 'Paciente com Tutor • Sem Internação Ativa'}
                     </h4>
 
                     <p className="text-xs opacity-80 font-medium">
-                      {animal.currentOccupation 
-                        ? `Internado desde ${safeFormatDate(animal.currentOccupation.entryDate, 'dd/MM/yyyy HH:mm')}`
+                      {effectiveCurrentOccupation 
+                        ? `Internado desde ${safeFormatDate(effectiveCurrentOccupation.entryDate, 'dd/MM/yyyy HH:mm')}`
                         : (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO)
                           ? `Motivo clínico: "${animal.justificativaInternacao || (animal.historico && animal.historico[0]?.accommodationJustification) || 'Internação pós-atendimento para cuidados contínuos'}"`
                           : 'Após o atendimento veterinário, o veterinário pode indicar se o paciente requer internação no Centro de Bem-Estar.'}
@@ -918,7 +967,7 @@ const AnimalDetail: React.FC = () => {
                 {/* Ações de Internação */}
                 <div className="flex flex-wrap items-center gap-2.5 self-end sm:self-auto shrink-0">
                   {/* Se NÃO está internado nem na fila */}
-                  {!animal.currentOccupation && !animal.necessitaInternacao && animal.condicao !== AnimalCondicao.EM_TRATAMENTO && isVetOrAdmin && (
+                  {!effectiveCurrentOccupation && !animal.necessitaInternacao && animal.condicao !== AnimalCondicao.EM_TRATAMENTO && isVetOrAdmin && (
                     <button 
                       onClick={() => {
                         setInternacaoTipoAcomodacao(animal.tipoAcomodacaoSugerida || (animal.historico && animal.historico[0]?.recommendedKennelType) || '');
@@ -932,7 +981,7 @@ const AnimalDetail: React.FC = () => {
                   )}
 
                   {/* Se está na fila aguardando baia */}
-                  {!animal.currentOccupation && (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO) && (
+                  {!effectiveCurrentOccupation && (animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO) && (
                     <>
                       <Link 
                         to="/acomodacao" 
@@ -965,7 +1014,7 @@ const AnimalDetail: React.FC = () => {
                   )}
 
                   {/* Se já está ocupando uma baia física */}
-                  {animal.currentOccupation && isVetOrAdmin && (
+                  {effectiveCurrentOccupation && isVetOrAdmin && (
                     <>
                       <button 
                         onClick={() => {
@@ -998,10 +1047,22 @@ const AnimalDetail: React.FC = () => {
             </div>
           ) : (
             /* Accommodation Card */
-            <div className={`p-6 rounded-2xl border-2 shadow-sm flex items-center justify-between ${animal.currentOccupation ? 'bg-indigo-50 border-indigo-100 text-indigo-900' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
+            <div className={`p-6 rounded-2xl border-2 shadow-sm flex items-center justify-between ${effectiveCurrentOccupation ? 'bg-indigo-50 border-indigo-100 text-indigo-900' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>
               <div className="flex items-center gap-4">
-                <div className={`p-3 rounded-xl ${animal.currentOccupation ? 'bg-white' : 'bg-slate-200'}`}><Home size={24} className={animal.currentOccupation ? 'text-indigo-600' : 'text-slate-400'} /></div>
-                <div><p className="text-[10px] font-black uppercase opacity-60">Acomodação Atual</p><p className="text-lg font-black">{animal.currentOccupation?.kennel?.name || 'Nenhuma baia alocada'}</p></div>
+                <div className={`p-3 rounded-xl ${effectiveCurrentOccupation ? 'bg-white' : 'bg-slate-200'}`}><Home size={24} className={effectiveCurrentOccupation ? 'text-indigo-600' : 'text-slate-400'} /></div>
+                <div>
+                  <p className="text-[10px] font-black uppercase opacity-60">Acomodação Atual</p>
+                  <p className="text-lg font-black">
+                    {effectiveCurrentOccupation
+                      ? (effectiveCurrentOccupation.kennel?.name || 'Baia Alocada')
+                      : 'Nenhuma baia alocada'}
+                  </p>
+                  {effectiveCurrentOccupation && (
+                    <p className="text-xs font-semibold opacity-75">
+                      {effectiveCurrentOccupation.kennel?.type ? `${effectiveCurrentOccupation.kennel.type} • ` : ''}Entrada: {safeFormatDate(effectiveCurrentOccupation.entryDate, 'dd/MM/yyyy HH:mm')}
+                    </p>
+                  )}
+                </div>
               </div>
               <button 
                 onClick={() => setSearchParams({ tab: 'acomodacoes' })} 
@@ -1766,7 +1827,7 @@ const AnimalDetail: React.FC = () => {
                   </div>
                   {isVetOrAdmin && (
                     <div className="flex gap-2 w-full sm:w-auto">
-                      {animal.currentOccupation && (
+                      {effectiveCurrentOccupation && (
                         <button
                           onClick={async () => {
                             if (window.confirm(`Deseja retirar ${animal.nome} da baia atual?`)) {
@@ -1774,7 +1835,7 @@ const AnimalDetail: React.FC = () => {
                               reloadAnimal();
                             }
                           }}
-                          className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white text-red-600 font-bold rounded-lg border border-red-200 text-xs hover:bg-red-50 transition-colors"
+                          className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-white text-red-600 font-bold rounded-lg border border-red-200 text-xs hover:bg-red-50 transition-colors cursor-pointer"
                         >
                           <LogOut size={14} /> Retirar da Baia
                         </button>
@@ -1783,11 +1844,11 @@ const AnimalDetail: React.FC = () => {
                         onClick={() => {
                           setIsTransferring(true);
                           setSelectedKennelId('');
-                          setJustification(animal.currentOccupation ? 'Transferência por necessidade de manejo.' : 'Alocação de baia pós-atendimento.');
+                          setJustification(effectiveCurrentOccupation ? 'Transferência por necessidade de manejo.' : 'Alocação de baia pós-atendimento.');
                         }}
-                        className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-teal-600 text-white font-bold rounded-lg text-xs hover:bg-teal-700 transition-colors shadow-sm"
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3 py-1.5 bg-teal-600 text-white font-bold rounded-lg text-xs hover:bg-teal-700 transition-colors shadow-sm cursor-pointer"
                       >
-                        <ArrowRightLeft size={14} /> {animal.currentOccupation ? 'Trocar de Baia' : 'Alocar Baia'}
+                        <ArrowRightLeft size={14} /> {effectiveCurrentOccupation ? 'Trocar de Baia' : 'Alocar Baia'}
                       </button>
                     </div>
                   )}
@@ -1805,10 +1866,10 @@ const AnimalDetail: React.FC = () => {
                       <div className="absolute left-9 top-8 bottom-8 w-0.5 bg-slate-100" />
 
                       <div className="space-y-8 relative">
-                        {animalOccupations.map((occ, idx) => {
-                          const kennel = db.getKennels().find(k => k.id === occ.kennelId);
+                        {animalOccupations.map((occ) => {
+                          const kennel = db.getKennels().find(k => k.id === occ.kennelId) || occ.kennel;
                           const responsible = db.getUsers().find(u => u.id === occ.vetId);
-                          const isCurrent = !occ.exitDate;
+                          const isCurrent = isOccupationActive(occ) && (!activeOccupation || occ.id === activeOccupation.id);
 
                           return (
                             <div key={occ.id} className="flex gap-6 items-start animate-in fade-in duration-300">
@@ -1826,10 +1887,10 @@ const AnimalDetail: React.FC = () => {
                                 <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2">
                                   <div>
                                     <h4 className="text-sm font-black text-slate-800 uppercase">
-                                      {kennel ? kennel.name : 'Baia Excluída'}
+                                      {kennel ? kennel.name : (occ.kennel?.name || 'Baia Excluída')}
                                     </h4>
                                     <p className="text-[10px] text-slate-500 font-bold uppercase">
-                                      Tipo: {kennel ? kennel.type : 'N/A'}
+                                      Tipo: {kennel ? kennel.type : (occ.kennel?.type || 'N/A')}
                                     </p>
                                   </div>
                                   <div className="flex items-center gap-1.5">
@@ -1848,12 +1909,12 @@ const AnimalDetail: React.FC = () => {
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-200 text-xs text-slate-600">
                                   <div>
                                     <span className="font-bold block text-[10px] uppercase text-slate-400">Entrada</span>
-                                    {format(new Date(occ.entryDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })}
+                                    {safeFormatDate(occ.entryDate, 'dd/MM/yyyy HH:mm')}
                                   </div>
                                   <div>
                                     <span className="font-bold block text-[10px] uppercase text-slate-400">Saída</span>
-                                    {occ.exitDate ? (
-                                      format(new Date(occ.exitDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })
+                                    {occ.exitDate && !isCurrent ? (
+                                      safeFormatDate(occ.exitDate, 'dd/MM/yyyy HH:mm')
                                     ) : (
                                       <span className="text-slate-400 italic">Ocupando atualmente</span>
                                     )}
@@ -1892,7 +1953,7 @@ const AnimalDetail: React.FC = () => {
                       <ArrowRightLeft size={24} className="text-teal-400" />
                       <div>
                         <h3 className="text-lg font-black uppercase tracking-widest">
-                          {animal.currentOccupation ? 'Trocar de Baia' : 'Alocar em Baia'}
+                          {effectiveCurrentOccupation ? 'Trocar de Baia' : 'Alocar em Baia'}
                         </h3>
                         <p className="text-[10px] font-bold opacity-80 uppercase tracking-tighter">Animal: {animal.nome}</p>
                       </div>
@@ -1920,10 +1981,10 @@ const AnimalDetail: React.FC = () => {
                       </div>
                     )}
 
-                    {animal.currentOccupation && (
+                    {effectiveCurrentOccupation && (
                       <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
                         <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Acomodação Atual</p>
-                        <p className="text-sm font-bold text-slate-700">{animal.currentOccupation.kennel?.name} ({animal.currentOccupation.kennel?.type})</p>
+                        <p className="text-sm font-bold text-slate-700">{effectiveCurrentOccupation.kennel?.name} ({effectiveCurrentOccupation.kennel?.type || 'Baia'})</p>
                       </div>
                     )}
 
@@ -1938,12 +1999,12 @@ const AnimalDetail: React.FC = () => {
                         <option value="">-- Selecione uma baia --</option>
                         {db.getKennels()
                           .filter(k => {
-                            const activeCount = db.getOccupations().filter(o => o.kennelId === k.id && !o.exitDate).length;
-                            const isCurrentKennel = animal.currentOccupation?.kennelId === k.id;
+                            const activeCount = db.getAllActiveOccupations().filter(o => o.kennelId === k.id).length;
+                            const isCurrentKennel = effectiveCurrentOccupation?.kennelId === k.id;
                             return !isCurrentKennel && activeCount < k.capacity;
                           })
                           .map(k => {
-                            const activeCount = db.getOccupations().filter(o => o.kennelId === k.id && !o.exitDate).length;
+                            const activeCount = db.getAllActiveOccupations().filter(o => o.kennelId === k.id).length;
                             return (
                               <option key={k.id} value={k.id}>
                                 {k.name} - {k.type} (Vagas: {k.capacity - activeCount})

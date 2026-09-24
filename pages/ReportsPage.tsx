@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { db } from '../services/db';
+import { isOccupationActive } from '../src/lib/supabaseQueries';
 import { AnimalCondicao, Especie, Porte, Sexo, AnimalJoined, ClinicalRecord, StatusLog, AgendamentoCirurgia, CirurgiaStatus } from '../types';
 import { 
   FileText, Printer, Download, Calendar, Filter, Dog, Cat, Stethoscope, 
@@ -449,8 +450,8 @@ const ReportsPage: React.FC = () => {
     const totalDesfechos = adocoes + solturas + altas + obitos;
 
     const totalAcomodacoes = filteredOccupations.length;
-    const acomodacoesLiberadas = filteredOccupations.filter(o => o.exitDate).length;
-    const acomodacoesAtivas = filteredOccupations.filter(o => !o.exitDate).length;
+    const acomodacoesLiberadas = filteredOccupations.filter(o => !isOccupationActive(o)).length;
+    const acomodacoesAtivas = filteredOccupations.filter(o => isOccupationActive(o)).length;
 
     return {
       totalResgates,
@@ -541,7 +542,7 @@ const ReportsPage: React.FC = () => {
           <td><strong>${kennel?.name || o.kennelId}</strong></td>
           <td>${animal?.nome || 'Desconhecido'}</td>
           <td>${format(new Date(o.entryDate), 'dd/MM/yyyy HH:mm')}</td>
-          <td>${o.exitDate ? format(new Date(o.exitDate), 'dd/MM/yyyy HH:mm') : 'Ocupado Atualmente'}</td>
+          <td>${!isOccupationActive(o) && o.exitDate ? format(new Date(o.exitDate), 'dd/MM/yyyy HH:mm') : 'Ocupado Atualmente'}</td>
           <td>${o.justification || '-'}</td>
         </tr>
       `;
@@ -2040,7 +2041,7 @@ const ReportsPage: React.FC = () => {
                         {format(new Date(occ.entryDate), 'dd/MM/yyyy HH:mm')}
                       </td>
                       <td className="p-4 font-medium text-slate-600">
-                        {occ.exitDate ? format(new Date(occ.exitDate), 'dd/MM/yyyy HH:mm') : <span className="text-emerald-600 font-bold">Ocupado Atualmente</span>}
+                        {!isOccupationActive(occ) && occ.exitDate ? format(new Date(occ.exitDate), 'dd/MM/yyyy HH:mm') : <span className="text-emerald-600 font-bold">Ocupado Atualmente</span>}
                       </td>
                       <td className="p-4 font-medium text-slate-500 max-w-xs truncate">
                         {occ.justification || '-'}

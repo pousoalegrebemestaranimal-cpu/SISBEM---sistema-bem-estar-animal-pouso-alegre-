@@ -130,6 +130,7 @@ export interface KennelOccupation {
   vetId: string;
   clinicalRecordId?: string;
   justification: string;
+  kennel?: Kennel;
 }
 
 export interface ClinicalRecord {

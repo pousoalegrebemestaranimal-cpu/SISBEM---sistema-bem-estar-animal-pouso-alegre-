@@ -4,6 +4,7 @@ import { db } from '../services/db';
 import { KennelConfig, KennelType } from '../types';
 import { Settings, Save, AlertTriangle, CheckCircle2, Info, RefreshCw, Database, Sparkles, Copy, Check, Download, Terminal, Server, Code2, Layers, Globe, Key, Eye, EyeOff, ExternalLink, Trash2 } from 'lucide-react';
 import { SUPABASE_URL, SUPABASE_ANON_KEY, testSupabaseConnection } from '../src/lib/supabase';
+import { isOccupationActive } from '../src/lib/supabaseQueries';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 import { isBase64Image, migrateLegacyPhotosToStorage, ANIMAL_PHOTOS_BUCKET } from '../src/lib/storageService';
 
@@ -491,7 +492,7 @@ END $$;`;
           // Usuário quer reduzir a quantidade de baias desse tipo
           // Verificamos se as baias que seriam removidas (do final da lista) estão ocupadas
           const toRemove = typeKennels.slice(cfg.count);
-          const occupied = toRemove.some(k => occupations.some(o => o.kennelId === k.id && !o.exitDate));
+          const occupied = toRemove.some(k => occupations.some(o => o.kennelId === k.id && isOccupationActive(o)));
           if (occupied) {
             setMessage({ type: 'error', text: `Não é possível reduzir a quantidade de ${cfg.type} pois as unidades a serem removidas possuem animais alocados.` });
             hasError = true;

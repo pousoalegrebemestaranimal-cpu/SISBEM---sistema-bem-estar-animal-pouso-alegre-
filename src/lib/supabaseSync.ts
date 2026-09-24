@@ -20,6 +20,7 @@ import {
   CirurgiaStatus,
   CirurgiaPrioridade
 } from '../../types';
+import { isOccupationActive } from './supabaseQueries';
 
 export interface SyncStats {
   lastSyncAt: string | null;
@@ -832,6 +833,290 @@ export async function deleteOccupationFromSupabase(id: string): Promise<boolean>
   }
 }
 
+// Fila de bloqueio em memória por animal para serializar requisições simultâneas de alocação/movimentação e evitar condição de corrida
+const inFlightAnimalAllocations = new Map<string, Promise<{ success: boolean; occupation?: KennelOccupation & { kennel?: Kennel }; error?: string }>>();
+
+/**
+ * Registra a alocação de um animal em uma baia diretamente no Supabase.
+ * - Suporta transação atômica via RPC allocate_kennel_atomic (se criada no PostgreSQL)
+ * - Serializa requisições por animal via mutex em memória evitando condições de corrida
+ * - Encerra automaticamente qualquer ocupação ativa anterior do animal no Supabase (exit_date = now)
+ * - Insere a nova ocupação com exit_date = null
+ * - Confirma o salvamento no Supabase
+ * - Atualiza seletivamente o cache local e despacha eventos
+ */
+export async function allocateKennelInSupabase(allocation: {
+  kennelId: string;
+  animalId: string;
+  vetId: string;
+  justification?: string;
+  id?: string;
+}): Promise<{ success: boolean; occupation?: KennelOccupation & { kennel?: Kennel }; error?: string }> {
+  // Serialização por animal: se já houver uma alocação em trânsito para este mesmo animal, aguarda sua conclusão
+  const activeTask = inFlightAnimalAllocations.get(allocation.animalId);
+  if (activeTask) {
+    try {
+      await activeTask;
+    } catch (_) {}
+  }
+
+  const runAllocation = async (): Promise<{ success: boolean; occupation?: KennelOccupation & { kennel?: Kennel }; error?: string }> => {
+    try {
+      const now = new Date().toISOString();
+      let targetKennelId = allocation.kennelId;
+
+      // 1. Garantir que a baia existe no Supabase por ID ou por nome
+      const { data: kennelExists } = await supabase.from('kennels').select('id, name, type, capacity').eq('id', targetKennelId).maybeSingle();
+      let kennelData: Kennel | undefined = kennelExists ? {
+        id: kennelExists.id,
+        name: kennelExists.name,
+        type: kennelExists.type,
+        capacity: Number(kennelExists.capacity) || 1
+      } : undefined;
+
+      if (!kennelExists) {
+        const localKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+        const foundKennel = localKennels.find(k => k.id === targetKennelId);
+        if (foundKennel) {
+          const { data: sameNameKennel } = await supabase.from('kennels').select('id, name, type, capacity').eq('name', foundKennel.name).limit(1).maybeSingle();
+          if (sameNameKennel?.id) {
+            targetKennelId = sameNameKennel.id;
+            kennelData = {
+              id: sameNameKennel.id,
+              name: sameNameKennel.name,
+              type: sameNameKennel.type,
+              capacity: Number(sameNameKennel.capacity) || 1
+            };
+          } else {
+            await supabase.from('kennels').upsert([mapKennelToSupabase(foundKennel)]);
+            kennelData = foundKennel;
+          }
+        }
+      }
+
+      // 2. Tentativa Atômica via RPC allocate_kennel_atomic (se provisionada no Supabase)
+      try {
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('allocate_kennel_atomic', {
+          p_animal_id: allocation.animalId,
+          p_kennel_id: targetKennelId,
+          p_vet_id: allocation.vetId || '1',
+          p_justification: allocation.justification || 'Alocação de baia',
+          p_new_id: allocation.id || null
+        });
+
+        if (!rpcErr && rpcData && (rpcData as any).id) {
+          const mappedRpcOccupation: KennelOccupation & { kennel?: Kennel } = {
+            id: (rpcData as any).id,
+            kennelId: (rpcData as any).kennel_id,
+            animalId: (rpcData as any).animal_id,
+            entryDate: (rpcData as any).entry_date,
+            exitDate: (rpcData as any).exit_date || undefined,
+            vetId: (rpcData as any).vet_id,
+            clinicalRecordId: (rpcData as any).clinical_record_id || undefined,
+            justification: (rpcData as any).justification || '',
+            kennel: (rpcData as any).kennels ? {
+              id: (rpcData as any).kennels.id,
+              name: (rpcData as any).kennels.name,
+              type: (rpcData as any).kennels.type,
+              capacity: Number((rpcData as any).kennels.capacity) || 1
+            } : kennelData
+          };
+
+          try {
+            const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+            const updatedLocal = localOccs.map(o => {
+              if (o.animalId === allocation.animalId && (!o.exitDate || String(o.exitDate).trim() === '' || o.exitDate === 'null')) {
+                return { ...o, exitDate: now };
+              }
+              return o;
+            });
+            updatedLocal.push(mappedRpcOccupation);
+            localStorage.setItem('sisbem_occupations', JSON.stringify(updatedLocal));
+          } catch (e) {}
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+              detail: { action: 'allocated', occupation: mappedRpcOccupation, animalId: allocation.animalId }
+            }));
+            window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+          }
+
+          return { success: true, occupation: mappedRpcOccupation };
+        }
+      } catch (_) {
+        // Fallback gracioso para a execução em duas etapas caso a RPC não esteja instalada no banco
+      }
+
+      // 3. Encerrar todas as ocupações ativas anteriores deste animal no Supabase
+      const { error: closeErr } = await supabase
+        .from('kennel_occupations')
+        .update({ exit_date: now })
+        .eq('animal_id', allocation.animalId)
+        .is('exit_date', null);
+
+      if (closeErr) {
+        console.warn('Aviso ao encerrar ocupação anterior no Supabase:', closeErr.message);
+      }
+
+      // 4. Inserir a nova ocupação ativa no Supabase
+      const newOccId = allocation.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `occ-${Date.now()}`);
+      const insertPayload = {
+        id: newOccId,
+        kennel_id: targetKennelId,
+        animal_id: allocation.animalId,
+        entry_date: now,
+        exit_date: null,
+        vet_id: allocation.vetId || '1',
+        clinical_record_id: null,
+        justification: allocation.justification || 'Alocação de baia'
+      };
+
+      const { data: inserted, error: insertErr } = await supabase
+        .from('kennel_occupations')
+        .insert([insertPayload])
+        .select('*, kennels(*)')
+        .single();
+
+      if (insertErr) {
+        console.error('Erro ao inserir ocupação no Supabase:', insertErr);
+        return { success: false, error: insertErr.message };
+      }
+
+      const mappedOccupation: KennelOccupation & { kennel?: Kennel } = {
+        id: inserted.id,
+        kennelId: inserted.kennel_id,
+        animalId: inserted.animal_id,
+        entryDate: inserted.entry_date,
+        exitDate: inserted.exit_date || undefined,
+        vetId: inserted.vet_id,
+        clinicalRecordId: inserted.clinical_record_id || undefined,
+        justification: inserted.justification || '',
+        kennel: inserted.kennels ? {
+          id: inserted.kennels.id,
+          name: inserted.kennels.name,
+          type: inserted.kennels.type,
+          capacity: Number(inserted.kennels.capacity) || 1
+        } : kennelData
+      };
+
+      // 5. Atualização seletiva do cache local para este animal
+      try {
+        const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+        const updatedLocal = localOccs.map(o => {
+          if (o.animalId === allocation.animalId && (!o.exitDate || String(o.exitDate).trim() === '' || o.exitDate === 'null')) {
+            return { ...o, exitDate: now };
+          }
+          return o;
+        });
+        updatedLocal.push(mappedOccupation);
+        localStorage.setItem('sisbem_occupations', JSON.stringify(updatedLocal));
+      } catch (e) {}
+
+      // 6. Notificar interface sobre a mudança
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+          detail: { action: 'allocated', occupation: mappedOccupation, animalId: allocation.animalId }
+        }));
+        window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+      }
+
+      return { success: true, occupation: mappedOccupation };
+    } catch (err: any) {
+      console.error('Exceção ao alocar baia no Supabase:', err);
+      return { success: false, error: err?.message || 'Falha ao registrar alocação no Supabase' };
+    }
+  };
+
+  const taskPromise = runAllocation().finally(() => {
+    if (inFlightAnimalAllocations.get(allocation.animalId) === taskPromise) {
+      inFlightAnimalAllocations.delete(allocation.animalId);
+    }
+  });
+
+  inFlightAnimalAllocations.set(allocation.animalId, taskPromise);
+  return taskPromise;
+}
+
+/**
+ * Retira o animal da baia atual no Supabase (desalocação / alta da baia).
+ * - Define a data/hora de saída (exit_date = now)
+ * - Registra justificativa opcional
+ * - Confirma a alteração no Supabase
+ * - Atualiza o cache local e despacha eventos
+ */
+export async function releaseKennelInSupabase(
+  animalId: string,
+  releaseJustification?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const now = new Date().toISOString();
+
+    // 1. Busca ocupações ativas para atualizar com justificativa
+    const { data: activeOccs } = await supabase
+      .from('kennel_occupations')
+      .select('id, justification')
+      .eq('animal_id', animalId)
+      .is('exit_date', null);
+
+    if (activeOccs && activeOccs.length > 0) {
+      for (const occ of activeOccs) {
+        const updatedJustification = releaseJustification
+          ? `${occ.justification || ''} (Desalocado: ${releaseJustification})`.trim()
+          : occ.justification;
+
+        await supabase
+          .from('kennel_occupations')
+          .update({
+            exit_date: now,
+            justification: updatedJustification
+          })
+          .eq('id', occ.id);
+      }
+    } else {
+      await supabase
+        .from('kennel_occupations')
+        .update({ exit_date: now })
+        .eq('animal_id', animalId)
+        .is('exit_date', null);
+    }
+
+    // 2. Atualização seletiva do cache local
+    try {
+      const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+      let changed = false;
+      const updatedLocal = localOccs.map(o => {
+        if (o.animalId === animalId && (!o.exitDate || String(o.exitDate).trim() === '' || o.exitDate === 'null')) {
+          changed = true;
+          return {
+            ...o,
+            exitDate: now,
+            justification: releaseJustification
+              ? `${o.justification || ''} (Desalocado: ${releaseJustification})`.trim()
+              : o.justification
+          };
+        }
+        return o;
+      });
+      if (changed) {
+        localStorage.setItem('sisbem_occupations', JSON.stringify(updatedLocal));
+      }
+    } catch (e) {}
+
+    // 3. Notificar interface
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed', {
+        detail: { action: 'released', animalId }
+      }));
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed'));
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Exceção ao desalocar baia no Supabase:', err);
+    return { success: false, error: err?.message || 'Falha ao desalocar animal no Supabase' };
+  }
+}
+
 export async function syncUserToSupabase(user: any) {
   try {
     let credHash = user.uid || null;
@@ -1406,7 +1691,7 @@ export function syncLocalKennelsWithConfigs(configs: KennelConfig[]) {
   try {
     const rawKennels: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
     const occupations: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
-    const activeOccKennelIds = new Set(occupations.filter(o => !o.exitDate).map(o => o.kennelId));
+    const activeOccKennelIds = new Set(occupations.filter(o => isOccupationActive(o)).map(o => o.kennelId));
 
     const newKennels: Kennel[] = [];
 

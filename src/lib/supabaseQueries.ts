@@ -1,7 +1,150 @@
 import { supabase } from './supabase';
-import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation } from '../../types';
+import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel } from '../../types';
 import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante } from './supabaseSync';
 import { db } from '../../services/db';
+
+/**
+ * Regra OFICIAL do SISBEM para determinar se uma ocupação de baia é ATIVA.
+ * Uma ocupação é ATIVA se:
+ * - o objeto existe;
+ * - exitDate / exit_date for nulo, indefinido, vazio ou a string literal 'null'/'undefined'.
+ */
+export function isOccupationActive(occ?: { exitDate?: string | null; exit_date?: string | null } | null): boolean {
+  if (!occ) return false;
+  const exitVal = (occ as any).exitDate !== undefined ? (occ as any).exitDate : (occ as any).exit_date;
+  if (!exitVal) return true;
+  const trimmed = String(exitVal).trim();
+  return trimmed === '' || trimmed === 'null' || trimmed === 'undefined';
+}
+
+/**
+ * Retorna a ocupação ATIVA OFICIAL de um animal a partir de uma lista de ocupações.
+ * Em caso de múltiplos registros ativos (inconsistência histórica),
+ * seleciona sempre a de data de entrada (entryDate) mais recente.
+ */
+export function getActiveOccupation<T extends { exitDate?: string | null; entryDate?: string | null; animalId?: string; kennelId?: string; exit_date?: string | null; entry_date?: string | null; animal_id?: string; kennel_id?: string }>(
+  list: T[],
+  animalId?: string
+): T | undefined {
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  const filtered = animalId ? list.filter(o => o && ((o as any).animalId === animalId || (o as any).animal_id === animalId)) : list;
+  const activeList = filtered
+    .filter(o => isOccupationActive(o))
+    .sort((a, b) => {
+      const entryA = (a as any).entryDate || (a as any).entry_date;
+      const entryB = (b as any).entryDate || (b as any).entry_date;
+      const timeA = entryA ? new Date(entryA).getTime() : 0;
+      const timeB = entryB ? new Date(entryB).getTime() : 0;
+      return timeB - timeA;
+    });
+  return activeList[0];
+}
+
+/**
+ * Retorna todas as ocupações ATIVAS OFICIAIS de uma lista de ocupações,
+ * garantindo que cada animal possua no máximo UMA ocupação ativa simultânea
+ * (em caso de duplicidade residual, prioriza a de entryDate mais recente).
+ */
+export function getAllActiveOccupations<T extends { exitDate?: string | null; entryDate?: string | null; animalId?: string; kennelId?: string; exit_date?: string | null; entry_date?: string | null; animal_id?: string; kennel_id?: string }>(
+  list: T[]
+): T[] {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const byAnimal = new Map<string, T[]>();
+  for (const occ of list) {
+    const aid = (occ as any)?.animalId || (occ as any)?.animal_id;
+    if (!occ || !aid || !isOccupationActive(occ)) continue;
+    const existing = byAnimal.get(aid);
+    if (existing) {
+      existing.push(occ);
+    } else {
+      byAnimal.set(aid, [occ]);
+    }
+  }
+  const result: T[] = [];
+  for (const [_, occs] of byAnimal.entries()) {
+    occs.sort((a, b) => {
+      const entryA = (a as any).entryDate || (a as any).entry_date;
+      const entryB = (b as any).entryDate || (b as any).entry_date;
+      const timeA = entryA ? new Date(entryA).getTime() : 0;
+      const timeB = entryB ? new Date(entryB).getTime() : 0;
+      return timeB - timeA;
+    });
+    result.push(occs[0]);
+  }
+  return result;
+}
+
+/**
+ * Mapeia uma linha da tabela kennel_occupations do Supabase com join em kennels
+ */
+function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Kennel } {
+  const kennelData: Kennel | undefined = r.kennels ? {
+    id: r.kennels.id,
+    name: r.kennels.name,
+    type: r.kennels.type,
+    capacity: Number(r.kennels.capacity) || 1
+  } : undefined;
+
+  return {
+    id: r.id,
+    kennelId: r.kennel_id,
+    animalId: r.animal_id,
+    entryDate: r.entry_date,
+    exitDate: r.exit_date || undefined,
+    vetId: r.vet_id,
+    clinicalRecordId: r.clinical_record_id || undefined,
+    justification: r.justification || '',
+    kennel: kennelData
+  };
+}
+
+/**
+ * Consulta o histórico completo de ocupações de um animal no Supabase
+ * acompanhado dos dados da baia (kennels).
+ */
+export async function fetchOccupationsByAnimalId(animalId: string): Promise<Array<KennelOccupation & { kennel?: Kennel }>> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('kennel_occupations')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity)')
+      .eq('animal_id', animalId)
+      .order('entry_date', { ascending: false });
+
+    if (error || !rows) {
+      console.warn('fetchOccupationsByAnimalId aviso:', error?.message);
+      return [];
+    }
+
+    return rows.map(mapRemoteOccupationWithKennel);
+  } catch (err) {
+    console.warn('Erro ao buscar ocupações do animal no Supabase:', err);
+    return [];
+  }
+}
+
+/**
+ * Consulta diretamente no Supabase a ocupação ATIVA REAL do animal com a baia relacionada.
+ * Retorna null se o animal não estiver atualmente alocado em nenhuma baia.
+ */
+export async function fetchActiveOccupationByAnimalId(animalId: string): Promise<(KennelOccupation & { kennel?: Kennel }) | null> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('kennel_occupations')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity)')
+      .eq('animal_id', animalId)
+      .is('exit_date', null)
+      .order('entry_date', { ascending: false })
+      .limit(5);
+
+    if (error || !rows || rows.length === 0) return null;
+
+    // Em caso de duplicidade no banco, a regra oficial prioriza a de maior entry_date (a primeira da ordenação desc)
+    return mapRemoteOccupationWithKennel(rows[0]);
+  } catch (err) {
+    console.warn('Erro ao buscar ocupação ativa no Supabase:', err);
+    return null;
+  }
+}
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -82,7 +225,7 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
 
     const joinedList: AnimalJoined[] = (rows || []).map((row: any) => {
       const animal = mapSupabaseToAnimal(row);
-      const currentOcc = occupations.find((o: KennelOccupation) => o.animalId === animal.id && !o.exitDate);
+      const currentOcc = getActiveOccupation(occupations, animal.id);
       const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id);
 
       return {
@@ -92,7 +235,7 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
         usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
         historico: records.filter(r => r.animalId === animal.id && !r.inativo),
         statusLogs: logs.filter(l => l.animalId === animal.id),
-        currentOccupation: currentOcc ? { ...currentOcc, kennel: kennels.find(k => k.id === currentOcc.kennelId) } : undefined,
+        currentOccupation: currentOcc ? { ...currentOcc, kennel: currentOcc.kennel || kennels.find(k => k.id === currentOcc.kennelId) } : undefined,
         cirurgias: animalCirurgias
       };
     });
@@ -290,12 +433,28 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
     const users = db.getUsers();
     const records = db.getRecords();
     const logs = db.getStatusLogs();
-    const occupations = db.getOccupations();
     const kennels = db.getKennels();
     const cirurgias = db.getCirurgias();
 
-    const currentOcc = occupations.find((o: KennelOccupation) => o.animalId === animal.id && !o.exitDate);
+    // 1. Busca ocupações do animal diretamente no Supabase (fonte oficial)
+    const remoteOccs = await fetchOccupationsByAnimalId(id);
+    const activeOcc = getActiveOccupation(remoteOccs) || getActiveOccupation(db.getOccupations(), animal.id);
+
+    // 2. Se obteve dados do Supabase, sincroniza pontualmente o cache local deste animal
+    if (remoteOccs && remoteOccs.length > 0) {
+      try {
+        const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
+        const map = new Map<string, KennelOccupation>();
+        localOccs.forEach(o => map.set(o.id, o));
+        remoteOccs.forEach(r => map.set(r.id, r));
+        localStorage.setItem('sisbem_occupations', JSON.stringify(Array.from(map.values())));
+      } catch (e) {}
+    }
+
     const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id);
+
+    // 3. Resolve a baia da ocupação ativa (prioriza o join do Supabase, fallback para db.getKennels())
+    const resolvedKennel = activeOcc?.kennel || (activeOcc ? kennels.find(k => k.id === activeOcc.kennelId) : undefined);
 
     return {
       ...animal,
@@ -304,7 +463,7 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
       usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
       historico: records.filter(r => r.animalId === animal.id && !r.inativo),
       statusLogs: logs.filter(l => l.animalId === animal.id),
-      currentOccupation: currentOcc ? { ...currentOcc, kennel: kennels.find(k => k.id === currentOcc.kennelId) } : undefined,
+      currentOccupation: activeOcc ? { ...activeOcc, kennel: resolvedKennel } : undefined,
       cirurgias: animalCirurgias
     };
   } catch (err) {
