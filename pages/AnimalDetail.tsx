@@ -14,6 +14,7 @@ import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
 import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId } from '../src/lib/supabaseQueries';
+import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -558,6 +559,8 @@ const AnimalDetail: React.FC = () => {
 
   const renderCondicaoBadge = (condicao: AnimalCondicao) => {
     switch (condicao) {
+      case AnimalCondicao.EM_ATENDIMENTO:
+        return <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase border bg-amber-100 text-amber-900 border-amber-300 shadow-sm animate-pulse"><Activity size={12} className="text-amber-700" /> {condicao}</span>;
       case AnimalCondicao.DISPONIVEL_ADOCAO:
         return <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase border bg-emerald-50 text-emerald-700 border-emerald-200 shadow-sm"><Heart size={12} className="fill-emerald-600 text-emerald-600" /> {condicao}</span>;
       case AnimalCondicao.EM_TRATAMENTO:
@@ -1990,29 +1993,16 @@ const AnimalDetail: React.FC = () => {
 
                     <div className="space-y-1">
                       <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Selecione a Nova Baia *</label>
-                      <select 
-                        required 
-                        value={selectedKennelId} 
-                        onChange={e => setSelectedKennelId(e.target.value)} 
-                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-teal-500 font-bold text-sm"
-                      >
-                        <option value="">-- Selecione uma baia --</option>
-                        {db.getKennels()
-                          .filter(k => {
-                            const activeCount = db.getAllActiveOccupations().filter(o => o.kennelId === k.id).length;
-                            const isCurrentKennel = effectiveCurrentOccupation?.kennelId === k.id;
-                            return !isCurrentKennel && activeCount < k.capacity;
-                          })
-                          .map(k => {
-                            const activeCount = db.getAllActiveOccupations().filter(o => o.kennelId === k.id).length;
-                            return (
-                              <option key={k.id} value={k.id}>
-                                {k.name} - {k.type} (Vagas: {k.capacity - activeCount})
-                              </option>
-                            );
-                          })
-                        }
-                      </select>
+                      <SearchableKennelSelect
+                        value={selectedKennelId}
+                        onChange={setSelectedKennelId}
+                        kennels={db.getKennels()}
+                        occupations={occupations}
+                        currentKennelId={effectiveCurrentOccupation?.kennelId}
+                        recommendedType={animal.tipoAcomodacaoSugerida || animal.historico?.[0]?.recommendedKennelType}
+                        required
+                        placeholder="-- Selecione uma baia ou pesquise --"
+                      />
                     </div>
 
                     <div className="space-y-1">

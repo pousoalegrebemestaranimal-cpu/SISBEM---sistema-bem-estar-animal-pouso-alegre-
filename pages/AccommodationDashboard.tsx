@@ -14,6 +14,7 @@ import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 import { isOccupationActive, getAllActiveOccupations } from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
+import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
 export const SECTOR_META: Record<KennelType, {
   name: string;
@@ -166,11 +167,14 @@ const AccommodationDashboard: React.FC = () => {
 
   // Animais aguardando acomodação: 
   // 1. Não possuem ocupação ativa
-  // 2. JÁ SAÍRAM DA FILA VETERINÁRIA (Condição diferente de ACOLHIDO) ou com indicação de internação
-  // 3. Estão em condições que exigem abrigo no centro
+  // 2. Não estão em atendimento ativo, óbito, soltura, adoção ou alta ambulatorial
+  // 3. Estão em condições que exigem abrigo no centro (Em Tratamento, Disponível Adoção) OU com indicação técnica de internação
   const waitingAnimals = useMemo(() => {
+    const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
     return allAnimals.filter(a => 
-      !occupations.some(o => o.animalId === a.id && isOccupationActive(o)) && 
+      !activeAnimalIds.has(a.id) && 
+      a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
+      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
       ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
     );
   }, [allAnimals, occupations]);
@@ -180,7 +184,9 @@ const AccommodationDashboard: React.FC = () => {
     const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
     return allAnimals.filter(a => 
       !activeAnimalIds.has(a.id) && 
-      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO].includes(a.condicao)
+      a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
+      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
+      ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
     );
   }, [allAnimals, occupations]);
 
@@ -1179,28 +1185,15 @@ const AccommodationDashboard: React.FC = () => {
 
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Selecione a Baia Disponível</label>
-                  <select 
-                    required 
-                    value={selectedKennelId} 
-                    onChange={e => setSelectedKennelId(e.target.value)} 
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-teal-500 font-bold"
-                  >
-                    <option value="">-- Selecione uma baia --</option>
-                    {kennels
-                      .filter(k => {
-                        const activeCount = getAllActiveOccupations(occupations).filter(o => o.kennelId === k.id).length;
-                        return activeCount < k.capacity;
-                      })
-                      .map(k => {
-                        const activeCount = getAllActiveOccupations(occupations).filter(o => o.kennelId === k.id).length;
-                        return (
-                          <option key={k.id} value={k.id}>
-                            {k.name} - {k.type} (Vagas: {k.capacity - activeCount})
-                          </option>
-                        );
-                      })
-                    }
-                  </select>
+                  <SearchableKennelSelect
+                    value={selectedKennelId}
+                    onChange={setSelectedKennelId}
+                    kennels={kennels}
+                    occupations={occupations}
+                    recommendedType={allocatingAnimal.tipoAcomodacaoSugerida || latestAllocatingRecord?.recommendedKennelType}
+                    required
+                    placeholder="-- Selecione uma baia ou pesquise --"
+                  />
                 </div>
 
                 <div className="space-y-1">

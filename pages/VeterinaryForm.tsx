@@ -3,9 +3,10 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../services/db';
 import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile } from '../types';
-import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance } from '../src/lib/attendanceService';
 
 const DIAGNOSTIC_OPTIONS = [
   'Tumores',
@@ -34,6 +35,12 @@ const VeterinaryForm: React.FC = () => {
   const [mudarAcomodacao, setMudarAcomodacao] = useState(false);
   const [tipoObito, setTipoObito] = useState<'Óbito Natural' | 'Eutanásia'>('Óbito Natural');
   const [causaObitoInput, setCausaObitoInput] = useState('');
+
+  // Controle de Atendimento Concorrente & Cancelamento
+  const [isBlockedByOtherVet, setIsBlockedByOtherVet] = useState(false);
+  const [blockedVetName, setBlockedVetName] = useState('');
+  const [isCancelling, setIsCancelling] = useState(false);
+  const isSubmittingRef = useRef(false);
   
   // Internação para Animal Externo (Com Tutor)
   const [necessitaInternacaoExterno, setNecessitaInternacaoExterno] = useState<boolean>(false);
@@ -97,11 +104,37 @@ const VeterinaryForm: React.FC = () => {
         }
       }
     } else if (currentAnimal) {
+      // 1. Verificação de Bloqueio Concorrente no Acesso Direto à URL
+      if (
+        currentAnimal.condicao === AnimalCondicao.EM_ATENDIMENTO &&
+        currentAnimal.emAtendimentoVetId &&
+        currentAnimal.emAtendimentoVetId !== user?.id &&
+        user?.role !== 'ADMIN'
+      ) {
+        const users = db.getUsers();
+        const otherVet = users.find(u => u.id === currentAnimal.emAtendimentoVetId);
+        setIsBlockedByOtherVet(true);
+        setBlockedVetName(otherVet?.name || 'outro profissional');
+        return;
+      }
+
+      // 2. Se o animal ainda não estiver com status 'Em Atendimento', efetua o bloqueio atômico
+      if (currentAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
+        startClinicalAttendance(id, user.id, user.name).then(res => {
+          if (!res.success) {
+            setIsBlockedByOtherVet(true);
+            setBlockedVetName(res.vetName || 'outro profissional');
+          }
+        });
+      }
+
       setRecord(prev => ({
         ...prev,
         peso: prev.peso || currentAnimal.peso.toString(),
         animalId: id,
-        statusResultante: currentAnimal.condicao,
+        statusResultante: currentAnimal.condicao === AnimalCondicao.EM_ATENDIMENTO
+          ? (currentAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO)
+          : currentAnimal.condicao,
         dataObito: new Date().toISOString().split('T')[0]
       }));
       if (currentAnimal.temTutor) {
@@ -112,7 +145,7 @@ const VeterinaryForm: React.FC = () => {
         }
       }
     }
-  }, [editId, user?.id, user?.role, navigate, id]);
+  }, [editId, user?.id, user?.role, user?.name, navigate, id]);
 
   const handleAddPrescription = () => {
     const newP: any = {
@@ -201,7 +234,7 @@ const VeterinaryForm: React.FC = () => {
     setRecord({ ...record, examesLaboratoriais: updated });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     
@@ -244,6 +277,8 @@ const VeterinaryForm: React.FC = () => {
       return;
     }
 
+    if (isSubmittingRef.current || loading) return;
+    isSubmittingRef.current = true;
     setLoading(true);
     try {
       const finalRecord = { ...record, animalId: id };
@@ -270,30 +305,100 @@ const VeterinaryForm: React.FC = () => {
         }
       }
       
-      db.saveRecord(finalRecord, user!.id);
-      
-      if (!animal?.temTutor && animal?.currentOccupation && mudarAcomodacao) {
-        db.releaseAnimalFromKennel(id, record.accommodationJustification || 'Solicitado mudança de acomodação no atendimento técnico');
+      // Finalização Atômica e Idempotente no PostgreSQL (evita duplo clique e registros órfãos)
+      const finishRes = await finishClinicalAttendance(finalRecord, record.receitas || [], user!.id);
+      if (!finishRes.success) {
+        throw new Error(finishRes.message || 'Erro ao finalizar atendimento.');
       }
+      
+      // OBSERVAÇÃO FASE 1: Preservada a acomodação atual até que a equipe realize a troca
+      // de baia atômica via Controle de Baias, impedindo que o animal fique sem acomodação.
       
       navigate(`/animais/ficha/${id}?tab=historico`); 
     } catch (err: any) {
       setError(err.message || 'Erro inesperado ao salvar o prontuário.');
+      isSubmittingRef.current = false;
     } finally {
       setLoading(false);
     }
   };
 
+  const handleCancelAttendance = async () => {
+    if (!window.confirm('Deseja realmente cancelar este atendimento e devolver o animal para a fila de espera?')) return;
+    setIsCancelling(true);
+    try {
+      const res = await cancelClinicalAttendance(id!, user!.id, 'Cancelado pelo veterinário');
+      if (!res.success) {
+        setError(res.message || 'Não foi possível cancelar o atendimento.');
+        return;
+      }
+      navigate('/veterinario/fila');
+    } catch (err: any) {
+      setError(err.message || 'Erro ao cancelar atendimento.');
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  // 1. TELA DE BLOQUEIO CONCORRENTE: Animal já assumido por outro veterinário
+  if (isBlockedByOtherVet) {
+    return (
+      <div className="max-w-2xl mx-auto py-16 px-4 animate-in fade-in">
+        <div className="bg-white rounded-3xl shadow-xl border border-rose-200 overflow-hidden text-center p-8 space-y-6">
+          <div className="w-20 h-20 bg-rose-100 text-rose-600 rounded-3xl flex items-center justify-center mx-auto shadow-inner">
+            <ShieldAlert size={40} />
+          </div>
+          <div className="space-y-2">
+            <span className="bg-rose-100 text-rose-800 text-xs font-black px-3 py-1 rounded-full uppercase tracking-wider">
+              Atendimento Simultâneo Bloqueado
+            </span>
+            <h2 className="text-2xl font-black text-slate-900 mt-2">
+              Este animal já está em atendimento
+            </h2>
+            <p className="text-slate-600 text-sm max-w-md mx-auto leading-relaxed">
+              O paciente <strong>{animal?.nome || 'selecionado'}</strong> já se encontra em atendimento pelo veterinário{' '}
+              <strong className="text-rose-700">{blockedVetName}</strong>.
+            </p>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto">
+              Nenhum outro profissional pode alterar, iniciar ou finalizar esta consulta simultaneamente para garantir a integridade dos dados clínicos.
+            </p>
+          </div>
+          <div className="pt-4 flex justify-center gap-4">
+            <button
+              type="button"
+              onClick={() => navigate('/veterinario/fila')}
+              className="px-6 py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-lg transition-all flex items-center gap-2"
+            >
+              <ArrowLeft size={18} /> Voltar para a Fila Veterinária
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!animal) return <div className="p-8 text-center text-slate-500 font-bold">Animal não encontrado.</div>;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-20">
-      <div className="flex items-center gap-4">
-        <button type="button" onClick={() => navigate(-1)} className="p-2 hover:bg-slate-200 rounded-full transition-colors"><ArrowLeft size={20} /></button>
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900">{editId ? 'Editar Prontuário' : 'Atendimento Técnico'}</h2>
-          <p className="text-sm text-slate-500">Paciente: <span className="font-bold text-teal-600 uppercase">{animal.nome}</span> {animal.temTutor && <span className="ml-2 bg-indigo-100 text-indigo-700 text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-widest border border-indigo-200">Externo</span>}</p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <button type="button" onClick={() => navigate(-1)} className="p-2 hover:bg-slate-200 rounded-full transition-colors"><ArrowLeft size={20} /></button>
+          <div>
+            <h2 className="text-2xl font-bold text-slate-900">{editId ? 'Editar Prontuário' : 'Atendimento Técnico'}</h2>
+            <p className="text-sm text-slate-500">
+              Paciente: <span className="font-bold text-teal-600 uppercase">{animal.nome}</span>{' '}
+              {animal.temTutor && <span className="ml-2 bg-indigo-100 text-indigo-700 text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-widest border border-indigo-200">Externo</span>}
+            </p>
+          </div>
         </div>
+
+        {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
+          <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl text-emerald-800 text-xs font-bold shadow-sm self-start sm:self-auto">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span>Atendimento em Andamento por Você ({user?.name || 'Veterinário'})</span>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -1074,9 +1179,40 @@ const VeterinaryForm: React.FC = () => {
           </section>
         )}
 
-        <div className="flex justify-end gap-4">
-          <button type="button" onClick={() => navigate(-1)} className="px-6 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl">Cancelar</button>
-          <button type="submit" disabled={loading} className={`flex items-center gap-2 px-10 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${animal.temTutor ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'}`}><Save size={18} /> {loading ? 'Salvando...' : 'Finalizar Atendimento'}</button>
+        <div className="flex flex-col sm:flex-row justify-between items-center gap-4 pt-4 border-t border-slate-200">
+          <div>
+            {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
+              <button
+                type="button"
+                disabled={isCancelling || loading}
+                onClick={handleCancelAttendance}
+                className="px-5 py-3 text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 font-bold rounded-xl transition-all flex items-center gap-2 border border-rose-200 text-sm"
+              >
+                <LogOut size={16} /> {isCancelling ? 'Liberando...' : 'Liberar / Devolver à Fila'}
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-4 w-full sm:w-auto justify-end">
+            <button 
+              type="button" 
+              onClick={() => navigate(-1)} 
+              className="px-6 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl"
+            >
+              Voltar
+            </button>
+            <button 
+              type="submit" 
+              disabled={loading || isCancelling} 
+              className={`flex items-center justify-center gap-2 px-10 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${
+                animal.temTutor 
+                  ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
+                  : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
+              }`}
+            >
+              <Save size={18} /> {loading ? 'Finalizando com Segurança...' : 'Finalizar Atendimento'}
+            </button>
+          </div>
         </div>
       </form>
     </div>

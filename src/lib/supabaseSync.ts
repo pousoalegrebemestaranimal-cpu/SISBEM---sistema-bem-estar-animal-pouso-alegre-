@@ -270,6 +270,8 @@ export function mapAnimalToSupabase(
     tipo_acomodacao_sugerida: a.tipoAcomodacaoSugerida || null,
     justificativa_internacao: cleanString(a.justificativaInternacao),
     data_internacao: cleanString(a.dataInternacao),
+    em_atendimento_vet_id: cleanString(a.emAtendimentoVetId) || null,
+    em_atendimento_inicio: cleanString(a.emAtendimentoInicio) || null,
   };
 }
 
@@ -313,6 +315,8 @@ export function mapSupabaseToAnimal(row: any): Animal {
     tipoAcomodacaoSugerida: row.tipo_acomodacao_sugerida as KennelType || undefined,
     justificativaInternacao: row.justificativa_internacao || undefined,
     dataInternacao: row.data_internacao || undefined,
+    emAtendimentoVetId: row.em_atendimento_vet_id || undefined,
+    emAtendimentoInicio: row.em_atendimento_inicio || undefined,
   };
 }
 
@@ -1515,7 +1519,7 @@ export async function pullFromSupabaseToLocal(
       if (shouldSync('animals')) {
         const { data: remAnimals, error: animErr } = await supabase
           .from('animals')
-          .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, usuario_responsavel_id, solicitante_id, tutor_id, condicao, resgate_samuvet, responsavel_samuvet, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao')
+          .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, usuario_responsavel_id, solicitante_id, tutor_id, condicao, resgate_samuvet, responsavel_samuvet, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao, em_atendimento_vet_id, em_atendimento_inicio')
           .order('data_cadastro', { ascending: false })
           .limit(30);
 

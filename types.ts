@@ -19,6 +19,7 @@ export enum Sexo {
 export enum AnimalCondicao {
   ACOLHIDO = 'Acolhido',
   AGUARDANDO_ATENDIMENTO = 'Aguardando Atendimento',
+  EM_ATENDIMENTO = 'Em Atendimento',
   EM_TRATAMENTO = 'Em Tratamento',
   DISPONIVEL_ADOCAO = 'Disponível para Adoção',
   ADOTADO = 'Adotado',
@@ -220,12 +221,15 @@ export interface Animal {
   tipoAcomodacaoSugerida?: KennelType;
   justificativaInternacao?: string;
   dataInternacao?: string;
+  emAtendimentoVetId?: string;
+  emAtendimentoInicio?: string;
 }
 
 export interface AnimalJoined extends Animal {
   solicitante?: Solicitante;
   tutor?: Tutor;
   usuarioResponsavel?: User;
+  emAtendimentoVet?: User;
   historico?: ClinicalRecord[];
   statusLogs?: StatusLog[];
   currentOccupation?: KennelOccupation & { kennel?: Kennel };

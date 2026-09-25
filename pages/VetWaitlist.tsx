@@ -1,24 +1,71 @@
 
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { db } from '../services/db';
 import { AnimalCondicao, Especie } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info } from 'lucide-react';
+import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2 } from 'lucide-react';
 // Fix: Use import * as and cast to any to bypass named export errors
 import * as ReactRouterDOM from 'react-router-dom';
-const { Link } = ReactRouterDOM as any;
+import { startClinicalAttendance } from '../src/lib/attendanceService';
+const { useNavigate } = ReactRouterDOM as any;
 
 const VetWaitlist: React.FC = () => {
+  const navigate = useNavigate();
   const user = db.getCurrentUser();
-  const animals = useMemo(() => db.getAnimalsJoined(), []);
-  
+  const [animalsState, setAnimalsState] = useState(() => db.getAnimalsJoined());
+  const [startingAnimalId, setStartingAnimalId] = useState<string | null>(null);
+  const [blockingError, setBlockingError] = useState<{ animalId: string; message: string; vetName?: string } | null>(null);
+
+  // Escuta alterações em tempo real via CustomEvents ou Realtime Supabase
+  useEffect(() => {
+    const handleAnimalsChanged = () => {
+      setAnimalsState(db.getAnimalsJoined());
+    };
+    window.addEventListener('sisbem-animals-changed', handleAnimalsChanged);
+    return () => {
+      window.removeEventListener('sisbem-animals-changed', handleAnimalsChanged);
+    };
+  }, []);
+
   // Filtra animais aguardando atendimento (Resgates ou Atendimentos Externos)
   const waitlist = useMemo(() => {
-    return animals
+    return animalsState
       .filter(a => a.condicao === AnimalCondicao.ACOLHIDO || a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO)
       .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
-  }, [animals]);
+  }, [animalsState]);
+
+  const handleStartAttendance = async (animalId: string, animalNome: string) => {
+    if (!user) return;
+    setStartingAnimalId(animalId);
+    setBlockingError(null);
+
+    try {
+      const res = await startClinicalAttendance(animalId, user.id, user.name);
+
+      if (!res.success) {
+        // Bloqueio atômico confirmado
+        setBlockingError({
+          animalId,
+          message: res.message || `Este animal já está em atendimento pelo veterinário ${res.vetName || 'outro profissional'}.`,
+          vetName: res.vetName
+        });
+        // Atualiza a lista para refletir a saída do animal
+        setAnimalsState(db.getAnimalsJoined());
+        return;
+      }
+
+      // Sucesso atômico: o animal foi reservado no banco
+      navigate(`/animais/atendimento/${animalId}`);
+    } catch (err: any) {
+      setBlockingError({
+        animalId,
+        message: err.message || 'Erro inesperado ao iniciar atendimento.'
+      });
+    } finally {
+      setStartingAnimalId(null);
+    }
+  };
 
   if (user?.role !== 'VETERINARIO' && user?.role !== 'ADMIN') {
     return <div className="p-8 text-center text-red-500 font-bold">Acesso restrito ao corpo técnico veterinário.</div>;
@@ -32,6 +79,27 @@ const VetWaitlist: React.FC = () => {
         </h2>
         <p className="text-slate-500">Triagem de prontuários para novos animais e consultas externas.</p>
       </div>
+
+      {blockingError && (
+        <div className="bg-rose-50 border-2 border-rose-300 text-rose-900 p-4 rounded-2xl flex items-center justify-between gap-4 animate-in slide-in-from-top-2 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-rose-100 text-rose-700 rounded-xl shrink-0">
+              <ShieldAlert size={22} />
+            </div>
+            <div>
+              <p className="font-black text-sm">Atendimento Bloqueado pelo Sistema</p>
+              <p className="text-xs text-rose-700 mt-0.5">{blockingError.message}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setBlockingError(null)}
+            className="px-3 py-1.5 bg-rose-200 hover:bg-rose-300 text-rose-900 font-bold text-xs rounded-xl transition-colors"
+          >
+            Entendido
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6">
         {waitlist.length === 0 ? (
@@ -98,16 +166,26 @@ const VetWaitlist: React.FC = () => {
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Chegada</p>
                     <p className="text-sm font-black text-slate-700">{new Date(animal.dataCadastro).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                   </div>
-                  <Link 
-                    to={`/animais/atendimento/${animal.id}`}
-                    className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-8 py-3 text-white font-black rounded-xl shadow-lg transition-all group ${
+                  <button 
+                    type="button"
+                    disabled={startingAnimalId === animal.id}
+                    onClick={() => handleStartAttendance(animal.id, animal.nome)}
+                    className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-8 py-3 text-white font-black rounded-xl shadow-lg transition-all group disabled:opacity-50 ${
                       animal.temTutor 
                       ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
                       : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
                     }`}
                   >
-                    Atender {animal.temTutor ? 'Consulta' : 'Animal'} <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
-                  </Link>
+                    {startingAnimalId === animal.id ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" /> Verificando...
+                      </>
+                    ) : (
+                      <>
+                        Atender {animal.temTutor ? 'Consulta' : 'Animal'} <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>

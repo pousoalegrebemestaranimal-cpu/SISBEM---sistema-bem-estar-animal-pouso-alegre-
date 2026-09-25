@@ -1,5 +1,5 @@
-import { pgTable, text, boolean, timestamp, doublePrecision, integer, jsonb } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { pgTable, text, boolean, timestamp, doublePrecision, integer, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { relations, sql } from 'drizzle-orm';
 
 // 1. Usuários do Sistema SISBEM (Operadores, Vets, Admins)
 export const users = pgTable('users', {
@@ -89,8 +89,16 @@ export const animals = pgTable('animals', {
   tipoAcomodacaoSugerida: text('tipo_acomodacao_sugerida'),
   justificativaInternacao: text('justificativa_internacao'),
   dataInternacao: text('data_internacao'),
+  emAtendimentoVetId: text('em_atendimento_vet_id').references(() => users.id),
+  emAtendimentoInicio: timestamp('em_atendimento_inicio', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex('idx_animals_single_active_attendance')
+    .on(table.id)
+    .where(sql`condicao = 'Em Atendimento'`),
+  index('idx_animals_em_atendimento_vet_id')
+    .on(table.emAtendimentoVetId),
+]);
 
 // 6. Ocupação de Baias
 export const kennelOccupations = pgTable('kennel_occupations', {
@@ -103,7 +111,11 @@ export const kennelOccupations = pgTable('kennel_occupations', {
   clinicalRecordId: text('clinical_record_id'),
   justification: text('justification').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex('idx_kennel_occupations_single_active')
+    .on(table.animalId)
+    .where(sql`exit_date IS NULL`),
+]);
 
 // 7. Prontuários Clínicos Veterinários
 export const clinicalRecords = pgTable('clinical_records', {
