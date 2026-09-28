@@ -503,11 +503,6 @@ export function mapUserToSupabase(u: any, credentialHash?: string | null) {
     matricula: cleanString(u.matricula),
     email: cleanString(u.email),
   };
-  if (credentialHash !== undefined) {
-    payload.uid = credentialHash;
-  } else if (u.uid) {
-    payload.uid = u.uid;
-  }
   return payload;
 }
 
@@ -520,7 +515,6 @@ export function mapSupabaseToUser(row: any): any {
     crmv: row.crmv || undefined,
     matricula: row.matricula || undefined,
     email: row.email || undefined,
-    uid: row.uid || undefined,
   };
 }
 
@@ -1123,11 +1117,7 @@ export async function releaseKennelInSupabase(
 
 export async function syncUserToSupabase(user: any) {
   try {
-    let credHash = user.uid || null;
-    if (!credHash && user.password) {
-      credHash = await hashPassword(user.password, user.id);
-    }
-    const payload = mapUserToSupabase(user, credHash);
+    const payload = mapUserToSupabase(user);
     const { error } = await supabase.from('users').upsert([payload]);
     if (error) {
       console.warn('Supabase syncUser info:', error.message);
@@ -1275,13 +1265,7 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
     }
 
     if (localUsers.length > 0) {
-      const payload = await Promise.all(localUsers.map(async (u: any) => {
-        let credHash = u.uid || null;
-        if (!credHash && u.password) {
-          credHash = await hashPassword(u.password, u.id);
-        }
-        return mapUserToSupabase(u, credHash);
-      }));
+      const payload = localUsers.map((u: any) => mapUserToSupabase(u));
       const { error } = await supabase.from('users').upsert(payload);
       if (error) {
         // Se violar RLS da tabela users, não trava a sincronização dos animais
@@ -1557,11 +1541,11 @@ export async function pullFromSupabaseToLocal(
         moduleCacheTimestamps.surgeries = now;
       }
 
-      // 5. Usuários (apenas colunas necessárias, sem SELECT *)
+      // 5. Usuários (apenas colunas públicas necessárias, sem campos de credenciais)
       if (shouldSync('users')) {
         const { data: remUsers } = await supabase
           .from('users')
-          .select('id, name, username, role, crmv, matricula, email, uid');
+          .select('id, name, username, role, crmv, matricula, email');
 
         if (remUsers && remUsers.length > 0) {
           const localUsers = (dbInstance && typeof dbInstance.getUsers === 'function')
@@ -1570,7 +1554,6 @@ export async function pullFromSupabaseToLocal(
           const map = new Map<string, any>();
           localUsers.forEach((u: any) => map.set(u.id, u));
           remUsers.forEach((r: any) => {
-            const existing = map.get(r.id);
             map.set(r.id, {
               id: r.id,
               name: r.name,
@@ -1579,8 +1562,6 @@ export async function pullFromSupabaseToLocal(
               crmv: r.crmv || undefined,
               matricula: r.matricula || undefined,
               email: r.email || undefined,
-              uid: r.uid || undefined,
-              password: existing?.password || undefined,
             });
           });
           const merged = Array.from(map.values());

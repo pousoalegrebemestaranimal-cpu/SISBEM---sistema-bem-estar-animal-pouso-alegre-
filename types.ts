@@ -51,6 +51,7 @@ export interface User {
   role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO';
   crmv?: string;
   matricula?: string;
+  email?: string;
 }
 
 export interface Solicitante {

@@ -75,12 +75,11 @@ NOTIFY pgrst, 'reload schema';`;
     try {
       const { data: remoteUsers } = await supabase
         .from('users')
-        .select('id, name, username, role, crmv, matricula, email, uid');
+        .select('id, name, username, role, crmv, matricula, email');
       if (remoteUsers && remoteUsers.length > 0) {
         const map = new Map<string, any>();
         localUsers.forEach((u: any) => map.set(u.id, u));
         remoteUsers.forEach((r: any) => {
-          const existing = map.get(r.id);
           map.set(r.id, {
             id: r.id,
             name: r.name,
@@ -89,8 +88,6 @@ NOTIFY pgrst, 'reload schema';`;
             crmv: r.crmv || undefined,
             matricula: r.matricula || undefined,
             email: r.email || undefined,
-            uid: r.uid || undefined,
-            password: existing?.password || undefined,
             syncedWithSupabase: true
           });
         });
@@ -154,23 +151,7 @@ NOTIFY pgrst, 'reload schema';`;
         return;
       }
 
-      // Senhas padrão caso não haja senha cadastrada no objeto
-      const defaultPasswords: Record<string, string> = {
-        admin: 'admin123',
-        vet01: 'vet123',
-        vet02: 'vet123',
-        vet03: 'vet123',
-        op01: 'op123'
-      };
-
-      const payload = await Promise.all(localUsers.map(async (u: any) => {
-        let credHash = u.uid || null;
-        if (!credHash) {
-          const pass = u.password || defaultPasswords[u.username] || '123456';
-          credHash = await hashPassword(pass, u.id);
-        }
-        return mapUserToSupabase(u, credHash);
-      }));
+      const payload = localUsers.map((u: any) => mapUserToSupabase(u));
 
       const { error } = await supabase.from('users').upsert(payload, { onConflict: 'id' });
 
@@ -250,20 +231,18 @@ NOTIFY pgrst, 'reload schema';`;
         }
       }
 
-      // Create object to save in DB and Supabase
-      const { confirmPassword, ...dataToSave } = formData;
+      // Create object to save in DB and Supabase (sem armazenar senhas nem hashes no cliente)
+      const { confirmPassword, password: _p, ...dataToSave } = formData;
       const userRecord = {
         ...dataToSave,
         id: newUserId,
         email: emailToRegister || undefined,
-        password: cleanPass,
-        uid: pwdHash,
       };
 
       db.saveUser(userRecord);
 
-      // Salva explicitamente no Supabase
-      await supabase.from('users').upsert([mapUserToSupabase(userRecord, pwdHash)]);
+      // Salva dados públicos no Supabase
+      await supabase.from('users').upsert([mapUserToSupabase(userRecord)]);
       
       setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg} Credenciais ativas para login pelo site.` });
       setFormData({ 
@@ -324,13 +303,9 @@ NOTIFY pgrst, 'reload schema';`;
         console.warn('Aviso ao atualizar senha no Supabase:', sbErr.message);
       }
 
-      // 2. Atualiza localmente
-      const updatedUser = {
-        ...userToChangePassword,
-        password: cleanPass,
-        uid: newHash,
-      };
-      db.saveUser(updatedUser);
+      // 2. Atualiza localmente sem salvar senhas nem hashes no cache
+      const { password: _p, uid: _u, ...cleanUser } = userToChangePassword;
+      db.saveUser(cleanUser);
 
       setChangePasswordMessage({
         type: 'success',

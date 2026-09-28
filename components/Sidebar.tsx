@@ -14,6 +14,7 @@ const Sidebar: React.FC = () => {
     try {
       await supabase.auth.signOut();
     } catch {}
+    localStorage.removeItem('sisbem_auth_token');
     db.logout();
     window.location.hash = '/login';
   };

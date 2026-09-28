@@ -27,8 +27,42 @@ export interface FinishAttendanceResult {
   idempotent?: boolean;
 }
 
+let lastAuthStatus: { code: string; message: string } | null = null;
+
+export function getAuthStatus() {
+  return lastAuthStatus;
+}
+
+export function formatAttendanceErrorMessage(code?: string, defaultMsg?: string): string {
+  switch (code) {
+    case 'UNAUTHENTICATED':
+      return 'Sessão não autenticada ou expirada. Faça login novamente.';
+    case 'USER_NOT_FOUND':
+      return 'Usuário veterinário não localizado no sistema central.';
+    case 'ANIMAL_NOT_FOUND':
+      return 'Animal não localizado no cadastro central.';
+    case 'FORBIDDEN':
+      return 'Acesso negado: seu perfil não possui autorização técnica para esta operação.';
+    case 'UNAUTHORIZED_VET':
+      return 'Tentativa de impersonação bloqueada: o veterinário informado difere do usuário autenticado.';
+    case 'ALREADY_IN_ATTENDANCE':
+      return defaultMsg || 'Este animal já está em atendimento por outro profissional.';
+    case 'INVALID_STATE':
+      return defaultMsg || 'O animal não se encontra em condição elegível para esta operação.';
+    case 'INVALID_PARAM':
+      return defaultMsg || 'Parâmetros obrigatórios incompletos.';
+    case 'IDEMPOTENCY_CONFLICT':
+      return 'Conflito de registro: este prontuário já foi emitido com dados divergentes.';
+    case 'NETWORK_ERROR':
+      return 'Falha de comunicação com o servidor central. Verifique sua conexão.';
+    default:
+      return defaultMsg || 'Ocorreu um erro ao processar a operação no servidor central.';
+  }
+}
+
 /**
- * Obtém ou emite token de autenticação assinado para o usuário ativo da sessão
+ * Obtém ou valida token de autenticação assinado para o usuário ativo da sessão
+ * Elimina totalmente credentialProof e dependência de senhas no frontend (Fase 1.1.5)
  */
 export async function getAuthToken(): Promise<string | null> {
   if (typeof window === 'undefined') return null;
@@ -38,48 +72,57 @@ export async function getAuthToken(): Promise<string | null> {
 
   if (!currentUser) {
     localStorage.removeItem('sisbem_auth_token');
+    lastAuthStatus = { code: 'UNAUTHENTICATED', message: 'Nenhum usuário autenticado no sistema. Faça login.' };
     return null;
   }
 
-  // Se já temos token em cache, tenta reutilizar
+  // Se já temos token em cache, valida assinatura e expiração
   if (cachedToken) {
     try {
       const parts = cachedToken.split('.');
       if (parts.length === 3) {
         const payload = JSON.parse(atob(parts[1]));
         const now = Math.floor(Date.now() / 1000);
+
         // Se ainda for válido por mais de 5 minutos e corresponder ao usuário ativo
         if (payload.id === currentUser.id && payload.exp > now + 300) {
+          lastAuthStatus = null;
           return cachedToken;
+        }
+
+        // Se o token ainda não expirou mas está perto de expirar, tenta renovar no servidor
+        if (payload.id === currentUser.id && payload.exp > now) {
+          try {
+            const refreshRes = await fetch('/api/auth/refresh', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${cachedToken}`,
+              },
+            });
+            const refreshData = await refreshRes.json().catch(() => null);
+            if (refreshRes.ok && refreshData?.success && refreshData?.token) {
+              localStorage.setItem('sisbem_auth_token', refreshData.token);
+              lastAuthStatus = null;
+              return refreshData.token;
+            }
+          } catch {
+            // Em caso de erro de rede temporário, ainda usa o token atual se válido
+            return cachedToken;
+          }
         }
       }
     } catch {
-      // Ignora erro de parsing e busca novo token
+      // Ignora erro de parsing e limpa token inválido
     }
   }
 
-  // Solicita emissão de novo token seguro ao servidor Express
-  try {
-    const res = await fetch('/api/auth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: currentUser.id, username: currentUser.username }),
-    });
-
-    if (!res.ok) {
-      console.warn('Falha na emissão de token de autenticação.');
-      return null;
-    }
-
-    const data = await res.json();
-    if (data.success && data.token) {
-      localStorage.setItem('sisbem_auth_token', data.token);
-      return data.token;
-    }
-  } catch (err) {
-    console.error('Erro de conexão ao obter token de autenticação:', err);
-  }
-
+  // Token ausente ou expirado: requer autenticação autêntica pelo usuário
+  localStorage.removeItem('sisbem_auth_token');
+  lastAuthStatus = {
+    code: 'UNAUTHENTICATED',
+    message: 'Sessão de autenticação expirada ou inexistente. Faça login novamente para prosseguir.',
+  };
   return null;
 }
 
@@ -102,10 +145,11 @@ export async function startClinicalAttendance(
 
   const token = await getAuthToken();
   if (!token) {
+    const status = getAuthStatus();
     return {
       success: false,
-      code: 'UNAUTHENTICATED',
-      message: 'Sessão não autenticada. Faça login novamente para iniciar o atendimento.',
+      code: status?.code || 'UNAUTHENTICATED',
+      message: status?.message || 'Sessão não autenticada. Faça login novamente para iniciar o atendimento.',
     };
   }
 
@@ -124,10 +168,11 @@ export async function startClinicalAttendance(
     serverResponse = await res.json().catch(() => null);
 
     if (!res.ok || !serverResponse) {
+      const code = serverResponse?.code || (res.status === 401 ? 'UNAUTHENTICATED' : res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR');
       return {
         success: false,
-        code: serverResponse?.code || (res.status === 401 ? 'UNAUTHENTICATED' : res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR'),
-        message: serverResponse?.message || `Falha de comunicação com o servidor (${res.status}).`,
+        code,
+        message: serverResponse?.message || formatAttendanceErrorMessage(code, `Falha de comunicação com o servidor (${res.status}).`),
         vetName: serverResponse?.vetName || serverResponse?.vet_nome,
         vetId: serverResponse?.vetId || serverResponse?.vet_id,
         inicio: serverResponse?.inicio,
@@ -138,7 +183,7 @@ export async function startClinicalAttendance(
       return {
         success: false,
         code: serverResponse.code || 'ALREADY_IN_ATTENDANCE',
-        message: serverResponse.message || 'Este animal já está em atendimento por outro profissional.',
+        message: serverResponse.message || formatAttendanceErrorMessage(serverResponse.code, 'Este animal já está em atendimento por outro profissional.'),
         vetName: serverResponse.vet_nome || serverResponse.vetName,
         vetId: serverResponse.vet_id || serverResponse.vetId,
         inicio: serverResponse.inicio,
@@ -199,10 +244,11 @@ export async function cancelClinicalAttendance(
 
   const token = await getAuthToken();
   if (!token) {
+    const status = getAuthStatus();
     return {
       success: false,
-      code: 'UNAUTHENTICATED',
-      message: 'Sessão expirada. Autentique-se novamente para cancelar.',
+      code: status?.code || 'UNAUTHENTICATED',
+      message: status?.message || 'Sessão expirada. Autentique-se novamente para cancelar.',
     };
   }
 
@@ -221,10 +267,11 @@ export async function cancelClinicalAttendance(
     serverResponse = await res.json().catch(() => null);
 
     if (!res.ok || !serverResponse || !serverResponse.success) {
+      const code = serverResponse?.code || (res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR');
       return {
         success: false,
-        code: serverResponse?.code || (res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR'),
-        message: serverResponse?.message || 'Falha ao cancelar atendimento no servidor.',
+        code,
+        message: serverResponse?.message || formatAttendanceErrorMessage(code, 'Falha ao cancelar atendimento no servidor.'),
       };
     }
   } catch (err: any) {
@@ -279,10 +326,11 @@ export async function finishClinicalAttendance(
 
   const token = await getAuthToken();
   if (!token) {
+    const status = getAuthStatus();
     return {
       success: false,
-      code: 'UNAUTHENTICATED',
-      message: 'Sessão expirada. Autentique-se novamente para finalizar.',
+      code: status?.code || 'UNAUTHENTICATED',
+      message: status?.message || 'Sessão expirada. Autentique-se novamente para finalizar.',
     };
   }
 
@@ -314,10 +362,11 @@ export async function finishClinicalAttendance(
     serverResponse = await res.json().catch(() => null);
 
     if (!res.ok || !serverResponse || !serverResponse.success) {
+      const code = serverResponse?.code || (res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR');
       return {
         success: false,
-        code: serverResponse?.code || (res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR'),
-        message: serverResponse?.message || 'Falha ao finalizar atendimento no servidor central.',
+        code,
+        message: serverResponse?.message || formatAttendanceErrorMessage(code, 'Falha ao finalizar atendimento no servidor central.'),
       };
     }
   } catch (err: any) {

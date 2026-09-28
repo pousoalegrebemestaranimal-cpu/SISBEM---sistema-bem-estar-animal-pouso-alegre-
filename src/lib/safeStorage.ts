@@ -234,9 +234,82 @@ export function sanitizeExistingLocalStorage(): { base64PurgedCount: number; cur
   return { base64PurgedCount, currentAnimalsCount };
 }
 
+/**
+ * Sanitiza e expurga credenciais (senhas em texto puro, uid credential hashes, proofs) do localStorage
+ */
+export function sanitizeCredentialsFromLocalStorage(): {
+  usersCleaned: number;
+  currentUserCleaned: boolean;
+} {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return { usersCleaned: 0, currentUserCleaned: false };
+  }
+
+  let usersCleaned = 0;
+  let currentUserCleaned = false;
+
+  try {
+    // 1. Sanitiza sisbem_current_user
+    const rawCurrentUser = localStorage.getItem('sisbem_current_user');
+    if (rawCurrentUser) {
+      try {
+        const u = JSON.parse(rawCurrentUser);
+        if (u && (u.password || u.uid || u.credentialProof || u.secret || u.authSecret)) {
+          const { password, uid, credentialProof, secret, authSecret, ...cleanUser } = u;
+          localStorage.setItem('sisbem_current_user', JSON.stringify(cleanUser));
+          currentUserCleaned = true;
+          console.info('[SISBEM Security] Credenciais e hashes expurgados de sisbem_current_user.');
+        }
+      } catch {}
+    }
+
+    // 2. Sanitiza sisbem_users
+    const rawUsers = localStorage.getItem('sisbem_users');
+    if (rawUsers) {
+      try {
+        const usersList = JSON.parse(rawUsers);
+        if (Array.isArray(usersList)) {
+          let modified = false;
+          const cleanedList = usersList.map((u: any) => {
+            if (u && (u.password || u.uid || u.credentialProof || u.secret || u.authSecret)) {
+              modified = true;
+              usersCleaned++;
+              const { password, uid, credentialProof, secret, authSecret, ...cleanU } = u;
+              return cleanU;
+            }
+            return u;
+          });
+          if (modified) {
+            localStorage.setItem('sisbem_users', JSON.stringify(cleanedList));
+            console.info(`[SISBEM Security] Credenciais e hashes expurgados de ${usersCleaned} usuário(s) em sisbem_users.`);
+          }
+        }
+      } catch {}
+    }
+
+    // 3. Remove chaves obsoletas ou inseguras
+    const insecureKeys = [
+      'sisbem_credential_proof',
+      'sisbem_password',
+      'sisbem_user_secret',
+      'sisbem_auth_proof',
+    ];
+    for (const key of insecureKeys) {
+      if (localStorage.getItem(key)) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (err) {
+    console.warn('[SISBEM Security] Erro ao sanitizar credenciais locais:', err);
+  }
+
+  return { usersCleaned, currentUserCleaned };
+}
+
 // Executa saneamento imediato ao importar o módulo
 if (typeof window !== 'undefined') {
   try {
     sanitizeExistingLocalStorage();
+    sanitizeCredentialsFromLocalStorage();
   } catch {}
 }

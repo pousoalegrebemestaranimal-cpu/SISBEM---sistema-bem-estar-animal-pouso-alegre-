@@ -22,7 +22,7 @@ import {
   syncAllLocalDataToSupabase,
   pullFromSupabaseToLocal
 } from '../src/lib/supabaseSync';
-import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal } from '../src/lib/safeStorage';
+import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal, sanitizeCredentialsFromLocalStorage } from '../src/lib/safeStorage';
 import { isOccupationActive, getActiveOccupation, getAllActiveOccupations } from '../src/lib/supabaseQueries';
 
 const KEYS = {
@@ -54,7 +54,7 @@ export const resetAndSeedAllData = () => {
   const inThreeDaysStr = new Date(now.getTime() + (3 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
   const inFiveDaysStr = new Date(now.getTime() + (5 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
 
-  // 1. Usuários
+  // 1. Usuários (Sem senhas nem hashes no armazenamento do cliente)
   const users: User[] = [
     { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN' },
     { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887' },
@@ -62,13 +62,7 @@ export const resetAndSeedAllData = () => {
     { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890' },
     { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889' }
   ];
-  localStorage.setItem(KEYS.USERS, JSON.stringify([
-    { ...users[0], password: 'admin' },
-    { ...users[1], password: 'password123' },
-    { ...users[2], password: 'password123' },
-    { ...users[3], password: 'password123' },
-    { ...users[4], password: 'password123' }
-  ]));
+  localStorage.setItem(KEYS.USERS, JSON.stringify(users));
 
   // 2. Configurações de Baias e Acomodação
   const initialConfigs: KennelConfig[] = [
@@ -1122,7 +1116,7 @@ export const clearAllFictitiousData = () => {
 
 const initSystem = () => {
   if (typeof localStorage === 'undefined') return;
-  // 1. Inicializa usuários básicos de acesso se não existirem
+  // 1. Inicializa usuários básicos de acesso se não existirem (Sem senhas no cliente)
   const existingUsers = localStorage.getItem(KEYS.USERS);
   if (!existingUsers || JSON.parse(existingUsers || '[]').length === 0) {
     const users: User[] = [
@@ -1132,13 +1126,7 @@ const initSystem = () => {
       { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890' },
       { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889' }
     ];
-    localStorage.setItem(KEYS.USERS, JSON.stringify([
-      { ...users[0], password: 'admin' },
-      { ...users[1], password: 'password123' },
-      { ...users[2], password: 'password123' },
-      { ...users[3], password: 'password123' },
-      { ...users[4], password: 'password123' }
-    ]));
+    localStorage.setItem(KEYS.USERS, JSON.stringify(users));
   }
 
   // 2. Inicializa configurações de baias se não existirem
@@ -1178,18 +1166,21 @@ export const db = {
   getUsers: (): any[] => JSON.parse(localStorage.getItem(KEYS.USERS) || '[]'),
   
   saveUser: (userData: any) => {
+    // Garante que senhas ou hashes nunca sejam gravados no cache do cliente
+    const { password, uid, credentialProof, secret, authSecret, ...safeUserData } = userData;
     const users = db.getUsers();
-    if (!userData.id) {
-      if (users.find(u => u.username === userData.username)) throw new Error('Nome de usuário já existe.');
-      userData.id = crypto.randomUUID();
-      users.push(userData);
+    if (!safeUserData.id) {
+      if (users.find(u => u.username === safeUserData.username)) throw new Error('Nome de usuário já existe.');
+      safeUserData.id = crypto.randomUUID();
+      users.push(safeUserData);
     } else {
-      const idx = users.findIndex(u => u.id === userData.id);
-      if (idx > -1) users[idx] = { ...users[idx], ...userData };
+      const idx = users.findIndex(u => u.id === safeUserData.id);
+      if (idx > -1) users[idx] = { ...users[idx], ...safeUserData };
+      else users.push(safeUserData);
     }
     localStorage.setItem(KEYS.USERS, JSON.stringify(users));
-    syncUserToSupabase(userData).catch(err => console.warn('Supabase syncUser:', err));
-    return userData;
+    syncUserToSupabase(safeUserData).catch(err => console.warn('Supabase syncUser:', err));
+    return safeUserData;
   },
 
   deleteUser: (idOrUsername: string) => {
@@ -2112,7 +2103,9 @@ export const db = {
 
   setCurrentUser: (user: User | null) => {
     if (user) {
-      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(user));
+      // Expurga categoricamente senhas e uid antes de salvar no cliente
+      const { password, uid, credentialProof, secret, authSecret, ...safeUser } = (user as any);
+      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(safeUser));
     } else {
       localStorage.removeItem(KEYS.CURRENT_USER);
     }
@@ -2120,26 +2113,52 @@ export const db = {
 
   getCurrentUser: (): User | null => {
     const user = localStorage.getItem(KEYS.CURRENT_USER);
-    return user ? JSON.parse(user) : null;
+    if (!user) return null;
+    try {
+      const parsed = JSON.parse(user);
+      if (parsed && (parsed.password || parsed.uid || parsed.credentialProof)) {
+        const { password, uid, credentialProof, secret, authSecret, ...clean } = parsed;
+        localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(clean));
+        return clean as User;
+      }
+      return parsed as User;
+    } catch {
+      return null;
+    }
   },
 
-  login: (username: string, password: string): User | null => {
-    const cleanU = username.trim().toLowerCase();
-    const users = db.getUsers();
-    const user = users.find(u => 
-      (u.username?.toLowerCase() === cleanU || (u.email && u.email.toLowerCase() === cleanU)) && 
-      u.password === password
-    );
-    if (user) {
-      const { password: _, ...safeUser } = user;
-      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(safeUser));
-      return safeUser as User;
+  // Login Seguro e Autenticado no Servidor (Express / Cloud SQL)
+  loginAsync: async (identifier: string, password: string): Promise<{ success: boolean; user?: User; token?: string; message?: string }> => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, password }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && data?.token && data?.user) {
+        localStorage.setItem('sisbem_auth_token', data.token);
+        db.setCurrentUser(data.user);
+        return { success: true, user: data.user, token: data.token };
+      }
+      return { success: false, message: data?.message || 'Usuário ou senha incorretos.' };
+    } catch (err: any) {
+      return { success: false, message: 'Falha de comunicação com o servidor central.' };
     }
+  },
+
+  // Legado: descontinuado por motivos de segurança (senhas não são salvas no cliente)
+  login: (username: string, password: string): User | null => {
+    console.warn('[db.login] Método síncrono descontinuado. Utilize db.loginAsync() com /api/auth/login.');
     return null;
   },
 
   logout: () => {
     localStorage.removeItem(KEYS.CURRENT_USER);
+    localStorage.removeItem('sisbem_auth_token');
+    try {
+      localStorage.removeItem('sisbem_credential_proof');
+    } catch {}
   },
 
   clearAllFictitiousData: () => clearAllFictitiousData(),
