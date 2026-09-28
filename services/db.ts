@@ -56,11 +56,19 @@ export const resetAndSeedAllData = () => {
 
   // 1. Usuários (Sem senhas nem hashes no armazenamento do cliente)
   const users: User[] = [
-    { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN' },
-    { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887' },
-    { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888' },
-    { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890' },
-    { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889' }
+    { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN', matricula: '00001', email: 'admin@sisbem.gov.br' },
+    { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887', email: 'roberto.santos@sisbem.gov.br' },
+    { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888', email: 'camila.rocha@sisbem.gov.br' },
+    { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890', email: 'marcos.alvarenga@sisbem.gov.br' },
+    { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889', email: 'mariana.albuquerque@sisbem.gov.br' },
+    { id: '68b572dd-bc3f-48e9-a74d-44b6e36b1e8d', name: 'Luiz Fenando da Silva', username: 'fernandosilva', role: 'VETERINARIO', crmv: '32377', matricula: '23780-2', email: 'luizfernandosilva.medvet@gmail.com' },
+    { id: '03632964-ac64-43c1-a94d-f80352e0af99', name: 'Naiara Souza', username: 'naiara', role: 'OPERATOR' },
+    { id: '061aa334-5762-44b5-b4ba-b680b31d39f5', name: 'Maira de Carvalho Simões ', username: 'maira', role: 'VETERINARIO', crmv: '28919', matricula: '23961' },
+    { id: '300540f5-a64b-45e5-9195-a7a677318d9a', name: 'Daniel José de Paula', username: 'daniel', role: 'VETERINARIO', crmv: '34377/MG', matricula: '23742' },
+    { id: '35416324-db29-4c43-94c2-574d92434c00', name: 'Tatiane Cristina Moreira da Silva', username: 'tatiane', role: 'VETERINARIO', crmv: '15704', matricula: '24163-1', email: 'tatianevet11@gmail.com' },
+    { id: 'c5de63b2-5bca-4566-be73-33c92265eff2', name: 'Lucas de Paula Gonçalves ', username: 'lucas', role: 'VETERINARIO', crmv: '34381/MG', matricula: '23782-1' },
+    { id: 'ef7d9362-d4ae-4426-8617-6c9ccb3174a0', name: 'Isabella Silva', username: 'isabella', role: 'VETERINARIO', crmv: '36307', matricula: '249071' },
+    { id: 'ff3e3bc6-478b-49a9-acff-1afe5c6a75dd', name: 'Rayssa C. Lopes Alvarenga ', username: 'rayssalopes', role: 'VETERINARIO', crmv: '33347', matricula: '23700', email: 'rayscris@hotmail.com' }
   ];
   localStorage.setItem(KEYS.USERS, JSON.stringify(users));
 
@@ -1120,11 +1128,19 @@ const initSystem = () => {
   const existingUsers = localStorage.getItem(KEYS.USERS);
   if (!existingUsers || JSON.parse(existingUsers || '[]').length === 0) {
     const users: User[] = [
-      { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN' },
-      { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887' },
-      { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888' },
-      { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890' },
-      { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889' }
+      { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN', matricula: '00001', email: 'admin@sisbem.gov.br' },
+      { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887', email: 'roberto.santos@sisbem.gov.br' },
+      { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888', email: 'camila.rocha@sisbem.gov.br' },
+      { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890', email: 'marcos.alvarenga@sisbem.gov.br' },
+      { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889', email: 'mariana.albuquerque@sisbem.gov.br' },
+      { id: '68b572dd-bc3f-48e9-a74d-44b6e36b1e8d', name: 'Luiz Fenando da Silva', username: 'fernandosilva', role: 'VETERINARIO', crmv: '32377', matricula: '23780-2', email: 'luizfernandosilva.medvet@gmail.com' },
+      { id: '03632964-ac64-43c1-a94d-f80352e0af99', name: 'Naiara Souza', username: 'naiara', role: 'OPERATOR' },
+      { id: '061aa334-5762-44b5-b4ba-b680b31d39f5', name: 'Maira de Carvalho Simões ', username: 'maira', role: 'VETERINARIO', crmv: '28919', matricula: '23961' },
+      { id: '300540f5-a64b-45e5-9195-a7a677318d9a', name: 'Daniel José de Paula', username: 'daniel', role: 'VETERINARIO', crmv: '34377/MG', matricula: '23742' },
+      { id: '35416324-db29-4c43-94c2-574d92434c00', name: 'Tatiane Cristina Moreira da Silva', username: 'tatiane', role: 'VETERINARIO', crmv: '15704', matricula: '24163-1', email: 'tatianevet11@gmail.com' },
+      { id: 'c5de63b2-5bca-4566-be73-33c92265eff2', name: 'Lucas de Paula Gonçalves ', username: 'lucas', role: 'VETERINARIO', crmv: '34381/MG', matricula: '23782-1' },
+      { id: 'ef7d9362-d4ae-4426-8617-6c9ccb3174a0', name: 'Isabella Silva', username: 'isabella', role: 'VETERINARIO', crmv: '36307', matricula: '249071' },
+      { id: 'ff3e3bc6-478b-49a9-acff-1afe5c6a75dd', name: 'Rayssa C. Lopes Alvarenga ', username: 'rayssalopes', role: 'VETERINARIO', crmv: '33347', matricula: '23700', email: 'rayscris@hotmail.com' }
     ];
     localStorage.setItem(KEYS.USERS, JSON.stringify(users));
   }

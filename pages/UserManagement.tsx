@@ -3,7 +3,6 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/db';
 import { registerWithSupabase, supabase } from '../src/lib/supabase';
 import { mapUserToSupabase } from '../src/lib/supabaseSync';
-import { hashPassword } from '../src/lib/authCrypto';
 import { 
   Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, 
   AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal, KeyRound
@@ -69,35 +68,27 @@ WITH CHECK (true);
 -- Notifica o PostgREST para recarregar o cache de esquemas
 NOTIFY pgrst, 'reload schema';`;
 
-  // Atualiza lista unificada de usuários (Local + Supabase)
+  // Atualiza lista canônica de usuários diretamente do Cloud SQL (Fase 1.1.6)
   const refreshUsers = async () => {
-    const localUsers = db.getUsers() || [];
-    try {
-      const { data: remoteUsers } = await supabase
-        .from('users')
-        .select('id, name, username, role, crmv, matricula, email');
-      if (remoteUsers && remoteUsers.length > 0) {
-        const map = new Map<string, any>();
-        localUsers.forEach((u: any) => map.set(u.id, u));
-        remoteUsers.forEach((r: any) => {
-          map.set(r.id, {
-            id: r.id,
-            name: r.name,
-            username: r.username,
-            role: r.role,
-            crmv: r.crmv || undefined,
-            matricula: r.matricula || undefined,
-            email: r.email || undefined,
-            syncedWithSupabase: true
-          });
+    const token = localStorage.getItem('sisbem_auth_token');
+    if (token) {
+      try {
+        const res = await fetch('/api/users', {
+          headers: { Authorization: `Bearer ${token}` }
         });
-        const merged = Array.from(map.values());
-        setUsersList(merged);
-        return;
+        const data = await res.json().catch(() => null);
+        if (res.ok && data?.success && Array.isArray(data.users)) {
+          setUsersList(data.users);
+          // Atualiza cache local limpo (sem senhas nem hashes)
+          localStorage.setItem('sisbem_users', JSON.stringify(data.users));
+          return;
+        }
+      } catch (err) {
+        console.warn('Falha ao buscar usuários do Cloud SQL via API:', err);
       }
-    } catch {
-      // ignore
     }
+    // Fallback para cache local se offline
+    const localUsers = db.getUsers() || [];
     setUsersList(localUsers);
   };
 
@@ -215,42 +206,58 @@ NOTIFY pgrst, 'reload schema';`;
     setLoading(true);
 
     try {
-      const newUserId = crypto.randomUUID();
+      const token = localStorage.getItem('sisbem_auth_token');
       const cleanPass = formData.password.trim();
-      const pwdHash = await hashPassword(cleanPass, newUserId);
 
-      // Se o usuário digitou um e-mail, sincroniza também com o Supabase Auth
+      // Criação direta no Cloud SQL via API de Backend (Fase 1.1.6)
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({
+          name: formData.name.trim(),
+          username: formData.username.trim().toLowerCase(),
+          email: formData.email.trim() || undefined,
+          role: formData.role,
+          crmv: formData.crmv.trim() || undefined,
+          matricula: formData.matricula.trim() || undefined,
+          password: cleanPass
+        })
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || 'Falha ao cadastrar servidor no banco central.');
+      }
+
+      // Se informou e-mail, opcionalmente sincroniza com Supabase Auth
       let supabaseMsg = '';
       const emailToRegister = formData.email.trim() || (formData.username.includes('@') ? formData.username : '');
       if (emailToRegister) {
-        const sbRes = await registerWithSupabase(emailToRegister, cleanPass, formData.name, formData.role);
-        if (sbRes.success) {
-          supabaseMsg = ' Conta sincronizada no Supabase Auth.';
-        } else if (sbRes.error) {
-          console.warn('Aviso ao sincronizar com Supabase Auth:', sbRes.error);
+        try {
+          const sbRes = await registerWithSupabase(emailToRegister, cleanPass, formData.name, formData.role);
+          if (sbRes.success) {
+            supabaseMsg = ' Conta sincronizada no Supabase Auth.';
+          }
+        } catch {
+          // ignore
         }
       }
 
-      // Create object to save in DB and Supabase (sem armazenar senhas nem hashes no cliente)
-      const { confirmPassword, password: _p, ...dataToSave } = formData;
-      const userRecord = {
-        ...dataToSave,
-        id: newUserId,
-        email: emailToRegister || undefined,
-      };
-
-      db.saveUser(userRecord);
-
-      // Salva dados públicos no Supabase
-      await supabase.from('users').upsert([mapUserToSupabase(userRecord)]);
+      // Salva no cache local seguro (sem salvar senhas nem hashes)
+      if (data.user) {
+        db.saveUser(data.user);
+      }
       
-      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg} Credenciais ativas para login pelo site.` });
+      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso no Cloud SQL!${supabaseMsg} Credenciais ativas para login imediato.` });
       setFormData({ 
         name: '', 
         username: '', 
         email: '',
         password: '', 
-        confirmPassword: '',
+        confirmPassword: '', 
         role: 'OPERATOR', 
         crmv: '', 
         matricula: '' 
@@ -290,26 +297,27 @@ NOTIFY pgrst, 'reload schema';`;
     setChangePasswordMessage(null);
 
     try {
+      const token = localStorage.getItem('sisbem_auth_token');
       const cleanPass = newPasswordInput.trim();
-      const newHash = await hashPassword(cleanPass, userToChangePassword.id);
 
-      // 1. Atualiza no Supabase
-      const { error: sbErr } = await supabase
-        .from('users')
-        .update({ uid: newHash })
-        .eq('id', userToChangePassword.id);
+      // Alteração exclusiva de senha no Cloud SQL via API Backend (Fase 1.1.6)
+      const res = await fetch(`/api/users/${userToChangePassword.id}/password`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ password: cleanPass })
+      });
 
-      if (sbErr) {
-        console.warn('Aviso ao atualizar senha no Supabase:', sbErr.message);
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || 'Falha ao atualizar senha no banco central.');
       }
-
-      // 2. Atualiza localmente sem salvar senhas nem hashes no cache
-      const { password: _p, uid: _u, ...cleanUser } = userToChangePassword;
-      db.saveUser(cleanUser);
 
       setChangePasswordMessage({
         type: 'success',
-        text: `Senha de "${userToChangePassword.name}" atualizada com sucesso! O acesso pelo site já está liberado.`
+        text: `Senha de "${userToChangePassword.name}" atualizada com sucesso no Cloud SQL! O acesso pelo site já está liberado com a nova credencial.`
       });
 
       setTimeout(() => {
@@ -331,22 +339,35 @@ NOTIFY pgrst, 'reload schema';`;
     setUserToDelete(user);
   };
 
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (!userToDelete) return;
     setDeletingLoading(true);
 
     try {
-      // Exclui por id e por username para garantir remoção completa
+      const token = localStorage.getItem('sisbem_auth_token');
+
+      // Exclusão segura com verificação de integridade no Cloud SQL (Fase 1.1.6)
+      const res = await fetch(`/api/users/${userToDelete.id}`, {
+        method: 'DELETE',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || 'Falha ao excluir usuário do banco central.');
+      }
+
+      // Exclui do cache local
       db.deleteUser(userToDelete.id);
       if (userToDelete.username) {
         db.deleteUser(userToDelete.username);
       }
 
-      const updated = db.getUsers();
-      setUsersList(updated);
       setMessage({
         type: 'success',
-        text: `O acesso do servidor "${userToDelete.name}" (@${userToDelete.username}) foi removido com sucesso.`
+        text: `O acesso do servidor "${userToDelete.name}" (@${userToDelete.username}) foi removido com sucesso do Cloud SQL.`
       });
 
       const wasSelf = currentUser && (
@@ -355,6 +376,7 @@ NOTIFY pgrst, 'reload schema';`;
       );
 
       setUserToDelete(null);
+      await refreshUsers();
 
       if (wasSelf) {
         db.logout();

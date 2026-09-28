@@ -2,13 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../services/db';
 import {
   supabase,
-  authenticateWithSupabase,
-  registerWithSupabase,
   resendSupabaseConfirmation,
   resetSupabasePassword,
   testSupabaseConnection,
 } from '../src/lib/supabase';
-import { hashPassword, verifyPassword } from '../src/lib/authCrypto';
 import {
   Dog,
   AlertCircle,
@@ -79,49 +76,11 @@ const Login: React.FC = () => {
     const enteredPassword = password;
 
     try {
-      // 1. Tenta autenticação no backend Express (/api/auth/login) com validação criptográfica no banco
+      // Autenticação exclusiva no backend Express (/api/auth/login) com validação criptográfica no Cloud SQL (Fase 1.1.6)
       const authResult = await db.loginAsync(cleanInput, enteredPassword);
       if (authResult.success && authResult.user) {
         setPassword('');
         window.location.hash = '/';
-        return;
-      }
-
-      // 2. Se for formato de e-mail e não encontrado no backend local, tenta autenticação pelo Supabase Auth
-      let emailNotConfirmed = false;
-      if (isEmail) {
-        const result = await authenticateWithSupabase(cleanInput, enteredPassword);
-
-        if (result.success && result.user) {
-          // Obtém token de sessão através do backend
-          const tokenRes = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ identifier: cleanInput, password: enteredPassword }),
-          });
-          const tokenData = await tokenRes.json().catch(() => null);
-          if (tokenData?.token) {
-            localStorage.setItem('sisbem_auth_token', tokenData.token);
-          }
-          db.setCurrentUser(result.user);
-          setPassword('');
-          window.location.hash = '/';
-          return;
-        }
-
-        if (
-          result.error?.toLowerCase().includes('email not confirmed') ||
-          result.code === 'email_not_confirmed'
-        ) {
-          emailNotConfirmed = true;
-          setUnconfirmedEmail(cleanInput);
-        }
-      }
-
-      if (emailNotConfirmed) {
-        setError(
-          'O usuário está cadastrado no Supabase, mas a confirmação de e-mail ainda está pendente. Verifique sua caixa de entrada.'
-        );
         return;
       }
 
@@ -136,70 +95,47 @@ const Login: React.FC = () => {
     }
   };
 
-  // Submissão de Cadastro Direto no Supabase
+  // Submissão de Cadastro no Banco Central Cloud SQL (Fase 1.1.6)
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
 
-    if (regPassword.length < 6) {
-      setError('A senha no Supabase deve conter no mínimo 6 caracteres.');
+    if (regPassword.length < 4) {
+      setError('A senha deve conter no mínimo 4 caracteres.');
       return;
     }
 
     setLoading(true);
     try {
-      const result = await registerWithSupabase(regEmail, regPassword, regName, regRole);
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: regName.trim(),
+          email: regEmail.trim(),
+          password: regPassword.trim(),
+          role: regRole,
+          crmv: regCrmv.trim() || undefined,
+        }),
+      });
 
-      if (!result.success) {
-        setError(result.error || 'Erro ao registrar usuário no Supabase.');
-        setLoading(false);
-        return;
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || 'Falha ao cadastrar conta no sistema central.');
       }
 
-      const derivedUsername = regEmail.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
-      const newUserId = result.user?.id || crypto.randomUUID();
-
-      const userRecord = {
-        id: newUserId,
-        name: regName,
-        username: derivedUsername,
-        role: regRole,
-        crmv: regCrmv || undefined,
-        email: regEmail,
-      };
-
-      // Salva usuário no cadastro (sem salvar senha nem uid no objeto local)
-      db.saveUser(userRecord);
-
-      if (result.hasSession && result.user) {
-        // Tenta obter token no backend
-        const tokenRes = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ identifier: regEmail, password: regPassword }),
-        });
-        const tokenData = await tokenRes.json().catch(() => null);
-        if (tokenData?.token) {
-          localStorage.setItem('sisbem_auth_token', tokenData.token);
-        }
-        db.setCurrentUser(userRecord);
+      if (data.token && data.user) {
+        localStorage.setItem('sisbem_auth_token', data.token);
+        db.setCurrentUser(data.user);
+        db.saveUser(data.user);
         setRegPassword('');
         window.location.hash = '/';
         return;
       }
 
-      setRegPassword('');
-      if (result.needsEmailConfirmation) {
-        setSuccess(
-          `Usuário "${regEmail}" criado com sucesso! Um e-mail de confirmação foi enviado. Você também já pode tentar fazer login diretamente com o usuário "${derivedUsername}".`
-        );
-        setMode('login');
-        setIdentifier(derivedUsername);
-      } else {
-        setSuccess('Usuário cadastrado com sucesso no Supabase! Você já pode entrar.');
-        setMode('login');
-        setIdentifier(regEmail);
-      }
+      setSuccess('Conta criada com sucesso no sistema central! Você já pode entrar.');
+      setMode('login');
+      setIdentifier(regEmail);
     } catch (err: any) {
       setError(err?.message || 'Falha ao registrar usuário.');
     } finally {
