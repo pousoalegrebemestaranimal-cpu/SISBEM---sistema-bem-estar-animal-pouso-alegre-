@@ -19,6 +19,7 @@ export interface AuthenticatedRequest extends Request {
     username: string;
     role: string;
     name: string;
+    email?: string;
   };
 }
 
@@ -104,7 +105,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   try {
     const pool = createPool();
     const userRes = await pool.query(
-      'SELECT id, username, role, name FROM public.users WHERE id = $1 LIMIT 1;',
+      'SELECT id, username, role, name, email FROM public.users WHERE id = $1 LIMIT 1;',
       [payload.id]
     );
 
@@ -122,6 +123,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       username: dbUser.username,
       role: dbUser.role,
       name: dbUser.name,
+      email: dbUser.email || undefined,
     };
 
     next();
