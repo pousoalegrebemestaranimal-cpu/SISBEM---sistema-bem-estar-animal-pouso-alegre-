@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../services/db';
 import {
   supabase,
+  registerWithSupabase,
   resendSupabaseConfirmation,
   resetSupabasePassword,
   testSupabaseConnection,
@@ -65,18 +66,16 @@ const Login: React.FC = () => {
     setUnconfirmedEmail(null);
   };
 
-  // Submissão do Login (Autenticação Segura via Servidor e Supabase Auth)
+  // Submissão do Login Oficial via Supabase Auth
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
     setLoading(true);
 
     const cleanInput = identifier.trim();
-    const isEmail = cleanInput.includes('@');
     const enteredPassword = password;
 
     try {
-      // Autenticação exclusiva no backend Express (/api/auth/login) com validação criptográfica no Cloud SQL (Fase 1.1.6)
       const authResult = await db.loginAsync(cleanInput, enteredPassword);
       if (authResult.success && authResult.user) {
         setPassword('');
@@ -84,9 +83,12 @@ const Login: React.FC = () => {
         return;
       }
 
-      setError(
-        authResult.message || 'Usuário ou senha incorretos. Verifique os dados digitados ou contate o Administrador.'
-      );
+      const msg = authResult.message || 'Falha na autenticação. Verifique os dados digitados ou contate o Administrador.';
+      setError(msg);
+
+      if (msg.toLowerCase().includes('confirm') || (authResult as any).code === 'email_not_confirmed') {
+        setUnconfirmedEmail(cleanInput);
+      }
     } catch (err: any) {
       setError(err?.message || 'Erro ao processar autenticação.');
     } finally {
@@ -95,45 +97,44 @@ const Login: React.FC = () => {
     }
   };
 
-  // Submissão de Cadastro no Banco Central Cloud SQL (Fase 1.1.6)
+  // Submissão de Cadastro Oficial no Supabase Auth
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     clearMessages();
 
-    if (regPassword.length < 4) {
-      setError('A senha deve conter no mínimo 4 caracteres.');
+    if (regPassword.length < 6) {
+      setError('A senha deve conter no mínimo 6 caracteres.');
       return;
     }
 
     setLoading(true);
     try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: regName.trim(),
-          email: regEmail.trim(),
-          password: regPassword.trim(),
-          role: regRole,
-          crmv: regCrmv.trim() || undefined,
-        }),
-      });
+      const regRes = await registerWithSupabase(
+        regEmail.trim(),
+        regPassword.trim(),
+        regName.trim(),
+        regRole,
+        regCrmv.trim() || undefined
+      );
 
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.message || 'Falha ao cadastrar conta no sistema central.');
+      if (!regRes.success) {
+        throw new Error(regRes.error || 'Falha ao cadastrar conta no sistema.');
       }
 
-      if (data.token && data.user) {
-        localStorage.setItem('sisbem_auth_token', data.token);
-        db.setCurrentUser(data.user);
-        db.saveUser(data.user);
+      if (regRes.hasSession && regRes.user) {
+        db.setCurrentUser(regRes.user);
         setRegPassword('');
         window.location.hash = '/';
         return;
       }
 
-      setSuccess('Conta criada com sucesso no sistema central! Você já pode entrar.');
+      if (regRes.needsEmailConfirmation) {
+        setUnconfirmedEmail(regEmail.trim());
+        setSuccess('Cadastro realizado! Enviamos um link de confirmação para o seu e-mail.');
+      } else {
+        setSuccess('Conta criada com sucesso! Você já pode entrar.');
+      }
+
       setMode('login');
       setIdentifier(regEmail);
     } catch (err: any) {

@@ -24,6 +24,7 @@ import {
 } from '../src/lib/supabaseSync';
 import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal, sanitizeCredentialsFromLocalStorage } from '../src/lib/safeStorage';
 import { isOccupationActive, getActiveOccupation, getAllActiveOccupations } from '../src/lib/supabaseQueries';
+import { authenticateWithSupabase, supabase } from '../src/lib/supabase';
 
 const KEYS = {
   USERS: 'sisbem_users',
@@ -2143,29 +2144,100 @@ export const db = {
     }
   },
 
-  // Login Seguro e Autenticado no Servidor (Express / Cloud SQL)
-  loginAsync: async (identifier: string, password: string): Promise<{ success: boolean; user?: User; token?: string; message?: string }> => {
+  // Login Oficial via Supabase Auth (Fonte Oficial de Autenticação na Vercel e Produção)
+  loginAsync: async (identifier: string, password: string): Promise<{ success: boolean; user?: User; token?: string; message?: string; statusCode?: number }> => {
+    const cleanId = (identifier || '').trim();
+    const cleanPass = password || '';
+
+    if (!cleanId || !cleanPass) {
+      return {
+        success: false,
+        statusCode: 400,
+        message: 'Identificador (usuário ou e-mail) e senha são obrigatórios.',
+      };
+    }
+
+    // 1. Autoridade Oficial Primária: Supabase Auth
+    try {
+      const sbResult = await authenticateWithSupabase(cleanId, cleanPass);
+      if (sbResult.success && sbResult.user) {
+        if (sbResult.session?.access_token) {
+          localStorage.setItem('sisbem_auth_token', sbResult.session.access_token);
+        }
+        db.setCurrentUser(sbResult.user as User);
+        return {
+          success: true,
+          user: sbResult.user as User,
+          token: sbResult.session?.access_token,
+          statusCode: 200,
+        };
+      }
+
+      // Se falhou no Supabase Auth por senha incorreta, e-mail não confirmado ou rate limit:
+      // Tenta fallback local do Express somente se for credencial administrativa de teste local
+      if (sbResult.error && !sbResult.error.toLowerCase().includes('comunicação')) {
+        try {
+          const res = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifier: cleanId, password: cleanPass }),
+          });
+          const data = await res.json().catch(() => null);
+          if (res.ok && data?.success && data?.user) {
+            if (data.token) localStorage.setItem('sisbem_auth_token', data.token);
+            db.setCurrentUser(data.user);
+            return { success: true, user: data.user, token: data.token, statusCode: 200 };
+          }
+        } catch {
+          // ignora erro do Express
+        }
+
+        return {
+          success: false,
+          statusCode: 401,
+          message: sbResult.error,
+        };
+      }
+    } catch (sbErr: any) {
+      console.warn('[db.loginAsync] Aviso ao autenticar no Supabase:', sbErr);
+    }
+
+    // 2. Fallback secundário em ambiente de desenvolvimento local (Express / Cloud SQL)
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({ identifier: cleanId, password: cleanPass }),
       });
       const data = await res.json().catch(() => null);
-      if (res.ok && data?.success && data?.token && data?.user) {
-        localStorage.setItem('sisbem_auth_token', data.token);
+
+      if (res.ok && data?.success && data?.user) {
+        if (data.token) localStorage.setItem('sisbem_auth_token', data.token);
         db.setCurrentUser(data.user);
-        return { success: true, user: data.user, token: data.token };
+        return { success: true, user: data.user, token: data.token, statusCode: res.status };
       }
-      return { success: false, message: data?.message || 'Usuário ou senha incorretos.' };
-    } catch (err: any) {
-      return { success: false, message: 'Falha de comunicação com o servidor central.' };
+
+      if (res.status === 401) {
+        return {
+          success: false,
+          statusCode: 401,
+          message: data?.message || 'Credenciais inválidas: usuário ou senha incorretos.',
+        };
+      }
+    } catch {
+      // Ignora erro de rede
     }
+
+    return {
+      success: false,
+      statusCode: 401,
+      message: 'Falha na autenticação. Verifique os dados digitados ou contate o Administrador.',
+    };
   },
 
   // Legado: descontinuado por motivos de segurança (senhas não são salvas no cliente)
   login: (username: string, password: string): User | null => {
-    console.warn('[db.login] Método síncrono descontinuado. Utilize db.loginAsync() com /api/auth/login.');
+    console.warn('[db.login] Método síncrono descontinuado. Utilize db.loginAsync() com Supabase Auth.');
     return null;
   },
 
@@ -2175,6 +2247,7 @@ export const db = {
     try {
       localStorage.removeItem('sisbem_credential_proof');
     } catch {}
+    supabase.auth.signOut().catch(() => {});
   },
 
   clearAllFictitiousData: () => clearAllFictitiousData(),

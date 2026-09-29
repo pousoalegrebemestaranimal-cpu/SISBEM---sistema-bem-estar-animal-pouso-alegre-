@@ -93,7 +93,7 @@ function createSafeSupabaseClient(): SupabaseClient {
 export const supabase: SupabaseClient = createSafeSupabaseClient();
 
 /**
- * Converte um usuário do Supabase Auth para a estrutura de User do SISBEM
+ * Converte um usuário do Supabase Auth para a estrutura de User do SISBEM com base nos metadados
  */
 export function mapSupabaseUserToAppUser(su: any): {
   id: string;
@@ -102,6 +102,7 @@ export function mapSupabaseUserToAppUser(su: any): {
   role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO';
   crmv?: string;
   matricula?: string;
+  email?: string;
 } {
   const meta = su.user_metadata || {};
   let role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO' = 'ADMIN';
@@ -111,69 +112,218 @@ export function mapSupabaseUserToAppUser(su: any): {
   return {
     id: su.id,
     name: meta.name || meta.full_name || su.email?.split('@')[0] || 'Usuário Supabase',
-    username: su.email || su.id,
+    username: meta.username || su.email || su.id,
     role,
     crmv: meta.crmv || undefined,
     matricula: meta.matricula || undefined,
+    email: su.email || undefined,
   };
 }
 
 /**
- * Autentica usuário via Supabase Auth
+ * Resolve o perfil institucional canônico a partir da tabela public.users do Supabase,
+ * preservando os IDs, CRMV, matrícula e papel cadastrados no sistema.
  */
-export async function authenticateWithSupabase(email: string, password: string) {
+export async function resolveSupabaseProfile(su: any): Promise<{
+  id: string;
+  name: string;
+  username: string;
+  role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO';
+  crmv?: string;
+  matricula?: string;
+  email?: string;
+}> {
+  if (!su) return mapSupabaseUserToAppUser({});
+
   try {
+    let query = supabase.from('users').select('id, name, username, email, role, crmv, matricula, uid');
+    if (su.email) {
+      query = query.or(`email.eq.${su.email},id.eq.${su.id},uid.eq.${su.id}`);
+    } else {
+      query = query.or(`id.eq.${su.id},uid.eq.${su.id}`);
+    }
+
+    const { data: profile } = await query.limit(1).maybeSingle();
+    if (profile) {
+      let role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO' = 'ADMIN';
+      if (profile.role === 'VETERINARIO' || profile.role === 'OPERATOR' || profile.role === 'ADMIN') {
+        role = profile.role;
+      }
+      return {
+        id: profile.id, // Preserva o ID canônico institucional do SISBEM
+        name: profile.name || su.user_metadata?.name || 'Usuário SISBEM',
+        username: profile.username || su.email?.split('@')[0] || profile.name,
+        role,
+        crmv: profile.crmv || undefined,
+        matricula: profile.matricula || undefined,
+        email: profile.email || su.email || undefined,
+      };
+    }
+  } catch (err) {
+    console.warn('[Supabase Auth] Falha ao consultar perfil institucional em public.users:', err);
+  }
+
+  // Fallback para metadados da sessão Auth se o perfil ainda não estiver em public.users
+  return mapSupabaseUserToAppUser(su);
+}
+
+/**
+ * Traduz mensagens de erro do Supabase Auth para instruções claras em português
+ */
+export function formatSupabaseAuthError(error: any): string {
+  if (!error) return 'Falha na autenticação.';
+  const msg = typeof error === 'string' ? error : (error.message || '');
+  const lower = msg.toLowerCase();
+
+  if (lower.includes('invalid login credentials') || lower.includes('invalid credentials')) {
+    return 'Credenciais inválidas: e-mail/usuário ou senha incorretos.';
+  }
+  if (lower.includes('email not confirmed')) {
+    return 'E-mail ainda não confirmado. Verifique sua caixa de entrada e spam ou solicite o reenvio de confirmação.';
+  }
+  if (lower.includes('rate limit')) {
+    return 'Limite de tentativas excedido temporariamente. Aguarde alguns instantes e tente novamente.';
+  }
+  if (lower.includes('user not found')) {
+    return 'Conta de usuário não localizada no sistema.';
+  }
+  if (lower.includes('signup requires a valid password') || lower.includes('password should be at least')) {
+    return 'A senha deve conter no mínimo 6 caracteres.';
+  }
+  if (lower.includes('networkerror') || lower.includes('failed to fetch')) {
+    return 'Falha de comunicação com o Supabase. Verifique sua conexão com a internet.';
+  }
+
+  return msg;
+}
+
+/**
+ * Resolve o e-mail de acesso quando o usuário informa um username em vez de e-mail
+ */
+export async function resolveEmailFromIdentifier(identifier: string): Promise<string> {
+  const clean = identifier.trim();
+  if (clean.includes('@')) {
+    return clean.toLowerCase();
+  }
+
+  try {
+    const { data: profile } = await supabase
+      .from('users')
+      .select('email')
+      .ilike('username', clean)
+      .limit(1)
+      .maybeSingle();
+
+    if (profile?.email && profile.email.includes('@')) {
+      return profile.email.trim().toLowerCase();
+    }
+  } catch {
+    // ignore
+  }
+
+  // Convenção padrão para nomes de usuário sem e-mail explícito
+  return `${clean.toLowerCase()}@sisbem.gov.br`;
+}
+
+/**
+ * Autentica usuário oficialmente via Supabase Auth (Fonte Oficial de Autenticação)
+ */
+export async function authenticateWithSupabase(identifier: string, password: string) {
+  try {
+    const emailToUse = await resolveEmailFromIdentifier(identifier);
     const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
+      email: emailToUse,
       password,
     });
 
     if (error) {
-      return { success: false, error: error.message, code: (error as any).code || '' };
+      return { 
+        success: false, 
+        error: formatSupabaseAuthError(error), 
+        rawError: error.message,
+        code: (error as any).code || '' 
+      };
     }
 
     if (!data.user) {
-      return { success: false, error: 'Nenhum usuário retornado pelo Supabase.' };
+      return { success: false, error: 'Nenhum usuário retornado pelo Supabase Auth.' };
     }
 
-    const appUser = mapSupabaseUserToAppUser(data.user);
+    // Resolve o perfil institucional completo
+    const appUser = await resolveSupabaseProfile(data.user);
     return { success: true, user: appUser, session: data.session };
   } catch (err: any) {
-    return { success: false, error: err?.message || 'Falha na requisição ao Supabase' };
+    return { success: false, error: formatSupabaseAuthError(err) };
   }
 }
 
 /**
- * Cadastra um novo usuário no Supabase Auth
+ * Cadastra um novo usuário no Supabase Auth e insere perfil institucional em public.users
  */
-export async function registerWithSupabase(email: string, password: string, name: string, role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO' = 'ADMIN') {
+export async function registerWithSupabase(
+  email: string, 
+  password: string, 
+  name: string, 
+  role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO' = 'ADMIN',
+  crmv?: string,
+  matricula?: string,
+  username?: string
+) {
   try {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = name.trim();
+    const derivedUsername = (username || cleanEmail.split('@')[0] || cleanName).toLowerCase().replace(/[^a-z0-9._-]/g, '');
+
     const { data, error } = await supabase.auth.signUp({
-      email: email.trim(),
+      email: cleanEmail,
       password,
       options: {
         data: {
-          name: name.trim(),
-          full_name: name.trim(),
+          name: cleanName,
+          full_name: cleanName,
+          username: derivedUsername,
           role,
+          crmv: crmv?.trim() || null,
+          matricula: matricula?.trim() || null,
         },
       },
     });
 
     if (error) {
-      return { success: false, error: error.message };
+      return { success: false, error: formatSupabaseAuthError(error), rawError: error.message };
     }
 
     const hasSession = Boolean(data.session);
-    const user = data.user ? mapSupabaseUserToAppUser(data.user) : null;
+    let appUser = null;
+
+    if (data.user) {
+      appUser = await resolveSupabaseProfile(data.user);
+
+      // Insere/atualiza registro institucional em public.users para consulta geral
+      try {
+        await supabase.from('users').upsert({
+          id: data.user.id,
+          uid: data.user.id,
+          email: cleanEmail,
+          name: cleanName,
+          username: derivedUsername,
+          role,
+          crmv: crmv?.trim() || null,
+          matricula: matricula?.trim() || null,
+        }, { onConflict: 'id' });
+      } catch (insertErr) {
+        console.warn('[Supabase Auth] Aviso ao criar perfil em public.users:', insertErr);
+      }
+    }
+
     return {
       success: true,
-      user,
+      user: appUser,
       hasSession,
       needsEmailConfirmation: !hasSession && Boolean(data.user && !data.user.confirmed_at && !data.user.email_confirmed_at),
     };
   } catch (err: any) {
-    return { success: false, error: err?.message || 'Falha ao registrar no Supabase' };
+    return { success: false, error: formatSupabaseAuthError(err) };
   }
 }
 

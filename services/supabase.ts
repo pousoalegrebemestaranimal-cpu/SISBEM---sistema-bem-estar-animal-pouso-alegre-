@@ -7,6 +7,9 @@ export {
   registerWithSupabase,
   resendSupabaseConfirmation,
   resetSupabasePassword,
-  mapSupabaseUserToAppUser
+  mapSupabaseUserToAppUser,
+  resolveSupabaseProfile,
+  resolveEmailFromIdentifier,
+  formatSupabaseAuthError,
 } from '../src/lib/supabase';
 

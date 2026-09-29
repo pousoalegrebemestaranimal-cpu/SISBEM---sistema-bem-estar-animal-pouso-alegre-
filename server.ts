@@ -1,23 +1,29 @@
 import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { createServer as createViteServer } from 'vite';
 import { db, createPool } from './src/db/index.ts';
 import { animals, kennels, clinicalRecords, surgeries, users } from './src/db/schema.ts';
 import { createAuthToken, requireAuth, requireRoles, AuthenticatedRequest } from './src/lib/serverAuth.ts';
 import { verifyPassword, hashPassword } from './src/lib/authCrypto.ts';
 import { supabase } from './src/lib/supabase.ts';
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
 
-  app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '15mb' }));
 
-  // API Health Check
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// API Root Status
+app.get('/api', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'SISBEM API operacional',
+    timestamp: new Date().toISOString(),
   });
+});
+
+// API Health Check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
   // ==============================================================================
   // AUTENTICAÇÃO E SESSÃO SEGURA (FASE 1.1.5)
@@ -947,23 +953,32 @@ async function startServer() {
   );
 
   // Vite middleware setup (Express v5 requires '*all')
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*all', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+  export async function startServer() {
+    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+    if (process.env.NODE_ENV !== 'production') {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*all', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`SISBEM Server running on http://0.0.0.0:${PORT}`);
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SISBEM Server running on http://0.0.0.0:${PORT}`);
-  });
-}
+  // Executa o listener apenas em modo autônomo (AI Studio dev/prod) e NÃO dentro de Serverless Functions da Vercel
+  if (process.env.VERCEL !== '1' && process.env.VERCEL_ENV === undefined) {
+    startServer();
+  }
 
-startServer();
+  export default app;

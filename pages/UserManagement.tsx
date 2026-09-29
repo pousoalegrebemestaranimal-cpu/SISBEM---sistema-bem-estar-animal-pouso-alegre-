@@ -206,52 +206,90 @@ NOTIFY pgrst, 'reload schema';`;
     setLoading(true);
 
     try {
-      const token = localStorage.getItem('sisbem_auth_token');
       const cleanPass = formData.password.trim();
+      const cleanEmail = formData.email.trim() || (formData.username.includes('@') ? formData.username : '');
+      const derivedUsername = formData.username.trim().toLowerCase() || (cleanEmail ? cleanEmail.split('@')[0] : '');
 
-      // Criação direta no Cloud SQL via API de Backend (Fase 1.1.6)
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({
-          name: formData.name.trim(),
-          username: formData.username.trim().toLowerCase(),
-          email: formData.email.trim() || undefined,
-          role: formData.role,
-          crmv: formData.crmv.trim() || undefined,
-          matricula: formData.matricula.trim() || undefined,
-          password: cleanPass
-        })
-      });
+      let newUser: any = {
+        id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `user_${Date.now()}`,
+        name: formData.name.trim(),
+        username: derivedUsername,
+        email: cleanEmail || undefined,
+        role: formData.role,
+        crmv: formData.crmv.trim() || undefined,
+        matricula: formData.matricula.trim() || undefined,
+      };
 
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.message || 'Falha ao cadastrar servidor no banco central.');
-      }
-
-      // Se informou e-mail, opcionalmente sincroniza com Supabase Auth
+      // 1. Cadastra no Supabase Auth e public.users (Autoridade Oficial)
       let supabaseMsg = '';
-      const emailToRegister = formData.email.trim() || (formData.username.includes('@') ? formData.username : '');
-      if (emailToRegister) {
+      if (cleanEmail) {
         try {
-          const sbRes = await registerWithSupabase(emailToRegister, cleanPass, formData.name, formData.role);
-          if (sbRes.success) {
+          const sbRes = await registerWithSupabase(
+            cleanEmail,
+            cleanPass,
+            formData.name.trim(),
+            formData.role,
+            formData.crmv.trim() || undefined,
+            formData.matricula.trim() || undefined,
+            derivedUsername
+          );
+          if (sbRes.success && sbRes.user) {
+            newUser = { ...newUser, id: sbRes.user.id };
             supabaseMsg = ' Conta sincronizada no Supabase Auth.';
           }
-        } catch {
-          // ignore
+        } catch (sbErr) {
+          console.warn('[UserManagement] Erro Supabase Auth:', sbErr);
         }
       }
 
-      // Salva no cache local seguro (sem salvar senhas nem hashes)
-      if (data.user) {
-        db.saveUser(data.user);
+      // Garante inserção direta em public.users no Supabase
+      try {
+        await supabase.from('users').upsert({
+          id: newUser.id,
+          uid: newUser.id,
+          email: cleanEmail || null,
+          name: formData.name.trim(),
+          username: derivedUsername,
+          role: formData.role,
+          crmv: formData.crmv.trim() || null,
+          matricula: formData.matricula.trim() || null,
+        }, { onConflict: 'id' });
+      } catch (upsertErr) {
+        console.warn('[UserManagement] Erro ao sincronizar public.users:', upsertErr);
       }
-      
-      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso no Cloud SQL!${supabaseMsg} Credenciais ativas para login imediato.` });
+
+      // 2. Opcionalmente sincroniza com Cloud SQL se backend estiver disponível
+      const token = localStorage.getItem('sisbem_auth_token');
+      try {
+        const res = await fetch('/api/users', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify({
+            id: newUser.id,
+            name: formData.name.trim(),
+            username: derivedUsername,
+            email: cleanEmail || undefined,
+            role: formData.role,
+            crmv: formData.crmv.trim() || undefined,
+            matricula: formData.matricula.trim() || undefined,
+            password: cleanPass
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (data?.user) {
+          newUser = data.user;
+        }
+      } catch {
+        // Backend offline ou inacessível — não impede o cadastro
+      }
+
+      // Salva no cache local seguro
+      db.saveUser(newUser);
+
+      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg} Credenciais ativas para acesso imediato.` });
       setFormData({ 
         name: '', 
         username: '', 

@@ -2,7 +2,7 @@
 import React, { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { db } from './services/db';
-import { supabase, mapSupabaseUserToAppUser } from './src/lib/supabase';
+import { supabase, resolveSupabaseProfile } from './src/lib/supabase';
 import { pullFromSupabaseToLocal, initRealtimeSync } from './src/lib/supabaseSync';
 import { sanitizeExistingLocalStorage, sanitizeCredentialsFromLocalStorage } from './src/lib/safeStorage';
 import Login from './pages/Login';
@@ -68,18 +68,18 @@ const App: React.FC = () => {
     // Inicializa a escuta em tempo real (Realtime Channel) para manter todos os usuários conectados em sincronia
     const cleanupRealtime = initRealtimeSync();
 
-    // Restaura sessão existente do Supabase
-    supabase.auth.getSession().then(({ data }) => {
+    // Restaura sessão existente do Supabase e resolve perfil institucional
+    supabase.auth.getSession().then(async ({ data }) => {
       if (data?.session?.user && !db.getCurrentUser()) {
-        const appUser = mapSupabaseUserToAppUser(data.session.user);
-        db.setCurrentUser(appUser);
+        const appUser = await resolveSupabaseProfile(data.session.user);
+        db.setCurrentUser(appUser as any);
       }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
-        const appUser = mapSupabaseUserToAppUser(session.user);
-        db.setCurrentUser(appUser);
+        const appUser = await resolveSupabaseProfile(session.user);
+        db.setCurrentUser(appUser as any);
         if (event === 'SIGNED_IN') {
           pullFromSupabaseToLocal(db).catch(() => {});
         }
