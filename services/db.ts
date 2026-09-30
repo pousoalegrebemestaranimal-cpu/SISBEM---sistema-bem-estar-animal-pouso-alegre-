@@ -1179,6 +1179,9 @@ const initSystem = () => {
   }
 };
 
+// Flag de controle para evitar reentrância recursiva em db.logout
+let isLoggingOut = false;
+
 export const db = {
   getUsers: (): any[] => JSON.parse(localStorage.getItem(KEYS.USERS) || '[]'),
   
@@ -2119,12 +2122,17 @@ export const db = {
   },
 
   setCurrentUser: (user: User | null) => {
+    let safeUser: any = null;
     if (user) {
       // Expurga categoricamente senhas e uid antes de salvar no cliente
-      const { password, uid, credentialProof, secret, authSecret, ...safeUser } = (user as any);
-      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(safeUser));
+      const { password, uid, credentialProof, secret, authSecret, ...clean } = (user as any);
+      safeUser = clean;
+      localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(clean));
     } else {
       localStorage.removeItem(KEYS.CURRENT_USER);
+    }
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-auth-changed', { detail: safeUser }));
     }
   },
 
@@ -2242,12 +2250,44 @@ export const db = {
   },
 
   logout: () => {
-    localStorage.removeItem(KEYS.CURRENT_USER);
-    localStorage.removeItem('sisbem_auth_token');
+    if (isLoggingOut) return;
+    isLoggingOut = true;
+
     try {
+      localStorage.removeItem(KEYS.CURRENT_USER);
+      localStorage.removeItem('sisbem_auth_token');
       localStorage.removeItem('sisbem_credential_proof');
     } catch {}
-    supabase.auth.signOut().catch(() => {});
+
+    // Limpa todas as chaves de sessão locais do Supabase do localStorage para evitar auto-login
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && (key.startsWith('sb-') || key.includes('auth-token') || key.includes('supabase.auth'))) {
+            keysToRemove.push(key);
+          }
+        }
+        keysToRemove.forEach(k => {
+          try { localStorage.removeItem(k); } catch {}
+        });
+      }
+    } catch {}
+
+    // Dispara evento reativo para que AuthGuard e Layout reajam imediatamente
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-auth-changed', { detail: null }));
+    }
+
+    // Desloga do Supabase localmente apenas uma vez (sem encadear chamadas duplas)
+    try {
+      supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+    } catch {}
+
+    setTimeout(() => {
+      isLoggingOut = false;
+    }, 800);
   },
 
   clearAllFictitiousData: () => clearAllFictitiousData(),

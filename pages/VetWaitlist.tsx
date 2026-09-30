@@ -28,10 +28,14 @@ const VetWaitlist: React.FC = () => {
     };
   }, []);
 
-  // Filtra animais aguardando atendimento (Resgates ou Atendimentos Externos)
+  // Filtra animais aguardando atendimento ou já em atendimento (para sinalizar aos veterinários)
   const waitlist = useMemo(() => {
     return animalsState
-      .filter(a => a.condicao === AnimalCondicao.ACOLHIDO || a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO)
+      .filter(a => 
+        a.condicao === AnimalCondicao.ACOLHIDO || 
+        a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO ||
+        a.condicao === AnimalCondicao.EM_ATENDIMENTO
+      )
       .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
   }, [animalsState]);
 
@@ -110,30 +114,54 @@ const VetWaitlist: React.FC = () => {
             <p className="text-slate-500 font-medium">Não há animais aguardando atendimento no momento.</p>
           </div>
         ) : (
-          waitlist.map(animal => (
+          waitlist.map(animal => {
+            const isEmAtendimento = animal.condicao === AnimalCondicao.EM_ATENDIMENTO;
+            const isCurrentVet = isEmAtendimento && animal.emAtendimentoVetId === user?.id;
+            const isOtherVet = isEmAtendimento && !isCurrentVet;
+            const users = db.getUsers();
+            const otherVet = animal.emAtendimentoVetId ? users.find(u => u.id === animal.emAtendimentoVetId) : null;
+            const vetDisplayName = otherVet?.name || (isCurrentVet ? 'Você' : 'Outro Veterinário');
+
+            return (
             <div 
               key={animal.id} 
               className={`bg-white rounded-2xl shadow-sm border-2 transition-all overflow-hidden ${
-                animal.temTutor 
+                isEmAtendimento
+                ? 'border-amber-300 border-l-[6px] border-l-amber-500 bg-amber-50/20'
+                : animal.temTutor 
                 ? 'border-indigo-100 hover:border-indigo-300 border-l-[6px] border-l-indigo-600' 
                 : 'border-slate-200 hover:border-teal-300 border-l-[6px] border-l-teal-600'
               }`}
             >
               <div className="p-1 px-4 flex justify-between items-center border-b border-slate-50 bg-slate-50/50">
-                <span className={`text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 ${animal.temTutor ? 'text-indigo-600' : 'text-teal-600'}`}>
-                  {animal.temTutor ? (
-                    <><UserCircle size={12} /> Atendimento Externo (Com Tutor)</>
-                  ) : (
-                    <><AlertCircle size={12} /> Resgate / Errante</>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[9px] font-black uppercase tracking-widest flex items-center gap-1.5 ${animal.temTutor ? 'text-indigo-600' : 'text-teal-600'}`}>
+                    {animal.temTutor ? (
+                      <><UserCircle size={12} /> Atendimento Externo (Com Tutor)</>
+                    ) : (
+                      <><AlertCircle size={12} /> Resgate / Errante</>
+                    )}
+                  </span>
+                  {isEmAtendimento && (
+                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider flex items-center gap-1.5 ${
+                      isCurrentVet 
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
+                        : 'bg-amber-100 text-amber-800 border border-amber-300'
+                    }`}>
+                      <span className="w-1.5 h-1.5 rounded-full bg-current animate-ping" />
+                      {isCurrentVet ? 'Em Atendimento por Você' : `Em Atendimento (${vetDisplayName})`}
+                    </span>
                   )}
-                </span>
+                </div>
                 <span className="text-[9px] font-bold text-slate-400">ID: {animal.id.substring(0,8).toUpperCase()}</span>
               </div>
               
               <div className="p-6 flex flex-col md:flex-row items-center justify-between gap-6">
                 <div className="flex items-center gap-6 flex-1 w-full">
                   <div className={`p-4 rounded-2xl shrink-0 ${
-                    animal.temTutor ? 'bg-indigo-50 text-indigo-500' : 'bg-teal-50 text-teal-500'
+                    isEmAtendimento
+                    ? 'bg-amber-50 text-amber-600'
+                    : animal.temTutor ? 'bg-indigo-50 text-indigo-500' : 'bg-teal-50 text-teal-500'
                   }`}>
                     <Stethoscope size={28} />
                   </div>
@@ -166,30 +194,53 @@ const VetWaitlist: React.FC = () => {
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Chegada</p>
                     <p className="text-sm font-black text-slate-700">{new Date(animal.dataCadastro).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                   </div>
-                  <button 
-                    type="button"
-                    disabled={startingAnimalId === animal.id}
-                    onClick={() => handleStartAttendance(animal.id, animal.nome)}
-                    className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-8 py-3 text-white font-black rounded-xl shadow-lg transition-all group disabled:opacity-50 ${
-                      animal.temTutor 
-                      ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
-                      : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
-                    }`}
-                  >
-                    {startingAnimalId === animal.id ? (
-                      <>
-                        <Loader2 size={18} className="animate-spin" /> Verificando...
-                      </>
-                    ) : (
-                      <>
-                        Atender {animal.temTutor ? 'Consulta' : 'Animal'} <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
-                      </>
-                    )}
-                  </button>
+                  {isOtherVet ? (
+                    <button 
+                      type="button"
+                      disabled
+                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-8 py-3 bg-amber-100 text-amber-900 border-2 border-amber-400 font-black rounded-xl shadow-sm opacity-95 cursor-not-allowed select-none"
+                      title={`Este animal já está em atendimento pelo veterinário ${vetDisplayName}.`}
+                    >
+                      <Clock size={18} className="text-amber-700 animate-pulse" />
+                      <span>Em Atendimento</span>
+                    </button>
+                  ) : isCurrentVet ? (
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/animais/atendimento/${animal.id}`)}
+                      className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl shadow-lg shadow-emerald-600/20 transition-all cursor-pointer group"
+                    >
+                      <Stethoscope size={18} />
+                      <span>Continuar Atendimento</span>
+                      <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                    </button>
+                  ) : (
+                    <button 
+                      type="button"
+                      disabled={startingAnimalId === animal.id}
+                      onClick={() => handleStartAttendance(animal.id, animal.nome)}
+                      className={`flex-1 md:flex-none flex items-center justify-center gap-2 px-8 py-3 text-white font-black rounded-xl shadow-lg transition-all group disabled:opacity-50 cursor-pointer ${
+                        animal.temTutor 
+                        ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
+                        : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
+                      }`}
+                    >
+                      {startingAnimalId === animal.id ? (
+                        <>
+                          <Loader2 size={18} className="animate-spin" /> Verificando...
+                        </>
+                      ) : (
+                        <>
+                          Atender {animal.temTutor ? 'Consulta' : 'Animal'} <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
 

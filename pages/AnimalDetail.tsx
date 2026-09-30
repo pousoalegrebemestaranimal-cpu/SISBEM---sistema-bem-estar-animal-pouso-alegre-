@@ -777,10 +777,22 @@ const AnimalDetail: React.FC = () => {
               >
                 <Printer size={18} /> Imprimir Ficha
               </button>
-              {isVetOrAdmin && (
-                <Link to={`/animais/atendimento/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg shadow-teal-600/20 hover:bg-teal-700 transition-all">
-                  <Stethoscope size={18} /> Iniciar Atendimento
-                </Link>
+              {isVetOrAdmin && animal.condicao !== AnimalCondicao.OBITO && (
+                animal.condicao === AnimalCondicao.EM_ATENDIMENTO ? (
+                  animal.emAtendimentoVetId === db.getCurrentUser()?.id ? (
+                    <Link to={`/animais/atendimento/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 transition-all">
+                      <Stethoscope size={18} /> Continuar Atendimento
+                    </Link>
+                  ) : (
+                    <button disabled type="button" className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-amber-100 text-amber-900 border border-amber-300 font-bold rounded-xl opacity-90 cursor-not-allowed">
+                      <Clock size={18} className="text-amber-700 animate-pulse" /> Em Atendimento
+                    </button>
+                  )
+                ) : (
+                  <Link to={`/animais/atendimento/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg shadow-teal-600/20 hover:bg-teal-700 transition-all">
+                    <Stethoscope size={18} /> Iniciar Atendimento
+                  </Link>
+                )
               )}
               <Link to={`/animais/editar/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all">
                 <FileBadge2 size={18} /> Editar Cadastro

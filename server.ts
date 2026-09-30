@@ -813,7 +813,7 @@ app.get('/api/health', (req, res) => {
     requireAuth,
     requireRoles(['VETERINARIO', 'ADMIN']),
     async (req: AuthenticatedRequest, res) => {
-      const { animalId, vetId } = req.body;
+      const { animalId, vetId, animal } = req.body;
       const user = req.user!;
 
       if (!animalId) {
@@ -837,11 +837,90 @@ app.get('/api/health', (req, res) => {
       const pool = createPool();
 
       try {
-        const queryRes = await pool.query(
+        let queryRes = await pool.query(
           'SELECT public.start_clinical_attendance($1, $2) AS result;',
           [animalId, targetVetId]
         );
-        const result = queryRes.rows[0]?.result;
+        let result = queryRes.rows[0]?.result;
+
+        // Se o animal não constar na tabela Cloud SQL (ex: cadastrado no Supabase ou cliente), sincroniza e tenta novamente
+        if (result?.code === 'ANIMAL_NOT_FOUND') {
+          let animalData = animal;
+          if (!animalData) {
+            try {
+              const { data: sbAnimal } = await supabase
+                .from('animals')
+                .select('*')
+                .eq('id', animalId)
+                .maybeSingle();
+              if (sbAnimal) {
+                animalData = {
+                  id: sbAnimal.id,
+                  nome: sbAnimal.nome,
+                  condicao: sbAnimal.condicao || 'Acolhido',
+                  dataCadastro: sbAnimal.data_cadastro || new Date().toISOString(),
+                  dataResgate: sbAnimal.data_resgate || sbAnimal.data_cadastro?.split('T')[0] || new Date().toISOString().split('T')[0],
+                  temTutor: sbAnimal.tem_tutor || false,
+                  especie: sbAnimal.especie || 'Cão',
+                  porte: sbAnimal.porte || 'Médio',
+                  sexo: sbAnimal.sexo || 'Fêmea',
+                  peso: sbAnimal.peso || 0,
+                  idade: sbAnimal.idade || '',
+                  corPelagem: sbAnimal.cor_pelagem || '',
+                  raca: sbAnimal.raca || 'SRD',
+                  localResgate: sbAnimal.local_resgate || '',
+                  motivo: sbAnimal.motivo || '',
+                };
+              }
+            } catch (sbErr) {
+              console.warn('[attendance/start] Erro ao consultar animal no Supabase:', sbErr);
+            }
+          }
+
+          if (animalData) {
+            const dataResgate = animalData.dataResgate || animalData.data_resgate || animalData.dataCadastro?.split('T')[0] || new Date().toISOString().split('T')[0];
+            await pool.query(
+              `INSERT INTO public.animals (
+                id, nome, condicao, data_cadastro, data_resgate, tem_tutor, especie, porte, sexo, peso, idade, cor_pelagem, raca, local_resgate, motivo
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+              ON CONFLICT (id) DO UPDATE SET condicao = EXCLUDED.condicao;`,
+              [
+                animalData.id,
+                animalData.nome,
+                animalData.condicao || 'Acolhido',
+                animalData.dataCadastro || animalData.data_cadastro || new Date().toISOString(),
+                dataResgate,
+                animalData.temTutor ?? animalData.tem_tutor ?? false,
+                animalData.especie || 'Cão',
+                animalData.porte || 'Médio',
+                animalData.sexo || 'Fêmea',
+                animalData.peso || 0,
+                animalData.idade || '',
+                animalData.corPelagem || animalData.cor_pelagem || '',
+                animalData.raca || 'SRD',
+                animalData.localResgate || animalData.local_resgate || '',
+                animalData.motivo || '',
+              ]
+            );
+
+            // Reexecuta o bloqueio no Cloud SQL com o registro presente
+            queryRes = await pool.query(
+              'SELECT public.start_clinical_attendance($1, $2) AS result;',
+              [animalId, targetVetId]
+            );
+            result = queryRes.rows[0]?.result;
+          }
+        }
+
+        // Se o atendimento iniciou com sucesso, atualiza também a condição no Supabase para sincronização em tempo real
+        if (result?.success) {
+          try {
+            await supabase.from('animals').update({ condicao: 'Em Atendimento' }).eq('id', animalId);
+          } catch (sbUpdateErr) {
+            console.warn('[attendance/start] Erro ao atualizar status no Supabase:', sbUpdateErr);
+          }
+        }
+
         return res.json(result || { success: false, code: 'INTERNAL_ERROR', message: 'Sem resposta da função de atendimento.' });
       } catch (err: any) {
         console.error('Erro na rota /api/attendance/start:', err);
@@ -887,6 +966,11 @@ app.get('/api/health', (req, res) => {
           [animalId, targetVetId, motivo || 'Cancelamento de atendimento']
         );
         const result = queryRes.rows[0]?.result;
+        if (result?.success) {
+          try {
+            await supabase.from('animals').update({ condicao: 'Aguardando Atendimento' }).eq('id', animalId);
+          } catch {}
+        }
         return res.json(result || { success: false, code: 'INTERNAL_ERROR', message: 'Sem resposta da função de cancelamento.' });
       } catch (err: any) {
         console.error('Erro na rota /api/attendance/cancel:', err);
@@ -940,6 +1024,11 @@ app.get('/api/health', (req, res) => {
           [JSON.stringify(payload)]
         );
         const result = queryRes.rows[0]?.result;
+        if (result?.success && payload.record?.animalId && payload.record?.statusResultante) {
+          try {
+            await supabase.from('animals').update({ condicao: payload.record.statusResultante }).eq('id', payload.record.animalId);
+          } catch {}
+        }
         return res.json(result || { success: false, code: 'INTERNAL_ERROR', message: 'Sem resposta da função de finalização.' });
       } catch (err: any) {
         console.error('Erro na rota /api/attendance/finish:', err);

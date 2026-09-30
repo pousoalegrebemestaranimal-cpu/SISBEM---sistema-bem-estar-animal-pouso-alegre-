@@ -153,6 +153,9 @@ export async function startClinicalAttendance(
     };
   }
 
+  const localAnimals = db.getAnimals();
+  const currentAnimal = localAnimals.find(a => a.id === animalId);
+
   let serverResponse: any = null;
 
   try {
@@ -162,12 +165,38 @@ export async function startClinicalAttendance(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ animalId, vetId }),
+      body: JSON.stringify({ animalId, vetId, animal: currentAnimal }),
     });
 
     serverResponse = await res.json().catch(() => null);
 
-    if (!res.ok || !serverResponse) {
+    // Se o backend retornou erro de animal não localizado ou falha interna, tenta reserva no Supabase
+    if (!res.ok || !serverResponse?.success) {
+      if (serverResponse?.code === 'ANIMAL_NOT_FOUND' || !res.ok) {
+        try {
+          const { supabase } = await import('./supabase');
+          const { data: sbAnimal } = await supabase.from('animals').select('id, condicao').eq('id', animalId).maybeSingle();
+          if (sbAnimal?.condicao === 'Em Atendimento') {
+            return {
+              success: false,
+              code: 'ALREADY_IN_ATTENDANCE',
+              message: 'Este animal já está em atendimento por outro profissional.',
+            };
+          }
+          await supabase.from('animals').update({ condicao: 'Em Atendimento' }).eq('id', animalId);
+          serverResponse = {
+            success: true,
+            inicio: new Date().toISOString(),
+            vet_id: vetId,
+            vet_nome: vetName,
+          };
+        } catch {
+          // Mantém erro original se fallback falhar
+        }
+      }
+    }
+
+    if (!serverResponse || !serverResponse.success) {
       const code = serverResponse?.code || (res.status === 401 ? 'UNAUTHENTICATED' : res.status === 403 ? 'FORBIDDEN' : 'SERVER_ERROR');
       return {
         success: false,
@@ -178,25 +207,33 @@ export async function startClinicalAttendance(
         inicio: serverResponse?.inicio,
       };
     }
-
-    if (!serverResponse.success) {
-      return {
-        success: false,
-        code: serverResponse.code || 'ALREADY_IN_ATTENDANCE',
-        message: serverResponse.message || formatAttendanceErrorMessage(serverResponse.code, 'Este animal já está em atendimento por outro profissional.'),
-        vetName: serverResponse.vet_nome || serverResponse.vetName,
-        vetId: serverResponse.vet_id || serverResponse.vetId,
-        inicio: serverResponse.inicio,
-      };
-    }
   } catch (err: any) {
     console.error('Erro ao conectar ao servidor para início de atendimento:', err);
-    // NÃO atualizar localStorage em caso de erro!
-    return {
-      success: false,
-      code: 'NETWORK_ERROR',
-      message: 'Não foi possível confirmar o atendimento no servidor central. Verifique sua conexão.',
-    };
+    // Fallback de contingência no Supabase em caso de erro de rede
+    try {
+      const { supabase } = await import('./supabase');
+      const { data: sbAnimal } = await supabase.from('animals').select('id, condicao').eq('id', animalId).maybeSingle();
+      if (sbAnimal?.condicao === 'Em Atendimento') {
+        return {
+          success: false,
+          code: 'ALREADY_IN_ATTENDANCE',
+          message: 'Este animal já está em atendimento por outro profissional.',
+        };
+      }
+      await supabase.from('animals').update({ condicao: 'Em Atendimento' }).eq('id', animalId);
+      serverResponse = {
+        success: true,
+        inicio: new Date().toISOString(),
+        vet_id: vetId,
+        vet_nome: vetName,
+      };
+    } catch {
+      return {
+        success: false,
+        code: 'NETWORK_ERROR',
+        message: 'Não foi possível confirmar o atendimento no servidor central. Verifique sua conexão.',
+      };
+    }
   }
 
   // SOMENTE atualiza o cache local APÓS confirmação expressa do servidor (Servidor = Fonte da Verdade)

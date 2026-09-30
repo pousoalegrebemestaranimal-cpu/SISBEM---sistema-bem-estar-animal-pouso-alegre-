@@ -122,8 +122,19 @@ const VeterinaryForm: React.FC = () => {
       if (currentAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
         startClinicalAttendance(id, user.id, user.name).then(res => {
           if (!res.success) {
-            setIsBlockedByOtherVet(true);
-            setBlockedVetName(res.vetName || 'outro profissional');
+            if (res.code === 'ALREADY_IN_ATTENDANCE') {
+              setIsBlockedByOtherVet(true);
+              setBlockedVetName(res.vetName || 'outro profissional');
+            } else {
+              setError(res.message || 'Não foi possível iniciar o atendimento para este animal.');
+            }
+          } else {
+            setAnimal(prev => prev ? {
+              ...prev,
+              condicao: AnimalCondicao.EM_ATENDIMENTO,
+              emAtendimentoVetId: user.id,
+              emAtendimentoInicio: res.inicio || new Date().toISOString()
+            } : prev);
           }
         });
       }
@@ -132,9 +143,7 @@ const VeterinaryForm: React.FC = () => {
         ...prev,
         peso: prev.peso || currentAnimal.peso.toString(),
         animalId: id,
-        statusResultante: currentAnimal.condicao === AnimalCondicao.EM_ATENDIMENTO
-          ? (currentAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO)
-          : currentAnimal.condicao,
+        statusResultante: currentAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO,
         dataObito: new Date().toISOString().split('T')[0]
       }));
       if (currentAnimal.temTutor) {

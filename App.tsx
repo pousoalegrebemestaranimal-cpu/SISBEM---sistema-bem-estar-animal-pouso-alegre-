@@ -24,7 +24,20 @@ import SurgicalWaitlist from './pages/SurgicalWaitlist';
 import Layout from './components/Layout';
 
 const AuthGuard: React.FC<{ children: React.ReactNode, adminOnly?: boolean }> = ({ children, adminOnly }) => {
-  const user = db.getCurrentUser();
+  const [user, setUser] = React.useState<any>(() => db.getCurrentUser());
+
+  React.useEffect(() => {
+    const handleAuthChange = () => {
+      setUser(db.getCurrentUser());
+    };
+    window.addEventListener('sisbem-auth-changed', handleAuthChange);
+    window.addEventListener('storage', handleAuthChange);
+    return () => {
+      window.removeEventListener('sisbem-auth-changed', handleAuthChange);
+      window.removeEventListener('storage', handleAuthChange);
+    };
+  }, []);
+
   if (!user) return <Navigate to="/login" replace />;
   if (adminOnly && user.role !== 'ADMIN') return <Navigate to="/" replace />;
   return <Layout>{children}</Layout>;
@@ -68,23 +81,27 @@ const App: React.FC = () => {
     // Inicializa a escuta em tempo real (Realtime Channel) para manter todos os usuários conectados em sincronia
     const cleanupRealtime = initRealtimeSync();
 
-    // Restaura sessão existente do Supabase e resolve perfil institucional
+    // Restaura sessão existente do Supabase e resolve perfil institucional apenas se houver sessão ativa
     supabase.auth.getSession().then(async ({ data }) => {
-      if (data?.session?.user && !db.getCurrentUser()) {
+      // Se não há usuário logado no storage local (ex: logout recente ou tela de login), não força auto-login
+      const localUser = db.getCurrentUser();
+      if (data?.session?.user && localUser) {
         const appUser = await resolveSupabaseProfile(data.session.user);
         db.setCurrentUser(appUser as any);
       }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
+      if (session?.user && event !== 'SIGNED_OUT') {
         const appUser = await resolveSupabaseProfile(session.user);
         db.setCurrentUser(appUser as any);
         if (event === 'SIGNED_IN') {
           pullFromSupabaseToLocal(db).catch(() => {});
         }
       } else if (event === 'SIGNED_OUT') {
-        db.logout();
+        if (db.getCurrentUser()) {
+          db.logout();
+        }
       }
     });
 

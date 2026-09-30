@@ -1,22 +1,22 @@
 
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Dog, LogOut, PlusCircle, ClipboardList, Users, Stethoscope, Home, Settings, UserSearch, UserCircle, FileText, Scissors } from 'lucide-react';
 import { db } from '../services/db';
-import { supabase } from '../src/lib/supabase';
 
 const Sidebar: React.FC = () => {
   const location = useLocation();
+  const navigate = useNavigate();
   const user = db.getCurrentUser();
   const isVetOrAdmin = user?.role === 'VETERINARIO' || user?.role === 'ADMIN';
   
-  const handleLogout = async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch {}
-    localStorage.removeItem('sisbem_auth_token');
+  const handleLogout = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     db.logout();
-    window.location.hash = '/login';
+    navigate('/login', { replace: true });
   };
 
   const navItems = [
@@ -42,7 +42,7 @@ const Sidebar: React.FC = () => {
         </div>
       </div>
       
-      <nav className="flex-1 mt-6 px-4 space-y-2">
+      <nav className="flex-1 mt-6 px-4 space-y-2 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = location.pathname === item.path;
@@ -104,10 +104,11 @@ const Sidebar: React.FC = () => {
         )}
       </nav>
 
-      <div className="p-4 border-t border-slate-800">
+      <div className="p-4 border-t border-slate-800 shrink-0">
         <button
+          type="button"
           onClick={handleLogout}
-          className="flex items-center gap-3 w-full px-4 py-3 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors"
+          className="flex items-center gap-3 w-full px-4 py-3 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors cursor-pointer"
         >
           <LogOut size={20} />
           <span className="font-medium">Sair do Sistema</span>

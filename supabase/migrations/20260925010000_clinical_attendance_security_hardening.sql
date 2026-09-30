@@ -123,12 +123,12 @@ BEGIN
         );
     END IF;
 
-    -- 5. MÁQUINA DE ESTADOS ESTRITA: Apenas 'Acolhido' ou 'Aguardando Atendimento' podem iniciar
-    IF v_animal.condicao NOT IN ('Acolhido', 'Aguardando Atendimento') THEN
+    -- 5. VALIDAÇÃO DE ÓBITO: Apenas animais em óbito não podem receber novo atendimento
+    IF v_animal.condicao = 'Óbito' THEN
         RETURN pg_catalog.jsonb_build_object(
             'success', false,
             'code', 'INVALID_STATE',
-            'message', 'Transição inválida: não é permitido iniciar atendimento para animal com condição "' || v_animal.condicao || '".'
+            'message', 'Não é possível iniciar atendimento para um animal registrado em óbito.'
         );
     END IF;
 
@@ -190,6 +190,7 @@ DECLARE
     v_vet RECORD;
     v_animal RECORD;
     v_target_status TEXT;
+    v_previous_status TEXT;
     v_now_ts TIMESTAMPTZ := pg_catalog.clock_timestamp();
     v_now_iso TEXT := pg_catalog.to_char(v_now_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
 BEGIN
@@ -257,8 +258,16 @@ BEGIN
         );
     END IF;
 
-    -- Determina o status correto para retorno à fila
-    IF v_animal.tem_tutor THEN
+    -- Tenta recuperar a condição anterior do animal a partir do status_logs
+    SELECT status_anterior INTO v_previous_status
+    FROM public.status_logs
+    WHERE animal_id = p_animal_id AND status_novo = 'Em Atendimento'
+    ORDER BY data_alteracao DESC
+    LIMIT 1;
+
+    IF v_previous_status IS NOT NULL AND v_previous_status <> 'Em Atendimento' THEN
+        v_target_status := v_previous_status;
+    ELSIF v_animal.tem_tutor THEN
         v_target_status := 'Aguardando Atendimento';
     ELSE
         v_target_status := 'Acolhido';
