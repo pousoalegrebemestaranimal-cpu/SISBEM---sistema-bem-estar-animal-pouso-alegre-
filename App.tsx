@@ -88,6 +88,9 @@ const App: React.FC = () => {
       if (data?.session?.user && localUser) {
         const appUser = await resolveSupabaseProfile(data.session.user);
         db.setCurrentUser(appUser as any);
+        if (data.session.access_token) {
+          localStorage.setItem('sisbem_auth_token', data.session.access_token);
+        }
       }
     });
 
@@ -95,6 +98,9 @@ const App: React.FC = () => {
       if (session?.user && event !== 'SIGNED_OUT') {
         const appUser = await resolveSupabaseProfile(session.user);
         db.setCurrentUser(appUser as any);
+        if (session.access_token) {
+          localStorage.setItem('sisbem_auth_token', session.access_token);
+        }
         if (event === 'SIGNED_IN') {
           pullFromSupabaseToLocal(db).catch(() => {});
         }

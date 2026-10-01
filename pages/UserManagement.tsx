@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/db';
-import { registerWithSupabase, supabase } from '../src/lib/supabase';
+import { registerWithSupabase, supabase, formatSupabaseAuthError } from '../src/lib/supabase';
 import { mapUserToSupabase } from '../src/lib/supabaseSync';
 import { 
   Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, 
@@ -68,24 +68,21 @@ WITH CHECK (true);
 -- Notifica o PostgREST para recarregar o cache de esquemas
 NOTIFY pgrst, 'reload schema';`;
 
-  // Atualiza lista canônica de usuários diretamente do Cloud SQL (Fase 1.1.6)
+  // Atualiza lista oficial de usuários diretamente do Supabase public.users
   const refreshUsers = async () => {
-    const token = localStorage.getItem('sisbem_auth_token');
-    if (token) {
-      try {
-        const res = await fetch('/api/users', {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const data = await res.json().catch(() => null);
-        if (res.ok && data?.success && Array.isArray(data.users)) {
-          setUsersList(data.users);
-          // Atualiza cache local limpo (sem senhas nem hashes)
-          localStorage.setItem('sisbem_users', JSON.stringify(data.users));
-          return;
-        }
-      } catch (err) {
-        console.warn('Falha ao buscar usuários do Cloud SQL via API:', err);
+    try {
+      const { data: remUsers, error } = await supabase
+        .from('users')
+        .select('id, username, role, name, crmv, matricula, email, created_at')
+        .order('name', { ascending: true });
+
+      if (!error && Array.isArray(remUsers)) {
+        setUsersList(remUsers);
+        localStorage.setItem('sisbem_users', JSON.stringify(remUsers));
+        return;
       }
+    } catch (err) {
+      console.warn('Falha ao buscar usuários do Supabase:', err);
     }
     // Fallback para cache local se offline
     const localUsers = db.getUsers() || [];
@@ -192,104 +189,72 @@ NOTIFY pgrst, 'reload schema';`;
     e.preventDefault();
     setMessage(null);
 
-    // Password Match Validation
-    if (formData.password !== formData.confirmPassword) {
-      setMessage({ type: 'error', text: 'As senhas digitadas não coincidem.' });
+    const cleanEmail = formData.email.trim().toLowerCase();
+    const cleanPass = formData.password.trim();
+    const cleanName = formData.name.trim();
+    const derivedUsername = (formData.username.trim().toLowerCase() || cleanEmail.split('@')[0] || cleanName.toLowerCase()).replace(/[^a-z0-9._-]/g, '');
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setMessage({ type: 'error', text: 'O e-mail é obrigatório para cadastrar o usuário no Supabase Auth.' });
       return;
     }
 
-    if (formData.password.length < 4) {
-      setMessage({ type: 'error', text: 'A senha provisória deve ter pelo menos 4 caracteres.' });
+    if (cleanPass.length < 6) {
+      setMessage({ type: 'error', text: 'A senha deve conter no mínimo 6 caracteres (requisito do Supabase Auth).' });
+      return;
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      setMessage({ type: 'error', text: 'As senhas digitadas não coincidem.' });
       return;
     }
 
     setLoading(true);
 
     try {
-      const cleanPass = formData.password.trim();
-      const cleanEmail = formData.email.trim() || (formData.username.includes('@') ? formData.username : '');
-      const derivedUsername = formData.username.trim().toLowerCase() || (cleanEmail ? cleanEmail.split('@')[0] : '');
+      // 1. Cria usuário no Supabase Auth (Fonte Única e Oficial de Identidade)
+      const sbRes = await registerWithSupabase(
+        cleanEmail,
+        cleanPass,
+        cleanName,
+        formData.role,
+        formData.crmv.trim() || undefined,
+        formData.matricula.trim() || undefined,
+        derivedUsername
+      );
 
-      let newUser: any = {
-        id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `user_${Date.now()}`,
-        name: formData.name.trim(),
+      if (!sbRes.success || !sbRes.user) {
+        throw new Error(sbRes.error || 'Falha ao cadastrar conta no Supabase Auth.');
+      }
+
+      // 2. Obtém o UUID real gerado pelo Supabase Auth
+      const realUserId = sbRes.user.id;
+
+      // 3. Cria/atualiza public.users utilizando EXATAMENTE esse UUID oficial
+      const userProfile = {
+        id: realUserId,
+        uid: realUserId,
+        email: cleanEmail,
+        name: cleanName,
         username: derivedUsername,
-        email: cleanEmail || undefined,
         role: formData.role,
-        crmv: formData.crmv.trim() || undefined,
-        matricula: formData.matricula.trim() || undefined,
+        crmv: formData.crmv.trim() || null,
+        matricula: formData.matricula.trim() || null,
       };
 
-      // 1. Cadastra no Supabase Auth e public.users (Autoridade Oficial)
-      let supabaseMsg = '';
-      if (cleanEmail) {
-        try {
-          const sbRes = await registerWithSupabase(
-            cleanEmail,
-            cleanPass,
-            formData.name.trim(),
-            formData.role,
-            formData.crmv.trim() || undefined,
-            formData.matricula.trim() || undefined,
-            derivedUsername
-          );
-          if (sbRes.success && sbRes.user) {
-            newUser = { ...newUser, id: sbRes.user.id };
-            supabaseMsg = ' Conta sincronizada no Supabase Auth.';
-          }
-        } catch (sbErr) {
-          console.warn('[UserManagement] Erro Supabase Auth:', sbErr);
-        }
+      const { error: upsertErr } = await supabase.from('users').upsert(userProfile, { onConflict: 'id' });
+      if (upsertErr) {
+        console.warn('[UserManagement] Aviso ao gravar em public.users:', upsertErr);
       }
 
-      // Garante inserção direta em public.users no Supabase
-      try {
-        await supabase.from('users').upsert({
-          id: newUser.id,
-          uid: newUser.id,
-          email: cleanEmail || null,
-          name: formData.name.trim(),
-          username: derivedUsername,
-          role: formData.role,
-          crmv: formData.crmv.trim() || null,
-          matricula: formData.matricula.trim() || null,
-        }, { onConflict: 'id' });
-      } catch (upsertErr) {
-        console.warn('[UserManagement] Erro ao sincronizar public.users:', upsertErr);
-      }
+      // 4. Salva no cache local seguro com o UUID oficial
+      db.saveUser(userProfile);
 
-      // 2. Opcionalmente sincroniza com Cloud SQL se backend estiver disponível
-      const token = localStorage.getItem('sisbem_auth_token');
-      try {
-        const res = await fetch('/api/users', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {})
-          },
-          body: JSON.stringify({
-            id: newUser.id,
-            name: formData.name.trim(),
-            username: derivedUsername,
-            email: cleanEmail || undefined,
-            role: formData.role,
-            crmv: formData.crmv.trim() || undefined,
-            matricula: formData.matricula.trim() || undefined,
-            password: cleanPass
-          })
-        });
-        const data = await res.json().catch(() => null);
-        if (data?.user) {
-          newUser = data.user;
-        }
-      } catch {
-        // Backend offline ou inacessível — não impede o cadastro
-      }
+      setMessage({
+        type: 'success',
+        text: `Usuário "${cleanName}" (@${derivedUsername}) cadastrado com sucesso no Supabase Auth! UUID oficial: ${realUserId}`
+      });
 
-      // Salva no cache local seguro
-      db.saveUser(newUser);
-
-      setMessage({ type: 'success', text: `Usuário cadastrado com sucesso!${supabaseMsg} Credenciais ativas para acesso imediato.` });
       setFormData({ 
         name: '', 
         username: '', 
@@ -300,6 +265,7 @@ NOTIFY pgrst, 'reload schema';`;
         crmv: '', 
         matricula: '' 
       });
+
       await refreshUsers();
       await checkSupabaseUsers();
     } catch (err: any) {
@@ -321,8 +287,9 @@ NOTIFY pgrst, 'reload schema';`;
     e.preventDefault();
     if (!userToChangePassword) return;
 
-    if (newPasswordInput.length < 4) {
-      setChangePasswordMessage({ type: 'error', text: 'A senha deve conter no mínimo 4 caracteres.' });
+    const cleanPass = newPasswordInput.trim();
+    if (cleanPass.length < 6) {
+      setChangePasswordMessage({ type: 'error', text: 'A senha deve conter no mínimo 6 caracteres (requisito do Supabase Auth).' });
       return;
     }
 
@@ -335,33 +302,38 @@ NOTIFY pgrst, 'reload schema';`;
     setChangePasswordMessage(null);
 
     try {
-      const token = localStorage.getItem('sisbem_auth_token');
-      const cleanPass = newPasswordInput.trim();
+      const isSelf = currentUser && (
+        currentUser.id === userToChangePassword.id || 
+        currentUser.username === userToChangePassword.username
+      );
 
-      // Alteração exclusiva de senha no Cloud SQL via API Backend (Fase 1.1.6)
-      const res = await fetch(`/api/users/${userToChangePassword.id}/password`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        },
-        body: JSON.stringify({ password: cleanPass })
-      });
+      if (isSelf) {
+        // Se for o próprio usuário logado, altera a senha via Supabase Auth
+        const { error } = await supabase.auth.updateUser({ password: cleanPass });
+        if (error) throw new Error(formatSupabaseAuthError(error));
+        setChangePasswordMessage({
+          type: 'success',
+          text: 'Sua senha foi alterada com sucesso no Supabase Auth!'
+        });
+      } else {
+        // Se for outro usuário, envia link oficial de redefinição de senha do Supabase Auth
+        if (!userToChangePassword.email || !userToChangePassword.email.includes('@')) {
+          throw new Error('Este usuário não possui e-mail cadastrado no perfil. Para redefinir senha no Supabase Auth, é necessário informar o e-mail real.');
+        }
 
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.message || 'Falha ao atualizar senha no banco central.');
+        const { error } = await supabase.auth.resetPasswordForEmail(userToChangePassword.email.trim());
+        if (error) throw new Error(formatSupabaseAuthError(error));
+
+        setChangePasswordMessage({
+          type: 'success',
+          text: `E-mail oficial de redefinição de senha enviado com sucesso para ${userToChangePassword.email} via Supabase Auth!`
+        });
       }
-
-      setChangePasswordMessage({
-        type: 'success',
-        text: `Senha de "${userToChangePassword.name}" atualizada com sucesso no Cloud SQL! O acesso pelo site já está liberado com a nova credencial.`
-      });
 
       setTimeout(() => {
         setUserToChangePassword(null);
         refreshUsers();
-      }, 1600);
+      }, 2000);
     } catch (err: any) {
       setChangePasswordMessage({ type: 'error', text: err?.message || 'Erro ao alterar senha.' });
     } finally {
@@ -382,30 +354,30 @@ NOTIFY pgrst, 'reload schema';`;
     setDeletingLoading(true);
 
     try {
-      const token = localStorage.getItem('sisbem_auth_token');
-
-      // Exclusão segura com verificação de integridade no Cloud SQL (Fase 1.1.6)
-      const res = await fetch(`/api/users/${userToDelete.id}`, {
-        method: 'DELETE',
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {})
-        }
-      });
-
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.message || 'Falha ao excluir usuário do banco central.');
+      // 1. Exclui de public.users no Supabase (Fonte Oficial de Perfis)
+      const { error: sbErr } = await supabase.from('users').delete().eq('id', userToDelete.id);
+      if (sbErr) {
+        throw new Error(sbErr.message || 'Falha ao excluir usuário do Supabase.');
       }
 
-      // Exclui do cache local
+      // 2. Exclui do cache local
       db.deleteUser(userToDelete.id);
       if (userToDelete.username) {
         db.deleteUser(userToDelete.username);
       }
 
+      // 3. Opcionalmente sincroniza exclusão no Cloud SQL se backend estiver disponível
+      try {
+        const token = localStorage.getItem('sisbem_auth_token');
+        await fetch(`/api/users/${userToDelete.id}`, {
+          method: 'DELETE',
+          headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+        });
+      } catch {}
+
       setMessage({
         type: 'success',
-        text: `O acesso do servidor "${userToDelete.name}" (@${userToDelete.username}) foi removido com sucesso do Cloud SQL.`
+        text: `O usuário "${userToDelete.name}" (@${userToDelete.username}) foi removido com sucesso de public.users.`
       });
 
       const wasSelf = currentUser && (
@@ -415,6 +387,7 @@ NOTIFY pgrst, 'reload schema';`;
 
       setUserToDelete(null);
       await refreshUsers();
+      await checkSupabaseUsers();
 
       if (wasSelf) {
         db.logout();
@@ -482,22 +455,23 @@ NOTIFY pgrst, 'reload schema';`;
             </div>
 
             <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">E-mail (opcional)</label>
+              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">E-mail Oficial (obrigatório para Supabase Auth)</label>
               <input 
-                type="email"
+                type="email" required
                 placeholder="ex: joao@gmail.com"
                 value={formData.email}
                 onChange={e => setFormData({...formData, email: e.target.value.toLowerCase().trim()})}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm"
               />
-              <p className="text-[10px] text-slate-400">Permite login no site tanto com o usuário quanto com o e-mail.</p>
+              <p className="text-[10px] text-slate-400">Identidade oficial no Supabase Auth. Permite login por e-mail ou nome de usuário.</p>
             </div>
             
             <div className="grid grid-cols-1 gap-4">
               <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Senha Provisória</label>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Senha (mínimo 6 caracteres)</label>
                 <input 
-                  type="password" required
+                  type="password" required minLength={6}
+                  placeholder="Mínimo 6 caracteres"
                   value={formData.password}
                   onChange={e => setFormData({...formData, password: e.target.value})}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm"
@@ -589,7 +563,10 @@ NOTIFY pgrst, 'reload schema';`;
                   <tr key={user.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-6 py-4">
                       <div className="font-bold text-slate-900 text-sm">{user.name}</div>
-                      <div className="text-xs text-slate-400">@{user.username}</div>
+                      <div className="text-xs text-slate-500 font-mono">@{user.username} {user.email ? `• ${user.email}` : ''}</div>
+                      <div className="text-[10px] text-slate-400 font-mono mt-0.5" title={`UUID Supabase: ${user.id}`}>
+                        UUID: <span className="text-indigo-600 font-semibold">{user.id}</span>
+                      </div>
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col gap-1 items-start">

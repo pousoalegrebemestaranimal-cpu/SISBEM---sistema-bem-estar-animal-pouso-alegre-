@@ -26,193 +26,24 @@ app.get('/api/health', (req, res) => {
 });
 
   // ==============================================================================
-  // AUTENTICAÇÃO E SESSÃO SEGURA (FASE 1.1.5)
-  // Elimina dependência de credentialProof e senhas no frontend
+  // AUTENTICAÇÃO EXCLUSIVA VIA SUPABASE AUTH (100% Compatível com Vercel)
+  // Express e Cloud SQL não participam do login nem de senhas.
   // ==============================================================================
 
-  // 1. Endpoint Primário de Login com Verificação Criptográfica Server-Side
-  app.post('/api/auth/login', async (req, res) => {
-    const { identifier, username, email, password } = req.body;
-    const cleanId = (identifier || username || email || '').trim().toLowerCase();
-    const cleanPass = (password || '').trim();
-
-    if (!cleanId || !cleanPass) {
-      return res.status(400).json({
-        success: false,
-        code: 'INVALID_CREDENTIALS',
-        message: 'Identificador (usuário ou e-mail) e senha são obrigatórios.',
-      });
-    }
-
-    const pool = createPool();
-    try {
-      const userRes = await pool.query(
-        'SELECT id, username, role, name, crmv, matricula, email, uid FROM public.users WHERE LOWER(username) = $1 OR LOWER(email) = $1 LIMIT 1;',
-        [cleanId]
-      );
-
-      if (userRes.rows.length === 0) {
-        return res.status(401).json({
-          success: false,
-          code: 'INVALID_CREDENTIALS',
-          message: 'Usuário ou senha incorretos.',
-        });
-      }
-
-      const dbUser = userRes.rows[0];
-      let isAuthorized = await verifyPassword(cleanPass, dbUser.id, dbUser.uid);
-
-      // Suporte para senhas provisórias de homologação / primeiro acesso com upgrade automático do hash
-      if (!isAuthorized) {
-        const provisional = ['admin123', 'vet123', 'op123', '123456', `${dbUser.username}123`, dbUser.username];
-        if (provisional.includes(cleanPass) || (cleanPass.length >= 4 && (dbUser.username === 'admin' ? cleanPass === 'admin' : cleanPass === 'password123'))) {
-          isAuthorized = true;
-          try {
-            const newHash = await hashPassword(cleanPass, dbUser.id);
-            await pool.query('UPDATE public.users SET uid = $1 WHERE id = $2;', [newHash, dbUser.id]);
-          } catch (upgradeErr) {
-            console.warn('Aviso ao atualizar hash provisório no Cloud SQL:', upgradeErr);
-          }
-        }
-      }
-
-      if (!isAuthorized) {
-        return res.status(401).json({
-          success: false,
-          code: 'INVALID_CREDENTIALS',
-          message: 'Usuário ou senha incorretos.',
-        });
-      }
-
-      const token = createAuthToken({
-        id: dbUser.id,
-        username: dbUser.username,
-        role: dbUser.role,
-        name: dbUser.name,
-      });
-
-      return res.json({
-        success: true,
-        token,
-        user: {
-          id: dbUser.id,
-          username: dbUser.username,
-          role: dbUser.role,
-          name: dbUser.name,
-          crmv: dbUser.crmv || undefined,
-          matricula: dbUser.matricula || undefined,
-          email: dbUser.email || undefined,
-        },
-      });
-    } catch (err: any) {
-      console.error('Erro na rota /api/auth/login:', err);
-      return res.status(500).json({
-        success: false,
-        code: 'INTERNAL_ERROR',
-        message: 'Erro interno ao processar autenticação.',
-      });
-    }
+  app.post('/api/auth/login', async (_req, res) => {
+    return res.status(410).json({
+      success: false,
+      code: 'AUTH_MOVED_TO_SUPABASE',
+      message: 'O login é processado exclusivamente pelo Supabase Auth no cliente. Cloud SQL e Express não realizam validação de senhas.',
+    });
   });
 
-  // 1b. Endpoint de Registro no Cloud SQL (Fonte Central de Verdade)
-  app.post('/api/auth/register', async (req, res) => {
-    const { name, username, email, password, role, crmv, matricula } = req.body;
-    const cleanName = (name || '').trim();
-    const cleanEmail = (email || '').trim().toLowerCase();
-    const derivedUsername = (username || cleanEmail.split('@')[0] || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
-    const cleanPass = (password || '').trim();
-    const cleanRole = (role || 'OPERATOR').trim().toUpperCase();
-    const cleanCrmv = crmv ? (crmv || '').trim() : null;
-    const cleanMatricula = matricula ? (matricula || '').trim() : null;
-
-    if (!cleanName || !cleanPass || cleanPass.length < 4) {
-      return res.status(400).json({
-        success: false,
-        code: 'INVALID_PARAM',
-        message: 'Nome e senha (mínimo 4 caracteres) são obrigatórios.',
-      });
-    }
-
-    if (!['ADMIN', 'OPERATOR', 'VETERINARIO'].includes(cleanRole)) {
-      return res.status(400).json({
-        success: false,
-        code: 'INVALID_PARAM',
-        message: 'Perfil de usuário inválido.',
-      });
-    }
-
-    const pool = createPool();
-    try {
-      // Checa duplicidade
-      const checkRes = await pool.query(
-        'SELECT id FROM public.users WHERE LOWER(username) = $1 OR ($2 <> \'\' AND LOWER(email) = $2) LIMIT 1;',
-        [derivedUsername, cleanEmail]
-      );
-      if (checkRes.rows.length > 0) {
-        return res.status(409).json({
-          success: false,
-          code: 'USER_EXISTS',
-          message: 'Já existe uma conta cadastrada com este usuário ou e-mail.',
-        });
-      }
-
-      const newUserId = crypto.randomUUID();
-      const newHash = await hashPassword(cleanPass, newUserId);
-
-      const insertRes = await pool.query(
-        `INSERT INTO public.users (id, uid, name, username, role, crmv, matricula, email, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-         RETURNING id, name, username, role, crmv, matricula, email, created_at;`,
-        [newUserId, newHash, cleanName, derivedUsername, cleanRole, cleanCrmv, cleanMatricula, cleanEmail || null]
-      );
-
-      const createdUser = insertRes.rows[0];
-
-      // Sincroniza espelho sem credenciais no Supabase
-      try {
-        await supabase.from('users').upsert({
-          id: newUserId,
-          name: cleanName,
-          username: derivedUsername,
-          role: cleanRole,
-          crmv: cleanCrmv,
-          matricula: cleanMatricula,
-          email: cleanEmail || null,
-          uid: null,
-        }, { onConflict: 'id' });
-      } catch (sbErr) {
-        console.warn('Aviso ao sincronizar cadastro no Supabase:', sbErr);
-      }
-
-      const token = createAuthToken({
-        id: createdUser.id,
-        username: createdUser.username,
-        role: createdUser.role,
-        name: createdUser.name,
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: 'Conta criada com sucesso no sistema central.',
-        token,
-        user: {
-          id: createdUser.id,
-          username: createdUser.username,
-          role: createdUser.role,
-          name: createdUser.name,
-          crmv: createdUser.crmv || undefined,
-          matricula: createdUser.matricula || undefined,
-          email: createdUser.email || undefined,
-        },
-      });
-    } catch (err: any) {
-      console.error('Erro no registro de usuário no Cloud SQL:', err);
-      return res.status(500).json({
-        success: false,
-        code: 'INTERNAL_ERROR',
-        message: 'Erro interno ao cadastrar usuário.',
-      });
-    }
+  app.post('/api/auth/register', async (_req, res) => {
+    return res.status(410).json({
+      success: false,
+      code: 'AUTH_MOVED_TO_SUPABASE',
+      message: 'O cadastro de credenciais é processado exclusivamente pelo Supabase Auth. Cloud SQL e Express não realizam cadastro de senhas.',
+    });
   });
 
   // 2. Endpoint de Emissão / Troca de Token

@@ -1250,28 +1250,17 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
       else counts.tutores = localTutores.length;
     }
 
-    // 4. Usuários (tenta sincronizar; se houver RLS restrita na tabela users, registra aviso)
-    const localUsers: User[] = dbInstance.getUsers() || [];
+    // 4. Usuários: Consulta IDs oficiais do Supabase public.users para validação de chaves estrangeiras
+    // NUNCA faz upsert automático de usuários locais para evitar criar usuários fictícios ou desalinhar UUIDs
     let existingUserIds = new Set<string>();
     try {
       const { data: remoteUsers } = await supabase.from('users').select('id');
       if (remoteUsers && remoteUsers.length > 0) {
         existingUserIds = new Set(remoteUsers.map((u: any) => u.id));
+        counts.users = remoteUsers.length;
       }
     } catch (e) {
       // Ignore
-    }
-
-    if (localUsers.length > 0) {
-      const payload = localUsers.map((u: any) => mapUserToSupabase(u));
-      const { error } = await supabase.from('users').upsert(payload);
-      if (error) {
-        // Se violar RLS da tabela users, não trava a sincronização dos animais
-        console.warn('Aviso ao sincronizar usuários com Supabase:', error.message);
-      } else {
-        counts.users = localUsers.length;
-        localUsers.forEach(u => existingUserIds.add(u.id));
-      }
     }
 
     // 5. Animais

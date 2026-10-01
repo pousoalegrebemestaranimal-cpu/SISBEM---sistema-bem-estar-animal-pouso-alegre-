@@ -133,24 +133,22 @@ export async function resolveSupabaseProfile(su: any): Promise<{
   matricula?: string;
   email?: string;
 }> {
-  if (!su) return mapSupabaseUserToAppUser({});
+  if (!su || !su.id) return mapSupabaseUserToAppUser({});
 
   try {
-    let query = supabase.from('users').select('id, name, username, email, role, crmv, matricula, uid');
-    if (su.email) {
-      query = query.or(`email.eq.${su.email},id.eq.${su.id},uid.eq.${su.id}`);
-    } else {
-      query = query.or(`id.eq.${su.id},uid.eq.${su.id}`);
-    }
+    const { data: profile } = await supabase
+      .from('users')
+      .select('id, name, username, email, role, crmv, matricula, uid')
+      .eq('id', su.id)
+      .maybeSingle();
 
-    const { data: profile } = await query.limit(1).maybeSingle();
     if (profile) {
       let role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO' = 'ADMIN';
       if (profile.role === 'VETERINARIO' || profile.role === 'OPERATOR' || profile.role === 'ADMIN') {
         role = profile.role;
       }
       return {
-        id: profile.id, // Preserva o ID canônico institucional do SISBEM
+        id: su.id, // O UUID do Supabase Auth é a IDENTIDADE OFICIAL
         name: profile.name || su.user_metadata?.name || 'Usuário SISBEM',
         username: profile.username || su.email?.split('@')[0] || profile.name,
         role,
@@ -198,12 +196,19 @@ export function formatSupabaseAuthError(error: any): string {
 }
 
 /**
- * Resolve o e-mail de acesso quando o usuário informa um username em vez de e-mail
+ * Resolve o e-mail de acesso quando o usuário informa um username em vez de e-mail.
+ * NUNCA inventa e-mails fictícios com @sisbem.gov.br.
  */
 export async function resolveEmailFromIdentifier(identifier: string): Promise<string> {
   const clean = identifier.trim();
   if (clean.includes('@')) {
     return clean.toLowerCase();
+  }
+
+  // Alias oficial para a conta administrativa
+  const lower = clean.toLowerCase();
+  if (lower === 'admin' || lower === 'bemestaranimal') {
+    return 'pousoalegrebemestaranimal@gmail.com';
   }
 
   try {
@@ -221,16 +226,24 @@ export async function resolveEmailFromIdentifier(identifier: string): Promise<st
     // ignore
   }
 
-  // Convenção padrão para nomes de usuário sem e-mail explícito
-  return `${clean.toLowerCase()}@sisbem.gov.br`;
+  // Se o username não tiver e-mail cadastrado, retorna vazio para mensagem de erro explícita
+  return '';
 }
 
 /**
- * Autentica usuário oficialmente via Supabase Auth (Fonte Oficial de Autenticação)
+ * Autentica usuário oficialmente via Supabase Auth (Fonte Única e Exclusiva de Autenticação)
+ * Zero participação do Cloud SQL ou Express. Totalmente compatível com a Vercel.
  */
 export async function authenticateWithSupabase(identifier: string, password: string) {
   try {
     const emailToUse = await resolveEmailFromIdentifier(identifier);
+    if (!emailToUse) {
+      return {
+        success: false,
+        error: 'Nome de usuário não localizado ou sem e-mail cadastrado. Informe o e-mail diretamente ou contate o Administrador.',
+      };
+    }
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email: emailToUse,
       password,
@@ -249,8 +262,73 @@ export async function authenticateWithSupabase(identifier: string, password: str
       return { success: false, error: 'Nenhum usuário retornado pelo Supabase Auth.' };
     }
 
-    // Resolve o perfil institucional completo
-    const appUser = await resolveSupabaseProfile(data.user);
+    const authUser = data.user;
+
+    // 1. Busca perfil institucional em public.users utilizando EXATAMENTE o UUID do Supabase Auth
+    const { data: profile } = await supabase
+      .from('users')
+      .select('id, name, username, email, role, crmv, matricula, uid')
+      .eq('id', authUser.id)
+      .maybeSingle();
+
+    // 2. Verificação de status de ativação
+    if (
+      profile?.uid === 'INACTIVE' || 
+      (profile as any)?.active === false || 
+      authUser.user_metadata?.active === false
+    ) {
+      await supabase.auth.signOut();
+      return {
+        success: false,
+        error: 'Usuário desativado pelo Administrador. Acesso bloqueado.',
+      };
+    }
+
+    let finalProfile = profile;
+    if (!finalProfile) {
+      // Se não encontrou pelo id, verifica se há registro pelo email para alinhar o UUID oficial
+      const { data: profileByEmail } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', authUser.email)
+        .maybeSingle();
+
+      if (profileByEmail) {
+        await supabase.from('users').delete().eq('id', profileByEmail.id);
+        const { data: alignedProfile } = await supabase.from('users').insert({
+          ...profileByEmail,
+          id: authUser.id,
+          uid: authUser.id,
+        }).select().maybeSingle();
+        finalProfile = alignedProfile || { ...profileByEmail, id: authUser.id };
+      } else {
+        // Inicializa o perfil oficial com o UUID do Supabase Auth
+        const meta = authUser.user_metadata || {};
+        const newProf = {
+          id: authUser.id,
+          uid: authUser.id,
+          email: authUser.email,
+          name: meta.name || meta.full_name || authUser.email?.split('@')[0] || 'Usuário SISBEM',
+          username: meta.username || authUser.email?.split('@')[0] || 'usuario',
+          role: (meta.role === 'VETERINARIO' || meta.role === 'OPERATOR') ? meta.role : 'ADMIN',
+          crmv: meta.crmv || null,
+          matricula: meta.matricula || null,
+        };
+        await supabase.from('users').upsert(newProf);
+        finalProfile = newProf;
+      }
+    }
+
+    const appUser: any = {
+      id: authUser.id, // O UUID do Supabase Auth é a IDENTIDADE OFICIAL ABSOLUTA
+      name: finalProfile.name || authUser.user_metadata?.name || 'Usuário SISBEM',
+      username: finalProfile.username || authUser.email?.split('@')[0] || 'usuario',
+      role: finalProfile.role as any,
+      crmv: finalProfile.crmv || undefined,
+      matricula: finalProfile.matricula || undefined,
+      email: finalProfile.email || authUser.email || undefined,
+    };
+
     return { success: true, user: appUser, session: data.session };
   } catch (err: any) {
     return { success: false, error: formatSupabaseAuthError(err) };

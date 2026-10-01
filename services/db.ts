@@ -55,23 +55,8 @@ export const resetAndSeedAllData = () => {
   const inThreeDaysStr = new Date(now.getTime() + (3 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
   const inFiveDaysStr = new Date(now.getTime() + (5 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
 
-  // 1. Usuários (Sem senhas nem hashes no armazenamento do cliente)
-  const users: User[] = [
-    { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN', matricula: '00001', email: 'admin@sisbem.gov.br' },
-    { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887', email: 'roberto.santos@sisbem.gov.br' },
-    { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888', email: 'camila.rocha@sisbem.gov.br' },
-    { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890', email: 'marcos.alvarenga@sisbem.gov.br' },
-    { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889', email: 'mariana.albuquerque@sisbem.gov.br' },
-    { id: '68b572dd-bc3f-48e9-a74d-44b6e36b1e8d', name: 'Luiz Fenando da Silva', username: 'fernandosilva', role: 'VETERINARIO', crmv: '32377', matricula: '23780-2', email: 'luizfernandosilva.medvet@gmail.com' },
-    { id: '03632964-ac64-43c1-a94d-f80352e0af99', name: 'Naiara Souza', username: 'naiara', role: 'OPERATOR' },
-    { id: '061aa334-5762-44b5-b4ba-b680b31d39f5', name: 'Maira de Carvalho Simões ', username: 'maira', role: 'VETERINARIO', crmv: '28919', matricula: '23961' },
-    { id: '300540f5-a64b-45e5-9195-a7a677318d9a', name: 'Daniel José de Paula', username: 'daniel', role: 'VETERINARIO', crmv: '34377/MG', matricula: '23742' },
-    { id: '35416324-db29-4c43-94c2-574d92434c00', name: 'Tatiane Cristina Moreira da Silva', username: 'tatiane', role: 'VETERINARIO', crmv: '15704', matricula: '24163-1', email: 'tatianevet11@gmail.com' },
-    { id: 'c5de63b2-5bca-4566-be73-33c92265eff2', name: 'Lucas de Paula Gonçalves ', username: 'lucas', role: 'VETERINARIO', crmv: '34381/MG', matricula: '23782-1' },
-    { id: 'ef7d9362-d4ae-4426-8617-6c9ccb3174a0', name: 'Isabella Silva', username: 'isabella', role: 'VETERINARIO', crmv: '36307', matricula: '249071' },
-    { id: 'ff3e3bc6-478b-49a9-acff-1afe5c6a75dd', name: 'Rayssa C. Lopes Alvarenga ', username: 'rayssalopes', role: 'VETERINARIO', crmv: '33347', matricula: '23700', email: 'rayscris@hotmail.com' }
-  ];
-  localStorage.setItem(KEYS.USERS, JSON.stringify(users));
+  // 1. Usuários: NUNCA semear usuários fictícios nem criar contas automáticas.
+  // A gestão de contas é 100% oficial via Supabase Auth e public.users.
 
   // 2. Configurações de Baias e Acomodação
   const initialConfigs: KennelConfig[] = [
@@ -1125,26 +1110,8 @@ export const clearAllFictitiousData = () => {
 
 const initSystem = () => {
   if (typeof localStorage === 'undefined') return;
-  // 1. Inicializa usuários básicos de acesso se não existirem (Sem senhas no cliente)
-  const existingUsers = localStorage.getItem(KEYS.USERS);
-  if (!existingUsers || JSON.parse(existingUsers || '[]').length === 0) {
-    const users: User[] = [
-      { id: '1', name: 'Administrador SISBEM', username: 'admin', role: 'ADMIN', matricula: '00001', email: 'admin@sisbem.gov.br' },
-      { id: '2', name: 'Dr. Roberto Santos', username: 'vet01', role: 'VETERINARIO', crmv: '12345/MG', matricula: '99887', email: 'roberto.santos@sisbem.gov.br' },
-      { id: '3', name: 'Dra. Camila Rocha', username: 'vet02', role: 'VETERINARIO', crmv: '18492/MG', matricula: '99888', email: 'camila.rocha@sisbem.gov.br' },
-      { id: '4', name: 'Dr. Marcos Alvarenga', username: 'vet03', role: 'VETERINARIO', crmv: '22110/MG', matricula: '99890', email: 'marcos.alvarenga@sisbem.gov.br' },
-      { id: '5', name: 'Mariana Albuquerque', username: 'op01', role: 'OPERATOR', matricula: '99889', email: 'mariana.albuquerque@sisbem.gov.br' },
-      { id: '68b572dd-bc3f-48e9-a74d-44b6e36b1e8d', name: 'Luiz Fenando da Silva', username: 'fernandosilva', role: 'VETERINARIO', crmv: '32377', matricula: '23780-2', email: 'luizfernandosilva.medvet@gmail.com' },
-      { id: '03632964-ac64-43c1-a94d-f80352e0af99', name: 'Naiara Souza', username: 'naiara', role: 'OPERATOR' },
-      { id: '061aa334-5762-44b5-b4ba-b680b31d39f5', name: 'Maira de Carvalho Simões ', username: 'maira', role: 'VETERINARIO', crmv: '28919', matricula: '23961' },
-      { id: '300540f5-a64b-45e5-9195-a7a677318d9a', name: 'Daniel José de Paula', username: 'daniel', role: 'VETERINARIO', crmv: '34377/MG', matricula: '23742' },
-      { id: '35416324-db29-4c43-94c2-574d92434c00', name: 'Tatiane Cristina Moreira da Silva', username: 'tatiane', role: 'VETERINARIO', crmv: '15704', matricula: '24163-1', email: 'tatianevet11@gmail.com' },
-      { id: 'c5de63b2-5bca-4566-be73-33c92265eff2', name: 'Lucas de Paula Gonçalves ', username: 'lucas', role: 'VETERINARIO', crmv: '34381/MG', matricula: '23782-1' },
-      { id: 'ef7d9362-d4ae-4426-8617-6c9ccb3174a0', name: 'Isabella Silva', username: 'isabella', role: 'VETERINARIO', crmv: '36307', matricula: '249071' },
-      { id: 'ff3e3bc6-478b-49a9-acff-1afe5c6a75dd', name: 'Rayssa C. Lopes Alvarenga ', username: 'rayssalopes', role: 'VETERINARIO', crmv: '33347', matricula: '23700', email: 'rayscris@hotmail.com' }
-    ];
-    localStorage.setItem(KEYS.USERS, JSON.stringify(users));
-  }
+  // 1. Usuários: NUNCA semear usuários fictícios nem criar contas automáticas.
+  // A gestão de contas é 100% oficial via Supabase Auth e public.users.
 
   // 2. Inicializa configurações de baias se não existirem
   const existingConfigs = localStorage.getItem(KEYS.KENNEL_CONFIGS);
@@ -1184,19 +1151,22 @@ let isLoggingOut = false;
 
 export const db = {
   getUsers: (): any[] => JSON.parse(localStorage.getItem(KEYS.USERS) || '[]'),
+  saveUsers: (usersList: any[]) => {
+    localStorage.setItem(KEYS.USERS, JSON.stringify(usersList));
+  },
   
   saveUser: (userData: any) => {
     // Garante que senhas ou hashes nunca sejam gravados no cache do cliente
-    const { password, uid, credentialProof, secret, authSecret, ...safeUserData } = userData;
-    const users = db.getUsers();
+    const { password, credentialProof, secret, authSecret, ...safeUserData } = userData;
     if (!safeUserData.id) {
-      if (users.find(u => u.username === safeUserData.username)) throw new Error('Nome de usuário já existe.');
-      safeUserData.id = crypto.randomUUID();
-      users.push(safeUserData);
+      throw new Error('Identificador único (UUID oficial do Supabase Auth) é obrigatório.');
+    }
+    const users = db.getUsers();
+    const idx = users.findIndex(u => u.id === safeUserData.id);
+    if (idx > -1) {
+      users[idx] = { ...users[idx], ...safeUserData };
     } else {
-      const idx = users.findIndex(u => u.id === safeUserData.id);
-      if (idx > -1) users[idx] = { ...users[idx], ...safeUserData };
-      else users.push(safeUserData);
+      users.push(safeUserData);
     }
     localStorage.setItem(KEYS.USERS, JSON.stringify(users));
     syncUserToSupabase(safeUserData).catch(err => console.warn('Supabase syncUser:', err));
@@ -2152,7 +2122,7 @@ export const db = {
     }
   },
 
-  // Login Oficial via Supabase Auth (Fonte Oficial de Autenticação na Vercel e Produção)
+  // Login Oficial via Supabase Auth (Fonte Única e Exclusiva de Autenticação - 100% Compatível com Vercel)
   loginAsync: async (identifier: string, password: string): Promise<{ success: boolean; user?: User; token?: string; message?: string; statusCode?: number }> => {
     const cleanId = (identifier || '').trim();
     const cleanPass = password || '';
@@ -2165,7 +2135,6 @@ export const db = {
       };
     }
 
-    // 1. Autoridade Oficial Primária: Supabase Auth
     try {
       const sbResult = await authenticateWithSupabase(cleanId, cleanPass);
       if (sbResult.success && sbResult.user) {
@@ -2181,66 +2150,18 @@ export const db = {
         };
       }
 
-      // Se falhou no Supabase Auth por senha incorreta, e-mail não confirmado ou rate limit:
-      // Tenta fallback local do Express somente se for credencial administrativa de teste local
-      if (sbResult.error && !sbResult.error.toLowerCase().includes('comunicação')) {
-        try {
-          const res = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ identifier: cleanId, password: cleanPass }),
-          });
-          const data = await res.json().catch(() => null);
-          if (res.ok && data?.success && data?.user) {
-            if (data.token) localStorage.setItem('sisbem_auth_token', data.token);
-            db.setCurrentUser(data.user);
-            return { success: true, user: data.user, token: data.token, statusCode: 200 };
-          }
-        } catch {
-          // ignora erro do Express
-        }
-
-        return {
-          success: false,
-          statusCode: 401,
-          message: sbResult.error,
-        };
-      }
+      return {
+        success: false,
+        statusCode: 401,
+        message: sbResult.error || 'Falha na autenticação. Verifique os dados digitados ou contate o Administrador.',
+      };
     } catch (sbErr: any) {
-      console.warn('[db.loginAsync] Aviso ao autenticar no Supabase:', sbErr);
+      return {
+        success: false,
+        statusCode: 500,
+        message: sbErr?.message || 'Erro ao processar autenticação.',
+      };
     }
-
-    // 2. Fallback secundário em ambiente de desenvolvimento local (Express / Cloud SQL)
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier: cleanId, password: cleanPass }),
-      });
-      const data = await res.json().catch(() => null);
-
-      if (res.ok && data?.success && data?.user) {
-        if (data.token) localStorage.setItem('sisbem_auth_token', data.token);
-        db.setCurrentUser(data.user);
-        return { success: true, user: data.user, token: data.token, statusCode: res.status };
-      }
-
-      if (res.status === 401) {
-        return {
-          success: false,
-          statusCode: 401,
-          message: data?.message || 'Credenciais inválidas: usuário ou senha incorretos.',
-        };
-      }
-    } catch {
-      // Ignora erro de rede
-    }
-
-    return {
-      success: false,
-      statusCode: 401,
-      message: 'Falha na autenticação. Verifique os dados digitados ou contate o Administrador.',
-    };
   },
 
   // Legado: descontinuado por motivos de segurança (senhas não são salvas no cliente)
