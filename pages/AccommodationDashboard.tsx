@@ -12,7 +12,7 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
-import { isOccupationActive, getAllActiveOccupations } from '../src/lib/supabaseQueries';
+import { isOccupationActive, getAllActiveOccupations, fetchAllOccupationsWithKennel, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
@@ -115,17 +115,48 @@ const AccommodationDashboard: React.FC = () => {
   const [occupations, setOccupations] = useState<KennelOccupation[]>(() => db.getOccupations());
   const [allAnimals, setAllAnimals] = useState<AnimalJoined[]>(() => db.getAnimalsJoined());
 
+  // Busca todas as baias brutas do cache para unificar qualquer alias/duplicidade de UUID
+  const rawKennels: Kennel[] = useMemo(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+      if (Array.isArray(stored) && stored.length > 0) return stored;
+    } catch (e) {}
+    return kennels;
+  }, [kennels]);
+
+  const kennelLookup = useMemo(() => {
+    return buildKennelCanonicalLookup(rawKennels.length > 0 ? rawKennels : kennels);
+  }, [rawKennels, kennels]);
+
+  // Lista canônica de baias deduplicadas
+  const uniqueKennels = kennelLookup.canonicalKennels;
+
+  // Busca ocupações oficiais diretamente no Supabase com join em kennels
+  const fetchOfficialOccupations = async () => {
+    try {
+      const rem = await fetchAllOccupationsWithKennel();
+      if (rem && rem.length > 0) {
+        setOccupations(rem);
+        localStorage.setItem('sisbem_occupations', JSON.stringify(rem));
+      }
+    } catch (err) {
+      console.warn('Aviso ao carregar ocupações oficiais:', err);
+    }
+  };
+
   const refreshData = () => {
     setKennels(db.getKennels());
     setOccupations(db.getOccupations());
     setAllAnimals(db.getAnimalsJoined());
+    fetchOfficialOccupations();
   };
 
   useEffect(() => {
     refreshData();
+    fetchOfficialOccupations();
 
-    // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela (com cache)
-    pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'] }).then(() => {
+    // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela
+    pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true }).then(() => {
       refreshData();
     }).catch(() => {});
 
@@ -190,23 +221,11 @@ const AccommodationDashboard: React.FC = () => {
     );
   }, [allAnimals, occupations]);
 
-  // DEDUPLICAÇÃO ESTRITA: Garante que cada baia aparece exatamente 1 vez, ordenada alfanumericamente por número
-  const uniqueKennels = useMemo(() => {
-    const seen = new Set<string>();
-    const list: Kennel[] = [];
-    for (const k of kennels) {
-      if (!k || !k.id || !k.name) continue;
-      const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        list.push(k);
-      }
-    }
-    return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-  }, [kennels]);
-
   const getKennelData = (kennelId: string) => {
-    const activeOccs = getAllActiveOccupations(occupations).filter(o => o.kennelId === kennelId);
+    const activeOccs = getAllActiveOccupations(occupations).filter(o => {
+      const oid = o.kennelId || (o as any).kennel_id;
+      return kennelLookup.isSameKennel(oid, kennelId);
+    });
     const occupants = activeOccs.map(o => allAnimals.find(a => a.id === o.animalId)).filter(Boolean) as AnimalJoined[];
     return { count: activeOccs.length, occupants, activeOccs };
   };
@@ -225,7 +244,10 @@ const AccommodationDashboard: React.FC = () => {
     const activeOccs = getAllActiveOccupations(occupations);
     return Object.values(KennelType).map(type => {
       const typeKennels = uniqueKennels.filter(k => k.type === type);
-      const typeOccupations = activeOccs.filter(o => typeKennels.some(k => k.id === o.kennelId));
+      const typeOccupations = activeOccs.filter(o => {
+        const oid = o.kennelId || (o as any).kennel_id;
+        return typeKennels.some(k => kennelLookup.isSameKennel(k.id, oid));
+      });
       const totalCapacity = typeKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
       return {
         type,
@@ -236,7 +258,7 @@ const AccommodationDashboard: React.FC = () => {
         percent: totalCapacity > 0 ? (typeOccupations.length / totalCapacity) * 100 : 0
       };
     });
-  }, [uniqueKennels, occupations]);
+  }, [uniqueKennels, occupations, kennelLookup]);
 
   const filteredKennels = useMemo(() => {
     return uniqueKennels.filter(k => {
@@ -295,8 +317,11 @@ const AccommodationDashboard: React.FC = () => {
     if (!allocatingAnimal || !selectedKennelId) return;
 
     try {
+      const canonicalTarget = kennelLookup.resolveKennel(selectedKennelId);
+      const targetKennelId = canonicalTarget?.id || selectedKennelId;
+
       await db.allocateAnimalAsync({
-        kennelId: selectedKennelId,
+        kennelId: targetKennelId,
         animalId: allocatingAnimal.id,
         vetId: user!.id,
         justification: justification || 'Alocação via Fila de Acomodação'
@@ -305,6 +330,7 @@ const AccommodationDashboard: React.FC = () => {
       setSelectedKennelId('');
       setJustification('');
       refreshData();
+      await fetchOfficialOccupations();
     } catch (err: any) {
       alert(err.message);
     }
@@ -315,8 +341,11 @@ const AccommodationDashboard: React.FC = () => {
     if (!targetKennelForAllocation || !selectedAnimalIdToAllocate) return;
 
     try {
+      const canonicalTarget = kennelLookup.resolveKennel(targetKennelForAllocation.id);
+      const targetKennelId = canonicalTarget?.id || targetKennelForAllocation.id;
+
       await db.allocateAnimalAsync({
-        kennelId: targetKennelForAllocation.id,
+        kennelId: targetKennelId,
         animalId: selectedAnimalIdToAllocate,
         vetId: user!.id,
         justification: justification || `Alocação manual na ${targetKennelForAllocation.name}`
@@ -325,6 +354,7 @@ const AccommodationDashboard: React.FC = () => {
       setSelectedAnimalIdToAllocate('');
       setJustification('');
       refreshData();
+      await fetchOfficialOccupations();
     } catch (err: any) {
       alert(err.message);
     }
@@ -335,6 +365,7 @@ const AccommodationDashboard: React.FC = () => {
     try {
       await db.releaseAnimalFromKennelAsync(animalId);
       refreshData();
+      await fetchOfficialOccupations();
     } catch (err: any) {
       alert(err.message);
     }
@@ -2219,11 +2250,17 @@ const AccommodationDashboard: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {[...occupations]
-                  .sort((a, b) => new Date(b.entryDate).getTime() - new Date(a.entryDate).getTime())
+                  .sort((a, b) => new Date((b.entryDate || (b as any).entry_date) || 0).getTime() - new Date((a.entryDate || (a as any).entry_date) || 0).getTime())
                   .map(occ => {
-                    const animal = allAnimals.find(a => a.id === occ.animalId);
-                    const kennel = kennels.find(k => k.id === occ.kennelId);
-                    const responsible = db.getUsers().find(u => u.id === occ.vetId);
+                    const aid = occ.animalId || (occ as any).animal_id;
+                    const animal = allAnimals.find(a => a.id === aid);
+                    const kid = occ.kennelId || (occ as any).kennel_id;
+                    const kennel = kennelLookup.resolveKennel(kid, (occ as any).kennel);
+                    const vid = occ.vetId || (occ as any).vet_id;
+                    const responsible = db.getUsers().find(u => u.id === vid);
+                    const isActive = isOccupationActive(occ);
+                    const exitTime = occ.exitDate || (occ as any).exit_date;
+                    const entryTime = occ.entryDate || (occ as any).entry_date;
                     
                     return (
                       <tr key={occ.id} className="hover:bg-slate-50/80 transition-colors">
@@ -2238,21 +2275,21 @@ const AccommodationDashboard: React.FC = () => {
                         </td>
                         <td className="p-4">
                           <span className="text-xs font-semibold text-slate-700 bg-slate-100 px-2 py-1 rounded">
-                            {kennel ? `${kennel.name} (${kennel.type})` : 'Baia excluída'}
+                            {kennel ? `${kennel.name} (${kennel.type})` : ((occ as any).kennel?.name ? `${(occ as any).kennel.name} (${(occ as any).kennel.type || 'Acomodação'})` : 'Baia')}
                           </span>
                         </td>
                         <td className="p-4 text-xs text-slate-600 font-medium">
-                          {format(new Date(occ.entryDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })}
+                          {entryTime ? format(new Date(entryTime), 'dd/MM/yyyy HH:mm', { locale: ptBR }) : '--'}
                         </td>
                         <td className="p-4 text-xs text-slate-600 font-medium">
-                          {!isOccupationActive(occ) && occ.exitDate ? (
-                            format(new Date(occ.exitDate), 'dd/MM/yyyy HH:mm', { locale: ptBR })
+                          {!isActive && exitTime ? (
+                            format(new Date(exitTime), 'dd/MM/yyyy HH:mm', { locale: ptBR })
                           ) : (
                             <span className="text-slate-400 italic">--</span>
                           )}
                         </td>
                         <td className="p-4">
-                          {!isOccupationActive(occ) ? (
+                          {!isActive ? (
                             <span className="bg-slate-100 text-slate-500 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded uppercase">
                               Histórico
                             </span>

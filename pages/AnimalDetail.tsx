@@ -13,7 +13,7 @@ import {
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
-import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId } from '../src/lib/supabaseQueries';
+import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
@@ -185,13 +185,23 @@ const AnimalDetail: React.FC = () => {
     return getActiveOccupation(animalOccupations);
   }, [animalOccupations]);
 
+  const rawKennels = useMemo(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+      if (Array.isArray(stored) && stored.length > 0) return stored;
+    } catch (e) {}
+    return db.getKennels();
+  }, []);
+
+  const kennelLookup = useMemo(() => {
+    return buildKennelCanonicalLookup(rawKennels);
+  }, [rawKennels]);
+
   const activeKennel = useMemo(() => {
     if (!activeOccupation) return null;
-    if ((activeOccupation as any).kennel?.name) return (activeOccupation as any).kennel;
-    const kennelsList = db.getKennels();
-    const found = kennelsList.find(k => k.id === activeOccupation.kennelId);
-    if (found) return found;
-    if (animal?.currentOccupation?.kennel?.name && animal.currentOccupation.kennelId === activeOccupation.kennelId) {
+    const resolved = kennelLookup.resolveKennel(activeOccupation.kennelId, (activeOccupation as any).kennel);
+    if (resolved) return resolved;
+    if (animal?.currentOccupation?.kennel?.name && kennelLookup.isSameKennel(animal.currentOccupation.kennelId, activeOccupation.kennelId)) {
       return animal.currentOccupation.kennel;
     }
     if (activeOccupation.kennelId) {
@@ -203,7 +213,7 @@ const AnimalDetail: React.FC = () => {
       };
     }
     return null;
-  }, [activeOccupation, animal?.currentOccupation]);
+  }, [activeOccupation, animal?.currentOccupation, kennelLookup]);
 
   const effectiveCurrentOccupation = useMemo(() => {
     if (activeOccupation) {
@@ -220,8 +230,11 @@ const AnimalDetail: React.FC = () => {
     if (!animal || !selectedKennelId) return;
 
     try {
+      const canonicalTarget = kennelLookup.resolveKennel(selectedKennelId);
+      const targetKennelId = canonicalTarget?.id || selectedKennelId;
+
       await db.allocateAnimalAsync({
-        kennelId: selectedKennelId,
+        kennelId: targetKennelId,
         animalId: animal.id,
         vetId: user!.id,
         justification: justification || 'Movimentação realizada na ficha'
@@ -1882,8 +1895,10 @@ const AnimalDetail: React.FC = () => {
 
                       <div className="space-y-8 relative">
                         {animalOccupations.map((occ) => {
-                          const kennel = db.getKennels().find(k => k.id === occ.kennelId) || occ.kennel;
-                          const responsible = db.getUsers().find(u => u.id === occ.vetId);
+                          const kid = occ.kennelId || (occ as any).kennel_id;
+                          const kennel = kennelLookup.resolveKennel(kid, (occ as any).kennel);
+                          const vid = occ.vetId || (occ as any).vet_id;
+                          const responsible = db.getUsers().find(u => u.id === vid);
                           const isCurrent = isOccupationActive(occ) && (!activeOccupation || occ.id === activeOccupation.id);
 
                           return (
@@ -1902,10 +1917,10 @@ const AnimalDetail: React.FC = () => {
                                 <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2">
                                   <div>
                                     <h4 className="text-sm font-black text-slate-800 uppercase">
-                                      {kennel ? kennel.name : (occ.kennel?.name || 'Baia Excluída')}
+                                      {kennel ? kennel.name : ((occ as any).kennel?.name || 'Baia')}
                                     </h4>
                                     <p className="text-[10px] text-slate-500 font-bold uppercase">
-                                      Tipo: {kennel ? kennel.type : (occ.kennel?.type || 'N/A')}
+                                      Tipo: {kennel ? kennel.type : ((occ as any).kennel?.type || 'Acomodação')}
                                     </p>
                                   </div>
                                   <div className="flex items-center gap-1.5">

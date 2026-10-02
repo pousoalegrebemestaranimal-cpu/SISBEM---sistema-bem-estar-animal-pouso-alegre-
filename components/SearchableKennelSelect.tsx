@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Search, ChevronDown, Check, X, Home, Layers, Sparkles, AlertCircle } from 'lucide-react';
 import { Kennel, KennelOccupation, KennelType } from '../types';
-import { getAllActiveOccupations } from '../src/lib/supabaseQueries';
+import { getAllActiveOccupations, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 
 export interface KennelOption {
   id: string;
@@ -55,17 +55,24 @@ export const SearchableKennelSelect: React.FC<SearchableKennelSelectProps> = ({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
+  const kennelLookup = useMemo(() => {
+    return buildKennelCanonicalLookup(kennels);
+  }, [kennels]);
+
   // 1. Processa e filtra todas as baias que possuem vagas livres, em estrita ORDEM CRESCENTE
   const availableOptions = useMemo(() => {
     const activeOccs = getAllActiveOccupations(occupations);
     const options: KennelOption[] = [];
 
-    for (const k of kennels) {
+    for (const k of kennelLookup.canonicalKennels) {
       if (!k || !k.id || !k.name) continue;
       // Não exibe a baia atual onde o animal já está alocado
-      if (currentKennelId && k.id === currentKennelId) continue;
+      if (currentKennelId && kennelLookup.isSameKennel(k.id, currentKennelId)) continue;
 
-      const activeCount = activeOccs.filter(o => o.kennelId === k.id).length;
+      const activeCount = activeOccs.filter(o => {
+        const oid = o.kennelId || (o as any).kennel_id;
+        return kennelLookup.isSameKennel(oid, k.id);
+      }).length;
       const capacity = Number(k.capacity) || 1;
       const availableVacancies = capacity - activeCount;
 
@@ -92,7 +99,7 @@ export const SearchableKennelSelect: React.FC<SearchableKennelSelectProps> = ({
     return options.sort((a, b) => {
       return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
     });
-  }, [kennels, occupations, currentKennelId, recommendedType]);
+  }, [kennelLookup, occupations, currentKennelId, recommendedType]);
 
   // Setores disponíveis com contagem de baias livres
   const sectorsWithCounts = useMemo(() => {
@@ -125,8 +132,8 @@ export const SearchableKennelSelect: React.FC<SearchableKennelSelectProps> = ({
   // Identifica a baia atualmente selecionada para exibição
   const selectedKennel = useMemo(() => {
     if (!value) return null;
-    return kennels.find(k => k.id === value) || null;
-  }, [value, kennels]);
+    return kennelLookup.resolveKennel(value) || kennels.find(k => k.id === value) || null;
+  }, [value, kennels, kennelLookup]);
 
   // Vagas da baia selecionada
   const selectedVacancies = useMemo(() => {

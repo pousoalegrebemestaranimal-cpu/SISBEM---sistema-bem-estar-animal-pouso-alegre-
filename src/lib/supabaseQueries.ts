@@ -77,7 +77,7 @@ export function getAllActiveOccupations<T extends { exitDate?: string | null; en
 /**
  * Mapeia uma linha da tabela kennel_occupations do Supabase com join em kennels
  */
-function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Kennel } {
+export function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Kennel } {
   const kennelData: Kennel | undefined = r.kennels ? {
     id: r.kennels.id,
     name: r.kennels.name,
@@ -95,6 +95,69 @@ function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Ke
     clinicalRecordId: r.clinical_record_id || undefined,
     justification: r.justification || '',
     kennel: kennelData
+  };
+}
+
+/**
+ * Consulta todas as ocupações registradas no Supabase com join nas baias (kennels).
+ * Fonte canônica e oficial do sistema.
+ */
+export async function fetchAllOccupationsWithKennel(): Promise<Array<KennelOccupation & { kennel?: Kennel }>> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('kennel_occupations')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity)')
+      .order('entry_date', { ascending: false });
+
+    if (error || !rows) {
+      console.warn('fetchAllOccupationsWithKennel aviso:', error?.message);
+      return [];
+    }
+
+    return rows.map(mapRemoteOccupationWithKennel);
+  } catch (err) {
+    console.warn('Erro ao buscar todas ocupações no Supabase:', err);
+    return [];
+  }
+}
+
+/**
+ * Constrói índice inteligente de resolução canônica de baias,
+ * unificando UUIDs duplicados ou secundários de uma mesma baia (mesmo nome e setor).
+ * Garante que qualquer ocupação referenciando uma baia seja mapeada para sua baia canônica.
+ */
+export function buildKennelCanonicalLookup(allKennels: Kennel[]) {
+  const aliasToCanonical = new Map<string, Kennel>();
+  const canonicalKennels: Kennel[] = [];
+  const nameTypeToCanonical = new Map<string, Kennel>();
+
+  for (const k of allKennels) {
+    if (!k || !k.id || !k.name) continue;
+    const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
+    let canonical = nameTypeToCanonical.get(key);
+    if (!canonical) {
+      canonical = k;
+      nameTypeToCanonical.set(key, canonical);
+      canonicalKennels.push(canonical);
+    }
+    aliasToCanonical.set(k.id, canonical);
+  }
+
+  return {
+    aliasToCanonical,
+    canonicalKennels: canonicalKennels.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    resolveKennel: (kennelId?: string, attachedKennel?: Kennel): Kennel | undefined => {
+      if (!kennelId) return attachedKennel;
+      return aliasToCanonical.get(kennelId) || attachedKennel;
+    },
+    isSameKennel: (idA?: string, idB?: string): boolean => {
+      if (!idA || !idB) return false;
+      if (idA === idB) return true;
+      const canA = aliasToCanonical.get(idA);
+      const canB = aliasToCanonical.get(idB);
+      if (canA && canB && canA.id === canB.id) return true;
+      return false;
+    }
   };
 }
 

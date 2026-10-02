@@ -997,6 +997,7 @@ export async function allocateKennelInSupabase(allocation: {
 
       // 5. Atualização seletiva do cache local para este animal
       try {
+        moduleCacheTimestamps.occupations = 0;
         const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
         const updatedLocal = localOccs.map(o => {
           if (o.animalId === allocation.animalId && (!o.exitDate || String(o.exitDate).trim() === '' || o.exitDate === 'null')) {
@@ -1078,6 +1079,7 @@ export async function releaseKennelInSupabase(
 
     // 2. Atualização seletiva do cache local
     try {
+      moduleCacheTimestamps.occupations = 0;
       const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
       let changed = false;
       const updatedLocal = localOccs.map(o => {
