@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
-import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel } from '../../types';
-import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante } from './supabaseSync';
+import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, Prescription, Referral, ExamFile } from '../../types';
+import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante, mapSupabaseToRecord } from './supabaseSync';
 import { db } from '../../services/db';
 
 /**
@@ -75,14 +75,22 @@ export function getAllActiveOccupations<T extends { exitDate?: string | null; en
 }
 
 /**
- * Mapeia uma linha da tabela kennel_occupations do Supabase com join em kennels
+ * Mapeia uma linha da tabela kennel_occupations do Supabase com join em kennels e animals
  */
-export function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Kennel } {
+export function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any } {
   const kennelData: Kennel | undefined = r.kennels ? {
     id: r.kennels.id,
     name: r.kennels.name,
     type: r.kennels.type,
     capacity: Number(r.kennels.capacity) || 1
+  } : undefined;
+
+  const animalData = r.animals ? {
+    id: r.animals.id || r.animal_id,
+    nome: r.animals.nome,
+    especie: r.animals.especie,
+    condicao: r.animals.condicao,
+    temTutor: !!r.animals.tem_tutor
   } : undefined;
 
   return {
@@ -94,19 +102,21 @@ export function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kenn
     vetId: r.vet_id,
     clinicalRecordId: r.clinical_record_id || undefined,
     justification: r.justification || '',
-    kennel: kennelData
+    kennel: kennelData,
+    animal: animalData,
+    animals: animalData
   };
 }
 
 /**
- * Consulta todas as ocupações registradas no Supabase com join nas baias (kennels).
+ * Consulta todas as ocupações registradas no Supabase com join nas baias (kennels) e animais.
  * Fonte canônica e oficial do sistema.
  */
-export async function fetchAllOccupationsWithKennel(): Promise<Array<KennelOccupation & { kennel?: Kennel }>> {
+export async function fetchAllOccupationsWithKennel(): Promise<Array<KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any }>> {
   try {
     const { data: rows, error } = await supabase
       .from('kennel_occupations')
-      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity)')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity), animals (id, nome, especie, condicao, tem_tutor)')
       .order('entry_date', { ascending: false });
 
     if (error || !rows) {
@@ -122,16 +132,38 @@ export async function fetchAllOccupationsWithKennel(): Promise<Array<KennelOccup
 }
 
 /**
+ * Consulta todas as baias cadastradas no Supabase (incluindo registros com aliases/UUIDs históricos).
+ */
+export async function fetchAllKennelsFromSupabase(): Promise<Kennel[]> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('kennels')
+      .select('id, name, type, capacity');
+    if (error || !rows) return [];
+    return rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      type: r.type,
+      capacity: Number(r.capacity) || 1
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Constrói índice inteligente de resolução canônica de baias,
  * unificando UUIDs duplicados ou secundários de uma mesma baia (mesmo nome e setor).
  * Garante que qualquer ocupação referenciando uma baia seja mapeada para sua baia canônica.
  */
-export function buildKennelCanonicalLookup(allKennels: Kennel[]) {
+export function buildKennelCanonicalLookup(allKennels: Kennel[], extraKennels?: Array<Kennel | undefined>) {
   const aliasToCanonical = new Map<string, Kennel>();
   const canonicalKennels: Kennel[] = [];
   const nameTypeToCanonical = new Map<string, Kennel>();
 
-  for (const k of allKennels) {
+  const list = [...allKennels, ...(extraKennels || []).filter(Boolean) as Kennel[]];
+
+  for (const k of list) {
     if (!k || !k.id || !k.name) continue;
     const key = `${(k.type || '').trim().toLowerCase()}::${k.name.trim().toLowerCase()}`;
     let canonical = nameTypeToCanonical.get(key);
@@ -145,17 +177,29 @@ export function buildKennelCanonicalLookup(allKennels: Kennel[]) {
 
   return {
     aliasToCanonical,
+    nameTypeToCanonical,
     canonicalKennels: canonicalKennels.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
     resolveKennel: (kennelId?: string, attachedKennel?: Kennel): Kennel | undefined => {
-      if (!kennelId) return attachedKennel;
-      return aliasToCanonical.get(kennelId) || attachedKennel;
+      if (kennelId && aliasToCanonical.has(kennelId)) {
+        return aliasToCanonical.get(kennelId);
+      }
+      if (attachedKennel && attachedKennel.name) {
+        const key = `${(attachedKennel.type || '').trim().toLowerCase()}::${attachedKennel.name.trim().toLowerCase()}`;
+        if (nameTypeToCanonical.has(key)) {
+          return nameTypeToCanonical.get(key);
+        }
+      }
+      return attachedKennel;
     },
-    isSameKennel: (idA?: string, idB?: string): boolean => {
-      if (!idA || !idB) return false;
-      if (idA === idB) return true;
-      const canA = aliasToCanonical.get(idA);
-      const canB = aliasToCanonical.get(idB);
+    isSameKennel: (idA?: string, idB?: string, attachedA?: Kennel, attachedB?: Kennel): boolean => {
+      if (!idA && !idB) return false;
+      if (idA && idB && idA === idB) return true;
+      const canA = (idA && aliasToCanonical.get(idA)) || (attachedA?.name ? nameTypeToCanonical.get(`${(attachedA.type || '').trim().toLowerCase()}::${attachedA.name.trim().toLowerCase()}`) : undefined);
+      const canB = (idB && aliasToCanonical.get(idB)) || (attachedB?.name ? nameTypeToCanonical.get(`${(attachedB.type || '').trim().toLowerCase()}::${attachedB.name.trim().toLowerCase()}`) : undefined);
       if (canA && canB && canA.id === canB.id) return true;
+      if (canA && idB && canA.id === idB) return true;
+      if (idA && canB && idA === canB.id) return true;
+      if (canA && canB && canA.name.trim().toLowerCase() === canB.name.trim().toLowerCase() && canA.type === canB.type) return true;
       return false;
     }
   };
@@ -477,6 +521,161 @@ export async function fetchSolicitantesPaginated(params: FetchSolicitantesParams
 }
 
 /**
+ * Consulta todos os prontuários clínicos do animal diretamente no Supabase (Fonte Canônica)
+ * vinculando prescrições/receituários, encaminhamentos e laudos laboratoriais.
+ * Mescla com segurança com o cache local para não perder nenhum dado e atualiza o armazenamento offline.
+ */
+export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<ClinicalRecord[]> {
+  try {
+    // 1. Busca os registros clínicos do animal no Supabase
+    const { data: recordRows, error: recErr } = await supabase
+      .from('clinical_records')
+      .select('*')
+      .eq('animal_id', animalId)
+      .order('data_atendimento', { ascending: false });
+
+    // 2. Busca as prescrições do animal no Supabase
+    const { data: prescRows } = await supabase
+      .from('prescriptions')
+      .select('*')
+      .eq('animal_id', animalId)
+      .order('created_at', { ascending: false });
+
+    // 3. Busca encaminhamentos do animal no Supabase
+    const { data: refRows } = await supabase
+      .from('referrals')
+      .select('*')
+      .eq('animal_id', animalId)
+      .order('created_at', { ascending: false });
+
+    const recordIds = (recordRows || []).map(r => r.id);
+    let examRows: any[] = [];
+    if (recordIds.length > 0) {
+      try {
+        const { data: exams } = await supabase
+          .from('exam_files')
+          .select('*')
+          .in('prontuario_id', recordIds);
+        if (exams) examRows = exams;
+      } catch (_) {}
+    }
+
+    // 4. Mapeia registros do Supabase
+    const remoteRecords: ClinicalRecord[] = (recordRows || []).map(row => {
+      const recPrescriptions: Prescription[] = (prescRows || [])
+        .filter(p => {
+          if (p.prontuario_id && p.prontuario_id === row.id) return true;
+          if (!p.prontuario_id && recordRows?.length === 1) return true;
+          if (p.data_emissao && row.data_atendimento) {
+            const diff = Math.abs(new Date(p.data_emissao).getTime() - new Date(row.data_atendimento).getTime());
+            if (diff < 12 * 60 * 60 * 1000) return true;
+          }
+          return false;
+        })
+        .map(p => ({
+          id: p.id,
+          medicamento: p.medicamento,
+          dosagem: p.dosagem,
+          via: p.via,
+          frequencia: p.frequencia,
+          duracao: p.duracao,
+          observacoes: p.observacoes || '',
+          animalId: p.animal_id,
+          prontuarioId: p.prontuario_id || row.id,
+          veterinarioId: p.veterinario_id,
+          dataEmissao: p.data_emissao
+        }));
+
+      const recReferrals: Referral[] = (refRows || [])
+        .filter(rf => {
+          if (rf.prontuario_id && rf.prontuario_id === row.id) return true;
+          if (rf.local_sugerido && rf.local_sugerido.includes(`[PRONTUARIO:${row.id}]`)) return true;
+          if (!rf.prontuario_id && recordRows?.length === 1) return true;
+          if (rf.data_emissao && row.data_atendimento) {
+            const diff = Math.abs(new Date(rf.data_emissao).getTime() - new Date(row.data_atendimento).getTime());
+            if (diff < 12 * 60 * 60 * 1000) return true;
+          }
+          return false;
+        })
+        .map(rf => {
+          const cleanLocal = (rf.local_sugerido || '').replace(/\s*\[PRONTUARIO:[^\]]+\]\s*/g, '').trim();
+          return {
+            id: rf.id,
+            animalId: rf.animal_id,
+            veterinarioId: rf.veterinario_id,
+            especialidade: rf.especialidade,
+            motivo: rf.motivo,
+            localSugerido: cleanLocal,
+            urgencia: rf.urgencia as any,
+            dataEmissao: rf.data_emissao
+          };
+        });
+
+      const recExams: ExamFile[] = examRows
+        .filter(e => e.prontuario_id === row.id)
+        .map(e => ({
+          id: e.id,
+          prontuarioId: e.prontuario_id,
+          nomeExame: e.nome_exame,
+          arquivo: e.arquivo,
+          dataAnexo: e.data_anexo
+        }));
+
+      const base = mapSupabaseToRecord(row);
+      return {
+        ...base,
+        receitas: recPrescriptions,
+        encaminhamentos: recReferrals,
+        examesLaboratoriais: recExams
+      };
+    });
+
+    // 5. Mescla de forma segura com o cache local (sem apagar nem substituir registros existentes)
+    const localRecords = db.getRecords().filter(r => r.animalId === animalId);
+    const recordsMap = new Map<string, ClinicalRecord>();
+
+    // Primeiro insere os remotos
+    remoteRecords.forEach(r => recordsMap.set(r.id, r));
+
+    // Mescla com locais preservando receitas/encaminhamentos caso local tenha dados mais ricos
+    localRecords.forEach(lr => {
+      const existing = recordsMap.get(lr.id);
+      if (!existing) {
+        recordsMap.set(lr.id, lr);
+      } else {
+        const mergedReceitas = (existing.receitas && existing.receitas.length > 0) ? existing.receitas : (lr.receitas || []);
+        const mergedEnc = (existing.encaminhamentos && existing.encaminhamentos.length > 0) ? existing.encaminhamentos : (lr.encaminhamentos || []);
+        const mergedExams = (existing.examesLaboratoriais && existing.examesLaboratoriais.length > 0) ? existing.examesLaboratoriais : (lr.examesLaboratoriais || []);
+        recordsMap.set(lr.id, {
+          ...lr,
+          ...existing,
+          receitas: mergedReceitas,
+          encaminhamentos: mergedEnc,
+          examesLaboratoriais: mergedExams
+        });
+      }
+    });
+
+    const finalRecords = Array.from(recordsMap.values())
+      .filter(r => !r.inativo)
+      .sort((a, b) => new Date(b.dataAtendimento).getTime() - new Date(a.dataAtendimento).getTime());
+
+    // Atualiza pontualmente o cache local de records deste animal
+    try {
+      const allLocal = db.getRecords();
+      const otherRecords = allLocal.filter(r => r.animalId !== animalId);
+      const newAllRecords = [...otherRecords, ...finalRecords];
+      localStorage.setItem('sisbem_records', JSON.stringify(newAllRecords));
+    } catch (_) {}
+
+    return finalRecords;
+  } catch (err) {
+    console.warn('Erro ao consultar prontuários no Supabase:', err);
+    return db.getRecords().filter(r => r.animalId === animalId && !r.inativo);
+  }
+}
+
+/**
  * Busca os dados de um animal específico diretamente no Supabase por ID com relacionamentos.
  * Usado para abrir a ficha completa mesmo que o animal não esteja no cache local recente.
  */
@@ -494,16 +693,18 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
     const solicitantes = db.getSolicitantes();
     const tutores = db.getTutores();
     const users = db.getUsers();
-    const records = db.getRecords();
     const logs = db.getStatusLogs();
     const kennels = db.getKennels();
     const cirurgias = db.getCirurgias();
 
-    // 1. Busca ocupações do animal diretamente no Supabase (fonte oficial)
+    // 1. Busca prontuários clínicos completos no Supabase (Fonte Canônica Oficial)
+    const animalRecords = await fetchClinicalRecordsByAnimalId(id);
+
+    // 2. Busca ocupações do animal diretamente no Supabase (fonte oficial)
     const remoteOccs = await fetchOccupationsByAnimalId(id);
     const activeOcc = getActiveOccupation(remoteOccs) || getActiveOccupation(db.getOccupations(), animal.id);
 
-    // 2. Se obteve dados do Supabase, sincroniza pontualmente o cache local deste animal
+    // 3. Se obteve dados do Supabase, sincroniza pontualmente o cache local deste animal
     if (remoteOccs && remoteOccs.length > 0) {
       try {
         const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
@@ -516,7 +717,7 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
 
     const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id);
 
-    // 3. Resolve a baia da ocupação ativa (prioriza o join do Supabase, fallback para db.getKennels())
+    // 4. Resolve a baia da ocupação ativa (prioriza o join do Supabase, fallback para db.getKennels())
     const resolvedKennel = activeOcc?.kennel || (activeOcc ? kennels.find(k => k.id === activeOcc.kennelId) : undefined);
 
     return {
@@ -524,7 +725,7 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
       solicitante: solicitantes.find(s => s.id === animal.solicitanteId),
       tutor: animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined,
       usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
-      historico: records.filter(r => r.animalId === animal.id && !r.inativo),
+      historico: animalRecords,
       statusLogs: logs.filter(l => l.animalId === animal.id),
       currentOccupation: activeOcc ? { ...activeOcc, kennel: resolvedKennel } : undefined,
       cirurgias: animalCirurgias

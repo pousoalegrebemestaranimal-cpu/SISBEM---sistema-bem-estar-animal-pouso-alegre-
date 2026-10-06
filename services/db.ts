@@ -23,7 +23,7 @@ import {
   pullFromSupabaseToLocal
 } from '../src/lib/supabaseSync';
 import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal, sanitizeCredentialsFromLocalStorage } from '../src/lib/safeStorage';
-import { isOccupationActive, getActiveOccupation, getAllActiveOccupations } from '../src/lib/supabaseQueries';
+import { isOccupationActive, getActiveOccupation, getAllActiveOccupations, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { authenticateWithSupabase, supabase } from '../src/lib/supabase';
 
 const KEYS = {
@@ -1411,12 +1411,14 @@ export const db = {
     const occupations = db.getOccupations();
     const kennels = db.getKennels();
     const cirurgias = db.getCirurgias();
+    const extraKennels = occupations.map(o => (o as any).kennel).filter(Boolean);
+    const kennelLookup = buildKennelCanonicalLookup(kennels, extraKennels);
 
     return animals.map(animal => {
       const currentOcc = getActiveOccupation(occupations, animal.id);
       const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id).sort((a, b) => new Date(b.dataAgendada).getTime() - new Date(a.dataAgendada).getTime());
       const activeCirurgia = animalCirurgias.find(c => c.status === CirurgiaStatus.AGENDADA || c.status === CirurgiaStatus.EM_PREPARO);
-      const matchedKennel = currentOcc ? (kennels.find(k => k.id === currentOcc.kennelId) || (currentOcc as any).kennel) : undefined;
+      const matchedKennel = currentOcc ? (kennelLookup.resolveKennel(currentOcc.kennelId, (currentOcc as any).kennel) || kennels.find(k => k.id === currentOcc.kennelId) || (currentOcc as any).kennel) : undefined;
 
       return {
         ...animal,
@@ -1435,8 +1437,13 @@ export const db = {
   allocateAnimal: (allocation: Omit<KennelOccupation, 'id' | 'entryDate'>) => {
     const occupations = db.getOccupations();
     const kennels = db.getKennels();
-    const active = occupations.filter(o => o.kennelId === allocation.kennelId && isOccupationActive(o));
-    const kennel = kennels.find(k => k.id === allocation.kennelId);
+    const extraKennels = occupations.map(o => (o as any).kennel).filter(Boolean);
+    const lookup = buildKennelCanonicalLookup(kennels, extraKennels);
+    const canonicalTarget = lookup.resolveKennel(allocation.kennelId);
+    const targetKennelId = canonicalTarget?.id || allocation.kennelId;
+
+    const active = occupations.filter(o => lookup.isSameKennel(o.kennelId, targetKennelId, (o as any).kennel) && isOccupationActive(o));
+    const kennel = canonicalTarget || kennels.find(k => k.id === targetKennelId);
 
     if (!kennel) throw new Error("Baia não encontrada.");
     if (active.length >= kennel.capacity) throw new Error("Capacidade máxima da baia atingida.");
@@ -1451,15 +1458,17 @@ export const db = {
 
     const newOcc: KennelOccupation = {
       ...allocation,
+      kennelId: targetKennelId,
       id: crypto.randomUUID(),
-      entryDate: now
+      entryDate: now,
+      kennel: kennel
     };
 
     occupations.push(newOcc);
     localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
 
     allocateKennelInSupabase({
-      kennelId: allocation.kennelId,
+      kennelId: targetKennelId,
       animalId: allocation.animalId,
       vetId: allocation.vetId,
       justification: allocation.justification,
@@ -1477,14 +1486,14 @@ export const db = {
   },
 
   allocateAnimalAsync: async (allocation: Omit<KennelOccupation, 'id' | 'entryDate'>) => {
+    const kennels = db.getKennels();
+    const canonicalTarget = buildKennelCanonicalLookup(kennels).resolveKennel(allocation.kennelId);
+    const targetKennelId = canonicalTarget?.id || allocation.kennelId;
+    const cleanAllocation = { ...allocation, kennelId: targetKennelId };
+
     // 1. Tentar alocação primária no Supabase (autoritativo)
     try {
-      const res = await allocateKennelInSupabase({
-        kennelId: allocation.kennelId,
-        animalId: allocation.animalId,
-        vetId: allocation.vetId,
-        justification: allocation.justification
-      });
+      const res = await allocateKennelInSupabase(cleanAllocation);
       if (res.success && res.occupation) {
         return res.occupation;
       }
@@ -1493,7 +1502,7 @@ export const db = {
     }
 
     // 2. Fallback local
-    return db.allocateAnimal(allocation);
+    return db.allocateAnimal(cleanAllocation);
   },
 
   releaseAnimalFromKennel: (animalId: string, releaseJustification?: string) => {
@@ -2020,6 +2029,14 @@ export const db = {
         prontuarioId: r.prontuarioId || recordId,
         animalId: r.animalId || animalId,
         veterinarioId: r.veterinarioId || vetId
+      }));
+    }
+
+    if (newRecord.encaminhamentos && newRecord.encaminhamentos.length > 0) {
+      newRecord.encaminhamentos = newRecord.encaminhamentos.map(e => ({
+        ...e,
+        animalId: e.animalId || animalId,
+        veterinarioId: e.veterinarioId || vetId
       }));
     }
 

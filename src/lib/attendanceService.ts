@@ -425,16 +425,22 @@ export async function finishClinicalAttendance(
   }
 
   const recordId = record.id || crypto.randomUUID();
-  const fullRecord = {
-    ...record,
+  const fullRecord: ClinicalRecord = {
+    ...record as ClinicalRecord,
     id: recordId,
+    animalId: record.animalId!,
     veterinarioId: vetId,
     dataAtendimento: record.dataAtendimento || new Date().toISOString(),
+    receitas: (prescriptions && prescriptions.length > 0) ? prescriptions : (record.receitas || []),
+    encaminhamentos: record.encaminhamentos || [],
+    examesLaboratoriais: record.examesLaboratoriais || []
   };
 
   const payload = {
     record: fullRecord,
-    prescriptions: prescriptions || [],
+    prescriptions: fullRecord.receitas,
+    referrals: fullRecord.encaminhamentos,
+    examFiles: fullRecord.examesLaboratoriais
   };
 
   let serverResponse: any = null;
@@ -455,14 +461,16 @@ export async function finishClinicalAttendance(
       // Fallback para Supabase se o endpoint Express não estiver ativo (ex: Vercel)
       try {
         const { supabase } = await import('./supabase');
-        const { mapRecordToSupabase } = await import('./supabaseSync');
+        const { syncRecordToSupabase } = await import('./supabaseSync');
         const resStatus = fullRecord.statusResultante || AnimalCondicao.EM_TRATAMENTO;
-        const recordPayload = mapRecordToSupabase(fullRecord as ClinicalRecord);
-        await supabase.from('clinical_records').upsert(recordPayload);
+        await syncRecordToSupabase(fullRecord as ClinicalRecord);
         await supabase.from('animals').update({
           condicao: resStatus,
           em_atendimento_vet_id: null,
           em_atendimento_inicio: null,
+          necessita_internacao: fullRecord.necessitaInternacao ?? false,
+          tipo_acomodacao_sugerida: fullRecord.recommendedKennelType || null,
+          justificativa_internacao: fullRecord.accommodationJustification || null,
         }).eq('id', record.animalId);
         serverResponse = {
           success: true,
@@ -483,14 +491,16 @@ export async function finishClinicalAttendance(
     // Fallback para Supabase em caso de erro de rede ou rota inexistente
     try {
       const { supabase } = await import('./supabase');
-      const { mapRecordToSupabase } = await import('./supabaseSync');
+      const { syncRecordToSupabase } = await import('./supabaseSync');
       const resStatus = fullRecord.statusResultante || AnimalCondicao.EM_TRATAMENTO;
-      const recordPayload = mapRecordToSupabase(fullRecord as ClinicalRecord);
-      await supabase.from('clinical_records').upsert(recordPayload);
+      await syncRecordToSupabase(fullRecord as ClinicalRecord);
       await supabase.from('animals').update({
         condicao: resStatus,
         em_atendimento_vet_id: null,
         em_atendimento_inicio: null,
+        necessita_internacao: fullRecord.necessitaInternacao ?? false,
+        tipo_acomodacao_sugerida: fullRecord.recommendedKennelType || null,
+        justificativa_internacao: fullRecord.accommodationJustification || null,
       }).eq('id', record.animalId);
       serverResponse = {
         success: true,

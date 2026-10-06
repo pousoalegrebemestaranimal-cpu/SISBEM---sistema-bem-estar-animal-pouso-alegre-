@@ -12,7 +12,7 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
-import { isOccupationActive, getAllActiveOccupations, fetchAllOccupationsWithKennel, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
+import { isOccupationActive, getAllActiveOccupations, fetchAllOccupationsWithKennel, buildKennelCanonicalLookup, fetchAllKennelsFromSupabase } from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
@@ -118,6 +118,8 @@ const AccommodationDashboard: React.FC = () => {
   // Busca todas as baias brutas do cache para unificar qualquer alias/duplicidade de UUID
   const rawKennels: Kennel[] = useMemo(() => {
     try {
+      const rawStored = JSON.parse(localStorage.getItem('sisbem_raw_kennels') || '[]');
+      if (Array.isArray(rawStored) && rawStored.length > 0) return rawStored;
       const stored = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
       if (Array.isArray(stored) && stored.length > 0) return stored;
     } catch (e) {}
@@ -125,19 +127,27 @@ const AccommodationDashboard: React.FC = () => {
   }, [kennels]);
 
   const kennelLookup = useMemo(() => {
-    return buildKennelCanonicalLookup(rawKennels.length > 0 ? rawKennels : kennels);
-  }, [rawKennels, kennels]);
+    const extraKennels = occupations.map(o => (o as any).kennel).filter(Boolean);
+    return buildKennelCanonicalLookup(rawKennels.length > 0 ? rawKennels : kennels, extraKennels);
+  }, [rawKennels, kennels, occupations]);
 
   // Lista canônica de baias deduplicadas
   const uniqueKennels = kennelLookup.canonicalKennels;
 
-  // Busca ocupações oficiais diretamente no Supabase com join em kennels
+  // Busca ocupações oficiais diretamente no Supabase com join em kennels e animals, e todas as baias
   const fetchOfficialOccupations = async () => {
     try {
-      const rem = await fetchAllOccupationsWithKennel();
+      const [rem, remKennels] = await Promise.all([
+        fetchAllOccupationsWithKennel(),
+        fetchAllKennelsFromSupabase()
+      ]);
       if (rem && rem.length > 0) {
         setOccupations(rem);
         localStorage.setItem('sisbem_occupations', JSON.stringify(rem));
+      }
+      if (remKennels && remKennels.length > 0) {
+        setKennels(remKennels);
+        localStorage.setItem('sisbem_raw_kennels', JSON.stringify(remKennels));
       }
     } catch (err) {
       console.warn('Aviso ao carregar ocupações oficiais:', err);
@@ -224,9 +234,29 @@ const AccommodationDashboard: React.FC = () => {
   const getKennelData = (kennelId: string) => {
     const activeOccs = getAllActiveOccupations(occupations).filter(o => {
       const oid = o.kennelId || (o as any).kennel_id;
-      return kennelLookup.isSameKennel(oid, kennelId);
+      return kennelLookup.isSameKennel(oid, kennelId, (o as any).kennel);
     });
-    const occupants = activeOccs.map(o => allAnimals.find(a => a.id === o.animalId)).filter(Boolean) as AnimalJoined[];
+    const occupants = activeOccs.map(o => {
+      const found = allAnimals.find(a => a.id === o.animalId);
+      if (found) return found;
+      const remoteAnimal = (o as any).animals || (o as any).animal;
+      if (remoteAnimal && remoteAnimal.nome) {
+        return {
+          id: o.animalId,
+          nome: remoteAnimal.nome,
+          especie: remoteAnimal.especie || 'Cão',
+          condicao: remoteAnimal.condicao || AnimalCondicao.EM_TRATAMENTO,
+          temTutor: !!remoteAnimal.tem_tutor
+        } as AnimalJoined;
+      }
+      return {
+        id: o.animalId,
+        nome: `Animal (${o.animalId.slice(0, 8)})`,
+        especie: 'Cão',
+        condicao: AnimalCondicao.EM_TRATAMENTO,
+        temTutor: false
+      } as AnimalJoined;
+    });
     return { count: activeOccs.length, occupants, activeOccs };
   };
 
@@ -246,7 +276,7 @@ const AccommodationDashboard: React.FC = () => {
       const typeKennels = uniqueKennels.filter(k => k.type === type);
       const typeOccupations = activeOccs.filter(o => {
         const oid = o.kennelId || (o as any).kennel_id;
-        return typeKennels.some(k => kennelLookup.isSameKennel(k.id, oid));
+        return typeKennels.some(k => kennelLookup.isSameKennel(k.id, oid, undefined, (o as any).kennel));
       });
       const totalCapacity = typeKennels.reduce((acc, k) => acc + (k.capacity || 1), 0);
       return {

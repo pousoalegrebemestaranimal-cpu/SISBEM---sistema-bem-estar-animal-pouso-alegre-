@@ -20,7 +20,7 @@ import {
   CirurgiaStatus,
   CirurgiaPrioridade
 } from '../../types';
-import { isOccupationActive } from './supabaseQueries';
+import { isOccupationActive, mapRemoteOccupationWithKennel } from './supabaseQueries';
 
 export interface SyncStats {
   lastSyncAt: string | null;
@@ -331,16 +331,28 @@ export function mapOccupationToSupabase(occ: KennelOccupation) {
   };
 }
 
-export function mapSupabaseToOccupation(row: any): KennelOccupation {
+export function mapSupabaseToOccupation(row: any): KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any } {
+  const kennelData = row.kennels ? {
+    id: row.kennels.id,
+    name: row.kennels.name,
+    type: row.kennels.type,
+    capacity: Number(row.kennels.capacity) || 1
+  } : (row.kennel || undefined);
+
+  const animalData = row.animals || row.animal || undefined;
+
   return {
     id: row.id,
-    kennelId: row.kennel_id,
-    animalId: row.animal_id,
-    entryDate: row.entry_date,
-    exitDate: row.exit_date || undefined,
-    vetId: row.vet_id,
-    clinicalRecordId: row.clinical_record_id || undefined,
+    kennelId: row.kennel_id || row.kennelId,
+    animalId: row.animal_id || row.animalId,
+    entryDate: row.entry_date || row.entryDate,
+    exitDate: row.exit_date !== undefined ? (row.exit_date || undefined) : row.exitDate,
+    vetId: row.vet_id || row.vetId,
+    clinicalRecordId: row.clinical_record_id !== undefined ? (row.clinical_record_id || undefined) : row.clinicalRecordId,
     justification: row.justification,
+    kennel: kennelData,
+    animal: animalData,
+    animals: animalData
   };
 }
 
@@ -734,6 +746,71 @@ export async function syncRecordToSupabase(record: ClinicalRecord) {
       console.warn('Supabase syncRecord error:', error.message);
       return false;
     }
+
+    // Sincroniza prescrições vinculadas ao prontuário
+    if (record.receitas && record.receitas.length > 0) {
+      try {
+        const prescPayload = record.receitas.map(p => ({
+          id: p.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `p-${Date.now()}-${Math.random()}`),
+          animal_id: record.animalId,
+          prontuario_id: record.id,
+          veterinario_id: cleanString(record.veterinarioId) || cleanString(p.veterinarioId) || '1',
+          medicamento: cleanString(p.medicamento) || 'Medicamento',
+          dosagem: cleanString(p.dosagem) || '',
+          via: cleanString(p.via) || 'Oral',
+          frequencia: cleanString(p.frequencia) || '',
+          duracao: cleanString(p.duracao) || '',
+          observacoes: cleanString(p.observacoes),
+          data_emissao: cleanString(p.dataEmissao) || cleanString(record.dataAtendimento) || new Date().toISOString()
+        }));
+        await supabase.from('prescriptions').upsert(prescPayload);
+      } catch (pErr) {
+        console.warn('Aviso ao sincronizar prescrições no Supabase:', pErr);
+      }
+    }
+
+    // Sincroniza encaminhamentos vinculados ao prontuário e ao animal
+    if (record.encaminhamentos && record.encaminhamentos.length > 0) {
+      try {
+        const refPayload = record.encaminhamentos.map(r => {
+          const rawLocal = cleanString(r.localSugerido) || '';
+          const localWithTag = rawLocal.includes('[PRONTUARIO:')
+            ? rawLocal
+            : (rawLocal ? `${rawLocal} [PRONTUARIO:${record.id}]` : `[PRONTUARIO:${record.id}]`);
+
+          return {
+            id: r.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ref-${Date.now()}-${Math.random()}`),
+            animal_id: record.animalId,
+            veterinario_id: cleanString(record.veterinarioId) || cleanString(r.veterinarioId) || '1',
+            especialidade: cleanString(r.especialidade) || 'Geral',
+            motivo: cleanString(r.motivo) || '',
+            local_sugerido: localWithTag,
+            urgencia: r.urgencia || 'MEDIA',
+            data_emissao: cleanString(r.dataEmissao) || cleanString(record.dataAtendimento) || new Date().toISOString()
+          };
+        });
+        await supabase.from('referrals').upsert(refPayload);
+      } catch (rfErr) {
+        console.warn('Aviso ao sincronizar encaminhamentos no Supabase:', rfErr);
+      }
+    }
+
+    // Sincroniza exames laboratoriais anexados
+    if (record.examesLaboratoriais && record.examesLaboratoriais.length > 0) {
+      try {
+        const examPayload = record.examesLaboratoriais.map(e => ({
+          id: e.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ex-${Date.now()}-${Math.random()}`),
+          prontuario_id: record.id,
+          nome_exame: cleanString(e.nomeExame) || 'Exame',
+          arquivo: e.arquivo,
+          data_anexo: cleanString(e.dataAnexo) || new Date().toISOString()
+        }));
+        await supabase.from('exam_files').upsert(examPayload);
+      } catch (eErr) {
+        console.warn('Aviso ao sincronizar exames laboratoriais no Supabase:', eErr);
+      }
+    }
+
     return true;
   } catch (err) {
     return false;
@@ -742,6 +819,8 @@ export async function syncRecordToSupabase(record: ClinicalRecord) {
 
 export async function deleteRecordFromSupabase(id: string) {
   try {
+    await supabase.from('prescriptions').delete().eq('prontuario_id', id);
+    await supabase.from('exam_files').delete().eq('prontuario_id', id);
     await supabase.from('clinical_records').delete().eq('id', id);
     return true;
   } catch (err) {
@@ -1362,7 +1441,7 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
   }
 }
 
-export type SyncModule = 'animals' | 'solicitantes' | 'tutores' | 'surgeries' | 'users' | 'kennels' | 'occupations' | 'configs';
+export type SyncModule = 'animals' | 'solicitantes' | 'tutores' | 'surgeries' | 'users' | 'kennels' | 'occupations' | 'configs' | 'clinical_records';
 
 export interface PullOptions {
   modules?: SyncModule[];
@@ -1406,7 +1485,8 @@ export async function pullFromSupabaseToLocal(
         'surgeries',
         'users',
         'kennels',
-        'occupations'
+        'occupations',
+        'clinical_records'
       ];
 
       const shouldSync = (mod: SyncModule) => {
@@ -1498,8 +1578,15 @@ export async function pullFromSupabaseToLocal(
 
         if (!animErr && remAnimals && remAnimals.length > 0) {
           const mapped = remAnimals.map(mapSupabaseToAnimal);
-          safeSetLocalAnimals(mapped);
-          syncedCounts.animals = mapped.length;
+          const localAnimals: Animal[] = (dbInstance && typeof dbInstance.getAnimals === 'function')
+            ? dbInstance.getAnimals()
+            : JSON.parse(localStorage.getItem('sisbem_animals') || '[]');
+          const animMap = new Map<string, Animal>();
+          localAnimals.forEach((a: Animal) => animMap.set(a.id, a));
+          mapped.forEach((a: Animal) => animMap.set(a.id, a));
+          const merged = Array.from(animMap.values());
+          safeSetLocalAnimals(merged);
+          syncedCounts.animals = merged.length;
 
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
@@ -1578,6 +1665,7 @@ export async function pullFromSupabaseToLocal(
               merged.push(k);
             }
           }
+          localStorage.setItem('sisbem_raw_kennels', JSON.stringify(raw));
           localStorage.setItem('sisbem_kennels', JSON.stringify(merged));
           syncedCounts.kennels = merged.length;
           if (typeof window !== 'undefined') {
@@ -1590,11 +1678,11 @@ export async function pullFromSupabaseToLocal(
         moduleCacheTimestamps.kennels = now;
       }
 
-      // 7. Ocupações de Baias (apenas colunas necessárias, sem SELECT *)
+      // 7. Ocupações de Baias (com join em kennels e animals para garantir integridade e metadados)
       if (shouldSync('occupations')) {
         const { data: remOccs } = await supabase
           .from('kennel_occupations')
-          .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification');
+          .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity), animals (id, nome, especie, condicao, tem_tutor)');
 
         if (remOccs) {
           const localOccs = (dbInstance && typeof dbInstance.getOccupations === 'function')
@@ -1602,7 +1690,7 @@ export async function pullFromSupabaseToLocal(
             : JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
           const map = new Map<string, KennelOccupation>();
           localOccs.forEach((o: KennelOccupation) => map.set(o.id, o));
-          remOccs.forEach((r: any) => map.set(r.id, mapSupabaseToOccupation(r)));
+          remOccs.forEach((r: any) => map.set(r.id, mapRemoteOccupationWithKennel(r)));
           const merged = Array.from(map.values());
           localStorage.setItem('sisbem_occupations', JSON.stringify(merged));
           syncedCounts.occupations = merged.length;
@@ -1615,6 +1703,49 @@ export async function pullFromSupabaseToLocal(
           }
         }
         moduleCacheTimestamps.occupations = now;
+      }
+
+      // 8. Prontuários Clínicos (Histórico Permanente do SISBEM)
+      if (shouldSync('clinical_records')) {
+        const { data: remRecords } = await supabase
+          .from('clinical_records')
+          .select('*')
+          .order('data_atendimento', { ascending: false })
+          .limit(200);
+
+        if (remRecords && remRecords.length > 0) {
+          const localRecords = (dbInstance && typeof dbInstance.getRecords === 'function')
+            ? dbInstance.getRecords()
+            : JSON.parse(localStorage.getItem('sisbem_records') || '[]');
+          const map = new Map<string, ClinicalRecord>();
+          localRecords.forEach((r: ClinicalRecord) => map.set(r.id, r));
+
+          remRecords.forEach((r: any) => {
+            const mapped = mapSupabaseToRecord(r);
+            const existing = map.get(r.id);
+            if (existing) {
+              map.set(r.id, {
+                ...mapped,
+                receitas: (existing.receitas && existing.receitas.length > 0) ? existing.receitas : mapped.receitas,
+                encaminhamentos: (existing.encaminhamentos && existing.encaminhamentos.length > 0) ? existing.encaminhamentos : mapped.encaminhamentos,
+                examesLaboratoriais: (existing.examesLaboratoriais && existing.examesLaboratoriais.length > 0) ? existing.examesLaboratoriais : mapped.examesLaboratoriais,
+              });
+            } else {
+              map.set(r.id, mapped);
+            }
+          });
+
+          const merged = Array.from(map.values());
+          localStorage.setItem('sisbem_records', JSON.stringify(merged));
+          syncedCounts.records = merged.length;
+
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('sisbem-records-changed', {
+              detail: { source: 'supabase-pull', count: merged.length }
+            }));
+          }
+        }
+        moduleCacheTimestamps.clinical_records = now;
       }
 
       return { success: true, syncedCounts };
@@ -1769,8 +1900,17 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
             if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
               const mapped = mapSupabaseToOccupation(payload.new);
               const idx = list.findIndex(o => o.id === mapped.id);
-              if (idx > -1) list[idx] = mapped;
-              else list.push(mapped);
+              if (idx > -1) {
+                const existing = list[idx] as any;
+                list[idx] = {
+                  ...mapped,
+                  kennel: mapped.kennel || existing.kennel,
+                  animal: mapped.animal || existing.animal,
+                  animals: mapped.animals || existing.animals
+                };
+              } else {
+                list.push(mapped);
+              }
               localStorage.setItem('sisbem_occupations', JSON.stringify(list));
             } else if (payload.eventType === 'DELETE') {
               const deletedId = payload.old?.id;

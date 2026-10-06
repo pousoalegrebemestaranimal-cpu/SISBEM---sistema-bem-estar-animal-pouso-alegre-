@@ -56,8 +56,9 @@ export const SearchableKennelSelect: React.FC<SearchableKennelSelectProps> = ({
   const listRef = useRef<HTMLDivElement>(null);
 
   const kennelLookup = useMemo(() => {
-    return buildKennelCanonicalLookup(kennels);
-  }, [kennels]);
+    const extra = (occupations || []).map(o => (o as any).kennel).filter(Boolean) as Kennel[];
+    return buildKennelCanonicalLookup(kennels, extra);
+  }, [kennels, occupations]);
 
   // 1. Processa e filtra todas as baias que possuem vagas livres, em estrita ORDEM CRESCENTE
   const availableOptions = useMemo(() => {
@@ -71,7 +72,7 @@ export const SearchableKennelSelect: React.FC<SearchableKennelSelectProps> = ({
 
       const activeCount = activeOccs.filter(o => {
         const oid = o.kennelId || (o as any).kennel_id;
-        return kennelLookup.isSameKennel(oid, k.id);
+        return kennelLookup.isSameKennel(oid, k.id, (o as any).kennel);
       }).length;
       const capacity = Number(k.capacity) || 1;
       const availableVacancies = capacity - activeCount;

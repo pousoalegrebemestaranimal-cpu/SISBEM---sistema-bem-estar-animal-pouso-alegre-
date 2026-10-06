@@ -8,7 +8,8 @@ import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
   ArrowLeft, Dog, User, Clipboard, FileText, Heart, 
-  Stethoscope, Clock, MapPin, Scale, Calendar, Info, Plus, History, Phone, ShieldCheck, Pill, Skull, AlertTriangle, Leaf, Home, ArrowRightLeft, CheckCircle2, Activity, ArrowRight, UserCheck, Share2, Thermometer, Droplets, HeartPulse, Wind, Microscope, Syringe, Palette, IdCard, Eye, Camera, FlaskConical, ExternalLink, FileSearch, X, FileBadge2, MessageSquare, BriefcaseMedical, Zap, FileType, HeartHandshake, Save, Printer, Ambulance, UserCircle, ClipboardCheck, LogOut, Cpu, QrCode, HelpCircle, Scissors, XCircle, Check
+  Stethoscope, Clock, MapPin, Scale, Calendar, Info, Plus, History, Phone, ShieldCheck, Pill, Skull, AlertTriangle, Leaf, Home, ArrowRightLeft, CheckCircle2, Activity, ArrowRight, UserCheck, Share2, Thermometer, Droplets, HeartPulse, Wind, Microscope, Syringe, Palette, IdCard, Eye, Camera, FlaskConical, ExternalLink, FileSearch, X, FileBadge2, MessageSquare, BriefcaseMedical, Zap, FileType, HeartHandshake, Save, Printer, Ambulance, UserCircle, ClipboardCheck, LogOut, Cpu, QrCode, HelpCircle, Scissors, XCircle, Check,
+  ChevronDown, ChevronUp, ChevronsUpDown
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
@@ -187,15 +188,18 @@ const AnimalDetail: React.FC = () => {
 
   const rawKennels = useMemo(() => {
     try {
+      const rawStored = JSON.parse(localStorage.getItem('sisbem_raw_kennels') || '[]');
+      if (Array.isArray(rawStored) && rawStored.length > 0) return rawStored;
       const stored = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
       if (Array.isArray(stored) && stored.length > 0) return stored;
     } catch (e) {}
     return db.getKennels();
-  }, []);
+  }, [occupations]);
 
   const kennelLookup = useMemo(() => {
-    return buildKennelCanonicalLookup(rawKennels);
-  }, [rawKennels]);
+    const extra = [activeOccupation?.kennel, animal?.currentOccupation?.kennel, ...(occupations || []).map(o => (o as any).kennel)].filter(Boolean) as Kennel[];
+    return buildKennelCanonicalLookup(rawKennels, extra);
+  }, [rawKennels, activeOccupation, animal?.currentOccupation, occupations]);
 
   const activeKennel = useMemo(() => {
     if (!activeOccupation) return null;
@@ -254,6 +258,31 @@ const AnimalDetail: React.FC = () => {
       new Date(b.dataAtendimento).getTime() - new Date(a.dataAtendimento).getTime()
     );
   }, [animal]);
+
+  const [expandedRecordIds, setExpandedRecordIds] = useState<Record<string, boolean>>({});
+
+  const isRecordExpanded = (recordId: string, index: number) => {
+    if (expandedRecordIds[recordId] !== undefined) {
+      return expandedRecordIds[recordId];
+    }
+    return index === 0; // Mais recente expandido por padrão
+  };
+
+  const toggleRecordExpand = (recordId: string, index: number) => {
+    const current = isRecordExpanded(recordId, index);
+    setExpandedRecordIds(prev => ({
+      ...prev,
+      [recordId]: !current
+    }));
+  };
+
+  const toggleAllRecords = (expand: boolean) => {
+    const next: Record<string, boolean> = {};
+    historicoOrdenado.forEach(r => {
+      next[r.id] = expand;
+    });
+    setExpandedRecordIds(next);
+  };
 
   const todasReceitas = useMemo(() => {
     if (!animal?.historico) return [];
@@ -1692,89 +1721,398 @@ const AnimalDetail: React.FC = () => {
 
             {activeTab === 'historico' && (
               <div className="space-y-6">
-                {historicoOrdenado.length > 0 ? historicoOrdenado.map((record, index) => (
-                  <div key={record.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in slide-in-from-top-4" style={{ animationDelay: `${index * 100}ms` }}>
-                    <div className="p-4 bg-slate-50 border-b border-slate-100 flex flex-col md:flex-row justify-between md:items-center gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-teal-600 text-white rounded-lg"><Clipboard size={18} /></div>
-                        <div>
-                          <p className="text-xs font-black text-slate-900 uppercase">Atendimento em {format(new Date(record.dataAtendimento), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}</p>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1.5"><User size={10} /> Veterinário(a): {db.getUsers().find(u => u.id === record.veterinarioId)?.name || 'Responsável'}</p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-black bg-white border border-slate-200 text-slate-400 px-2 py-1 rounded uppercase">Peso: {record.peso}kg</span>
-                        {record.v10Aplicada && <span className="text-[9px] font-black bg-teal-100 text-teal-700 px-2 py-1 rounded uppercase border border-teal-200 shadow-sm">V10</span>}
-                        {record.antirrabicaAplicada && <span className="text-[9px] font-black bg-indigo-100 text-indigo-700 px-2 py-1 rounded uppercase border border-indigo-200 shadow-sm">Antirrábica</span>}
-                        {record.vermifugoAplicado && <span className="text-[9px] font-black bg-amber-100 text-amber-700 px-2 py-1 rounded uppercase border border-amber-200 shadow-sm">Vermífugo</span>}
-                        {record.microchipAplicado && <span className="text-[9px] font-black bg-teal-100 text-teal-800 px-2 py-1 rounded uppercase border border-teal-200 shadow-sm flex items-center gap-1 font-mono"><Cpu size={10} /> Chip: {record.numeroMicrochipAplicado || 'Sim'}</span>}
-                      </div>
+                {historicoOrdenado.length > 0 && (
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                    <div>
+                      <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                        <History size={18} className="text-teal-600" /> Prontuário Clínico Permanente ({historicoOrdenado.length} {historicoOrdenado.length === 1 ? 'atendimento' : 'atendimentos'})
+                      </h3>
+                      <p className="text-xs text-slate-500 font-medium">
+                        Histórico completo e consolidado de todas as consultas veterinárias realizadas.
+                      </p>
                     </div>
-                    <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
-                      <div className="space-y-4">
-                         <div className="space-y-1">
-                           <p className="text-[10px] font-black text-teal-600 uppercase tracking-widest">Diagnóstico Clínico</p>
-                           <p className="text-sm font-bold text-slate-800 leading-relaxed">{record.diagnosticoClinico || 'Não informado'}</p>
-                         </div>
-                         <div className="grid grid-cols-2 gap-4">
-                           <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                              <p className="text-[9px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1"><Thermometer size={10} /> Temperatura</p>
-                              <p className="text-xs font-bold text-slate-700">{record.temperatura ? `${record.temperatura} °C` : '--'}</p>
-                           </div>
-                           <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                              <p className="text-[9px] font-bold text-slate-400 uppercase mb-1 flex items-center gap-1"><Droplets size={10} /> Hidratação</p>
-                              <p className="text-xs font-bold text-slate-700">{record.hidratacao || '--'}</p>
-                           </div>
-                         </div>
-                         {record.tratamentoAmbulatorial && (
-                           <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl">
-                             <p className="text-[9px] font-black text-blue-600 uppercase mb-1">Procedimento / Conduta</p>
-                             <p className="text-xs font-medium text-blue-800">{record.tratamentoAmbulatorial}</p>
-                           </div>
-                         )}
-                      </div>
-                      <div className="space-y-4">
-                        <div className="space-y-2">
-                           <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Exames e Laudos</p>
-                           {record.examesLaboratoriais && record.examesLaboratoriais.length > 0 ? (
-                             <div className="flex flex-wrap gap-2">
-                               {record.examesLaboratoriais.map(ex => (
-                                 <button key={ex.id} onClick={() => handleOpenAttachment(ex.arquivo, ex.nomeExame)} className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-[10px] font-black uppercase text-slate-600 hover:bg-teal-600 hover:text-white hover:border-teal-600 transition-all shadow-sm">
-                                   <FlaskConical size={12} /> {ex.nomeExame}
-                                 </button>
-                               ))}
-                             </div>
-                           ) : <p className="text-xs italic text-slate-400">Nenhum exame anexado.</p>}
-                        </div>
-                        
-                        <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                           <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5"><ClipboardCheck size={12} /> Avaliação de Sistemas</p>
-                           <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[10px]">
-                              <div><span className="text-slate-400">Mucosa:</span> <span className="font-bold text-slate-700">{record.mucosa || '--'}</span></div>
-                              <div><span className="text-slate-400">Abdômen:</span> <span className="font-bold text-slate-700">{record.palpacaoAbdominal || '--'}</span></div>
-                              <div><span className="text-slate-400">Cardíaco:</span> <span className="font-bold text-slate-700">{record.auscultaCardiaca || '--'}</span></div>
-                              <div><span className="text-slate-400">Pulmonar:</span> <span className="font-bold text-slate-700">{record.auscultaPulmonar || '--'}</span></div>
-                           </div>
-                        </div>
-
-                        <div className="pt-4 border-t border-slate-100 space-y-2">
-                          {record.receitas && record.receitas.length > 0 && (
-                             <div className="flex justify-between items-center">
-                               <div className="flex items-center gap-1.5 text-[10px] font-black text-teal-600 uppercase tracking-widest"><Pill size={14} /> Receituário</div>
-                               <button onClick={() => handlePrintPrescription(record.receitas!)} className="flex items-center gap-1.5 text-[10px] font-black uppercase text-teal-600 hover:text-teal-700 hover:bg-teal-50 px-3 py-1.5 rounded-lg transition-all"><Printer size={14} /> Imprimir Receita</button>
-                             </div>
-                          )}
-                          {record.encaminhamentos && record.encaminhamentos.length > 0 && (
-                             <div className="flex justify-between items-center">
-                               <div className="flex items-center gap-1.5 text-[10px] font-black text-indigo-600 uppercase tracking-widest"><ArrowRightLeft size={14} /> Encaminhamentos</div>
-                               <button onClick={() => handlePrintReferral(record.encaminhamentos!)} className="flex items-center gap-1.5 text-[10px] font-black uppercase text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-all"><Printer size={14} /> Imprimir Guia</button>
-                             </div>
-                          )}
-                        </div>
-                      </div>
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => toggleAllRecords(true)}
+                        className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-[10px] font-black uppercase text-slate-600 rounded-xl transition-all shadow-sm flex items-center gap-1"
+                      >
+                        <ChevronDown size={14} /> Expandir Todos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleAllRecords(false)}
+                        className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-[10px] font-black uppercase text-slate-600 rounded-xl transition-all shadow-sm flex items-center gap-1"
+                      >
+                        <ChevronUp size={14} /> Recolher Todos
+                      </button>
                     </div>
                   </div>
-                )) : (
+                )}
+
+                {historicoOrdenado.length > 0 ? (
+                  historicoOrdenado.map((record, index) => {
+                    const isExpanded = isRecordExpanded(record.id, index);
+                    const vet = db.getUsers().find(u => u.id === record.veterinarioId);
+                    const prescCount = record.receitas?.length || 0;
+                    const refCount = record.encaminhamentos?.length || 0;
+                    const examCount = (record.examesLaboratoriais?.length || 0) + (record.examesSolicitados ? 1 : 0);
+
+                    return (
+                      <div key={record.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden transition-all">
+                        {/* CABEÇALHO EXPANSÍVEL DO ATENDIMENTO */}
+                        <div 
+                          onClick={() => toggleRecordExpand(record.id, index)}
+                          className="p-4 bg-slate-50 hover:bg-slate-100/80 cursor-pointer border-b border-slate-200 flex flex-col md:flex-row justify-between md:items-center gap-4 transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-teal-600 text-white rounded-xl shadow-sm">
+                              <Clipboard size={20} />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className="text-xs font-black text-slate-900 uppercase">
+                                  Atendimento #{historicoOrdenado.length - index} • {safeFormatDate(record.dataAtendimento, "dd/MM/yyyy 'às' HH:mm")}
+                                </p>
+                                {record.statusResultante && (
+                                  <span className={`text-[9px] font-black px-2 py-0.5 rounded-full uppercase border ${
+                                    record.statusResultante === AnimalCondicao.OBITO 
+                                      ? 'bg-red-100 text-red-700 border-red-200' 
+                                      : record.statusResultante === AnimalCondicao.EM_TRATAMENTO 
+                                      ? 'bg-blue-100 text-blue-700 border-blue-200' 
+                                      : 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                                  }`}>
+                                    {record.statusResultante}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1.5 mt-0.5">
+                                <User size={12} className="text-slate-400" /> 
+                                Veterinário(a): <span className="text-slate-700 font-black">{vet?.name || 'Veterinário(a)'}</span>
+                                {vet?.crmv && <span className="text-slate-400">• CRMV: {vet.crmv}</span>}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap justify-between md:justify-end">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[9px] font-black bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg uppercase shadow-2xs">
+                                Peso: {record.peso}kg
+                              </span>
+                              {prescCount > 0 && (
+                                <span className="text-[9px] font-black bg-teal-50 text-teal-700 border border-teal-200 px-2 py-1 rounded-lg uppercase flex items-center gap-1">
+                                  <Pill size={10} /> {prescCount} receita(s)
+                                </span>
+                              )}
+                              {refCount > 0 && (
+                                <span className="text-[9px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-1 rounded-lg uppercase flex items-center gap-1">
+                                  <ArrowRightLeft size={10} /> {refCount} guia(s)
+                                </span>
+                              )}
+                              {record.microchipAplicado && (
+                                <span className="text-[9px] font-black bg-amber-50 text-amber-700 border border-amber-200 px-2 py-1 rounded-lg uppercase flex items-center gap-1 font-mono">
+                                  <Cpu size={10} /> Chip
+                                </span>
+                              )}
+                            </div>
+
+                            <button 
+                              type="button"
+                              className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-200 transition-colors ml-2"
+                              aria-label={isExpanded ? 'Recolher detalhes' : 'Expandir detalhes'}
+                            >
+                              {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* CORPO COMPLETO DO ATENDIMENTO CLÍNICO */}
+                        {isExpanded && (
+                          <div className="p-6 space-y-6 bg-white animate-in fade-in duration-200">
+                            {/* 1. DIAGNÓSTICO & CONDUTA (DESTAQUE PRINCIPAL) */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="p-4 bg-teal-50/70 border border-teal-200/80 rounded-2xl space-y-1.5">
+                                <div className="flex items-center gap-1.5 text-teal-800 font-black text-xs uppercase tracking-wider">
+                                  <Stethoscope size={16} className="text-teal-600" /> Diagnóstico Clínico
+                                </div>
+                                <p className="text-sm font-bold text-slate-800 leading-relaxed whitespace-pre-wrap">
+                                  {record.diagnosticoClinico || 'Não informado'}
+                                </p>
+                              </div>
+
+                              <div className="p-4 bg-blue-50/70 border border-blue-200/80 rounded-2xl space-y-1.5">
+                                <div className="flex items-center gap-1.5 text-blue-800 font-black text-xs uppercase tracking-wider">
+                                  <Activity size={16} className="text-blue-600" /> Conduta / Procedimentos Realizados
+                                </div>
+                                <p className="text-xs font-semibold text-blue-950 leading-relaxed whitespace-pre-wrap">
+                                  {record.tratamentoAmbulatorial || 'Sem procedimentos registrados'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* 2. QUEIXA PRINCIPAL / ANAMNESE / HISTÓRICO */}
+                            {(record.observacoesGerais || (index === historicoOrdenado.length - 1 && animal.motivo)) && (
+                              <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1">
+                                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
+                                  <MessageSquare size={13} className="text-slate-400" /> Queixa Principal / Histórico / Anamnese
+                                </p>
+                                <p className="text-xs text-slate-700 leading-relaxed">
+                                  {record.observacoesGerais || animal.motivo || 'Sem observações adicionais.'}
+                                </p>
+                              </div>
+                            )}
+
+                            {/* 3. EXAME FÍSICO COMPLETO & SINAIS VITAIS */}
+                            <div className="space-y-3">
+                              <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5 px-1">
+                                <ClipboardCheck size={14} className="text-slate-500" /> Exame Físico & Avaliação de Sistemas
+                              </h4>
+
+                              {/* Sinais Vitais */}
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-0.5 flex items-center gap-1">
+                                    <Thermometer size={11} className="text-teal-600" /> Temperatura
+                                  </p>
+                                  <p className="text-xs font-bold text-slate-800">{record.temperatura ? `${record.temperatura} °C` : '--'}</p>
+                                </div>
+                                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-0.5 flex items-center gap-1">
+                                    <HeartPulse size={11} className="text-rose-500" /> Freq. Cardíaca
+                                  </p>
+                                  <p className="text-xs font-bold text-slate-800">{record.frequenciaCardiaca ? `${record.frequenciaCardiaca} bpm` : '--'}</p>
+                                </div>
+                                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-0.5 flex items-center gap-1">
+                                    <Wind size={11} className="text-sky-500" /> Freq. Respiratória
+                                  </p>
+                                  <p className="text-xs font-bold text-slate-800">{record.frequenciaRespiratoria ? `${record.frequenciaRespiratoria} mpm` : '--'}</p>
+                                </div>
+                                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                                  <p className="text-[9px] font-bold text-slate-400 uppercase mb-0.5 flex items-center gap-1">
+                                    <Droplets size={11} className="text-blue-500" /> Hidratação
+                                  </p>
+                                  <p className="text-xs font-bold text-slate-800">{record.hidratacao || '--'}</p>
+                                </div>
+                              </div>
+
+                              {/* Sistemas Orgânicos */}
+                              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Mucosa</span>
+                                    <span className="font-bold text-slate-700">{record.mucosa || '--'}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Palpação Abdominal</span>
+                                    <span className="font-bold text-slate-700">{record.palpacaoAbdominal || '--'}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Ausculta Cardíaca</span>
+                                    <span className="font-bold text-slate-700">{record.auscultaCardiaca || '--'}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase block">Ausculta Pulmonar</span>
+                                    <span className="font-bold text-slate-700">{record.auscultaPulmonar || '--'}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Vacinação, Vermifugação & Microchipagem aplicadas */}
+                              {(record.v10Aplicada || record.antirrabicaAplicada || record.vermifugoAplicado || record.microchipAplicado || record.vacinas || record.parasitas) && (
+                                <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-wrap gap-2 items-center text-xs">
+                                  <span className="text-[10px] font-black uppercase text-slate-400 mr-2 flex items-center gap-1">
+                                    <Syringe size={12} className="text-teal-600" /> Aplicações no Atendimento:
+                                  </span>
+                                  {record.v10Aplicada && (
+                                    <span className="px-2.5 py-1 bg-teal-100 text-teal-800 font-bold rounded-lg text-[10px] uppercase border border-teal-200">
+                                      Vacina V10 {record.v10Data ? `(${record.v10Data})` : ''}
+                                    </span>
+                                  )}
+                                  {record.antirrabicaAplicada && (
+                                    <span className="px-2.5 py-1 bg-indigo-100 text-indigo-800 font-bold rounded-lg text-[10px] uppercase border border-indigo-200">
+                                      Antirrábica {record.antirrabicaData ? `(${record.antirrabicaData})` : ''}
+                                    </span>
+                                  )}
+                                  {record.vermifugoAplicado && (
+                                    <span className="px-2.5 py-1 bg-amber-100 text-amber-800 font-bold rounded-lg text-[10px] uppercase border border-amber-200">
+                                      Vermífugo {record.vermifugoData ? `(${record.vermifugoData})` : ''}
+                                    </span>
+                                  )}
+                                  {record.microchipAplicado && (
+                                    <span className="px-2.5 py-1 bg-purple-100 text-purple-800 font-bold rounded-lg text-[10px] uppercase border border-purple-200 font-mono">
+                                      Microchip: {record.numeroMicrochipAplicado || 'Implantado'}
+                                    </span>
+                                  )}
+                                  {record.vacinas && !record.v10Aplicada && !record.antirrabicaAplicada && (
+                                    <span className="text-slate-600 font-medium text-xs">Vacinas: {record.vacinas}</span>
+                                  )}
+                                  {record.parasitas && (
+                                    <span className="text-slate-600 font-medium text-xs">Parasitas: {record.parasitas}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* 4. PRESCRIÇÕES & RECEITUÁRIO CLÍNICO */}
+                            <div className="space-y-3 pt-2 border-t border-slate-100">
+                              <div className="flex justify-between items-center">
+                                <h4 className="text-[10px] font-black uppercase tracking-widest text-teal-700 flex items-center gap-1.5">
+                                  <Pill size={14} className="text-teal-600" /> Prescrições / Receituário Clínico ({prescCount})
+                                </h4>
+                                {prescCount > 0 && (
+                                  <button 
+                                    onClick={() => handlePrintPrescription(record.receitas!)} 
+                                    className="flex items-center gap-1.5 text-[10px] font-black uppercase text-teal-600 hover:text-teal-700 hover:bg-teal-50 px-3 py-1.5 rounded-lg border border-teal-200 transition-all shadow-2xs"
+                                  >
+                                    <Printer size={13} /> Imprimir Receita
+                                  </button>
+                                )}
+                              </div>
+
+                              {prescCount > 0 ? (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                  {record.receitas!.map((r, rIdx) => (
+                                    <div key={r.id || rIdx} className="p-3.5 bg-teal-50/40 border border-teal-100 rounded-xl space-y-1">
+                                      <div className="flex justify-between items-start">
+                                        <p className="text-xs font-black text-teal-900 uppercase">{r.medicamento}</p>
+                                        <span className="text-[9px] font-bold px-1.5 py-0.5 bg-white border border-teal-200 rounded text-teal-700 uppercase">{r.via || 'Oral'}</span>
+                                      </div>
+                                      <p className="text-[11px] font-bold text-slate-700">
+                                        {r.dosagem} • {r.frequencia} • {r.duracao}
+                                      </p>
+                                      {r.observacoes && (
+                                        <p className="text-[10px] text-slate-500 italic mt-0.5">
+                                          Obs: {r.observacoes}
+                                        </p>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-xs italic text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                  Nenhum medicamento prescrito nesta consulta.
+                                </p>
+                              )}
+                            </div>
+
+                            {/* 5. ENCAMINHAMENTOS VETERINÁRIOS */}
+                            <div className="space-y-3 pt-2 border-t border-slate-100">
+                              <div className="flex justify-between items-center">
+                                <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-700 flex items-center gap-1.5">
+                                  <ArrowRightLeft size={14} className="text-indigo-600" /> Guias de Encaminhamento ({refCount})
+                                </h4>
+                                {refCount > 0 && (
+                                  <button 
+                                    onClick={() => handlePrintReferral(record.encaminhamentos!)} 
+                                    className="flex items-center gap-1.5 text-[10px] font-black uppercase text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-200 transition-all shadow-2xs"
+                                  >
+                                    <Printer size={13} /> Imprimir Guia
+                                  </button>
+                                )}
+                              </div>
+
+                              {refCount > 0 ? (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                  {record.encaminhamentos!.map((rf, rfIdx) => (
+                                    <div key={rf.id || rfIdx} className="p-3.5 bg-indigo-50/40 border border-indigo-100 rounded-xl space-y-1.5">
+                                      <div className="flex justify-between items-start">
+                                        <p className="text-xs font-black text-indigo-900 uppercase">{rf.especialidade}</p>
+                                        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase ${
+                                          rf.urgencia === 'ALTA' || rf.urgencia === 'EMERGENCIA' 
+                                            ? 'bg-red-100 text-red-700' 
+                                            : 'bg-indigo-100 text-indigo-700'
+                                        }`}>
+                                          {rf.urgencia}
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-slate-700 font-medium">"{rf.motivo}"</p>
+                                      {rf.localSugerido && (
+                                        <p className="text-[10px] text-slate-500 font-bold">
+                                          Local Recomendado: {rf.localSugerido}
+                                        </p>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-xs italic text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                                  Sem encaminhamentos externos registrados nesta consulta.
+                                </p>
+                              )}
+                            </div>
+
+                            {/* 6. EXAMES SOLICITADOS E LAUDOS ANEXADOS */}
+                            {(record.examesSolicitados || (record.examesLaboratoriais && record.examesLaboratoriais.length > 0)) && (
+                              <div className="space-y-3 pt-2 border-t border-slate-100">
+                                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                                  <FlaskConical size={14} className="text-teal-600" /> Exames e Laudos Laboratoriais
+                                </h4>
+
+                                {record.examesSolicitados && (
+                                  <div className="p-3 bg-amber-50/50 border border-amber-200/80 rounded-xl">
+                                    <p className="text-[10px] font-black text-amber-800 uppercase mb-0.5">Exames Solicitados:</p>
+                                    <p className="text-xs text-slate-700 font-medium whitespace-pre-wrap">{record.examesSolicitados}</p>
+                                  </div>
+                                )}
+
+                                {record.examesLaboratoriais && record.examesLaboratoriais.length > 0 && (
+                                  <div className="flex flex-wrap gap-2">
+                                    {record.examesLaboratoriais.map(ex => (
+                                      <button 
+                                        key={ex.id} 
+                                        onClick={() => handleOpenAttachment(ex.arquivo, ex.nomeExame)} 
+                                        className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 border border-slate-200 rounded-lg text-[10px] font-black uppercase text-slate-600 hover:bg-teal-600 hover:text-white hover:border-teal-600 transition-all shadow-sm"
+                                      >
+                                        <FlaskConical size={12} /> {ex.nomeExame}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 7. RECOMENDAÇÃO DE INTERNAÇÃO / ACOMODAÇÃO / DESFECHO */}
+                            {(record.recommendedKennelType || record.accommodationJustification || record.causaObito || record.localSoltura) && (
+                              <div className="space-y-2 pt-2 border-t border-slate-100">
+                                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                  Recomendações e Desfecho
+                                </h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                                  {record.recommendedKennelType && (
+                                    <div className="p-3 bg-indigo-50/40 border border-indigo-100 rounded-xl">
+                                      <span className="text-[10px] font-bold text-indigo-700 uppercase block">Acomodação Recomendada:</span>
+                                      <span className="font-bold text-slate-800 uppercase">{record.recommendedKennelType}</span>
+                                      {record.accommodationJustification && (
+                                        <p className="text-[11px] text-slate-600 mt-1 italic">"{record.accommodationJustification}"</p>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {record.causaObito && (
+                                    <div className="p-3 bg-red-50/40 border border-red-100 rounded-xl">
+                                      <span className="text-[10px] font-bold text-red-700 uppercase block">Óbito Registrado:</span>
+                                      <span className="font-bold text-slate-800">{record.causaObito}</span>
+                                      {record.dataObito && <span className="text-[10px] text-slate-500 block">Data: {safeFormatDate(record.dataObito)}</span>}
+                                    </div>
+                                  )}
+
+                                  {record.localSoltura && (
+                                    <div className="p-3 bg-emerald-50/40 border border-emerald-100 rounded-xl">
+                                      <span className="text-[10px] font-bold text-emerald-700 uppercase block">Soltura Registrada:</span>
+                                      <span className="font-bold text-slate-800">{record.localSoltura}</span>
+                                      {record.dataSoltura && <span className="text-[10px] text-slate-500 block">Data: {safeFormatDate(record.dataSoltura)}</span>}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
                   <div className="py-20 text-center space-y-3 bg-white rounded-3xl border-2 border-dashed border-slate-200">
                     <History size={48} className="mx-auto text-slate-200" />
                     <p className="text-slate-400 font-bold uppercase text-xs tracking-widest">Sem registros históricos de atendimento clínico.</p>
@@ -2023,7 +2361,7 @@ const AnimalDetail: React.FC = () => {
                       <SearchableKennelSelect
                         value={selectedKennelId}
                         onChange={setSelectedKennelId}
-                        kennels={db.getKennels()}
+                        kennels={rawKennels.length > 0 ? rawKennels : db.getKennels()}
                         occupations={occupations}
                         currentKennelId={effectiveCurrentOccupation?.kennelId}
                         recommendedType={animal.tipoAcomodacaoSugerida || animal.historico?.[0]?.recommendedKennelType}

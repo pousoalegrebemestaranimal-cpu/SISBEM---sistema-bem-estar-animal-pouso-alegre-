@@ -1,11 +1,11 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { db } from '../services/db';
-import { registerWithSupabase, supabase, formatSupabaseAuthError } from '../src/lib/supabase';
+import { registerWithSupabase, supabase, formatSupabaseAuthError, resendSupabaseConfirmation } from '../src/lib/supabase';
 import { mapUserToSupabase } from '../src/lib/supabaseSync';
 import { 
   Users, UserPlus, Trash2, ShieldAlert, CheckCircle2, IdCard, Lock, Globe, 
-  AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal, KeyRound
+  AlertTriangle, X, ShieldCheck, Database, RefreshCw, Copy, Check, ExternalLink, Code2, Terminal, KeyRound, Mail
 } from 'lucide-react';
 
 const UserManagement: React.FC = () => {
@@ -32,6 +32,7 @@ const UserManagement: React.FC = () => {
   const [syncingSupabaseUsers, setSyncingSupabaseUsers] = useState(false);
   const [syncSupabaseMessage, setSyncSupabaseMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [resendingEmail, setResendingEmail] = useState<string | null>(null);
 
   const currentUser = useMemo(() => db.getCurrentUser(), []);
 
@@ -250,9 +251,13 @@ NOTIFY pgrst, 'reload schema';`;
       // 4. Salva no cache local seguro com o UUID oficial
       db.saveUser(userProfile);
 
+      const noticeEmail = sbRes.needsEmailConfirmation
+        ? ' ⚠️ Atenção: A confirmação de e-mail está ativada no seu painel do Supabase. Se o e-mail não chegar (limite de 3-4 envios/hora do Supabase ou caixa de spam), acesse o painel do Supabase > Authentication > Users, clique nos 3 pontos (...) do usuário e selecione "Confirm email", ou desative "Confirm email" em Authentication > Providers > Email para ativação 100% imediata.'
+        : '';
+
       setMessage({
         type: 'success',
-        text: `Usuário "${cleanName}" (@${derivedUsername}) cadastrado com sucesso no Supabase Auth! UUID oficial: ${realUserId}`
+        text: `Usuário "${cleanName}" (@${derivedUsername}) cadastrado com sucesso no Supabase Auth! UUID oficial: ${realUserId}${noticeEmail}`
       });
 
       setFormData({ 
@@ -272,6 +277,32 @@ NOTIFY pgrst, 'reload schema';`;
       setMessage({ type: 'error', text: err.message || 'Erro ao cadastrar usuário.' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResendConfirmation = async (email: string) => {
+    if (!email || !email.includes('@')) {
+      setMessage({ type: 'error', text: 'E-mail inválido para reenvio de confirmação.' });
+      return;
+    }
+    setResendingEmail(email);
+    try {
+      const res = await resendSupabaseConfirmation(email);
+      if (res.success) {
+        setMessage({
+          type: 'success',
+          text: `E-mail de confirmação reenviado para ${email}. Peça para o veterinário verificar a Caixa de Entrada e o SPAM / Lixo Eletrônico.`
+        });
+      } else {
+        setMessage({
+          type: 'error',
+          text: `Não foi possível reenviar: ${formatSupabaseAuthError(res.error)}. Dica: O Supabase limita envios a 3 por hora. Você pode confirmar o usuário manualmente em Authentication > Users no painel do Supabase.`
+        });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Falha ao reenviar e-mail de confirmação.' });
+    } finally {
+      setResendingEmail(null);
     }
   };
 
@@ -433,6 +464,23 @@ NOTIFY pgrst, 'reload schema';`;
             <h3 className="font-bold text-slate-900">Novo Servidor</h3>
           </div>
 
+          <div className="bg-amber-50/90 border border-amber-200 rounded-xl p-3.5 space-y-2 text-xs text-amber-950">
+            <div className="flex items-center gap-1.5 font-bold text-amber-900">
+              <AlertTriangle size={15} className="text-amber-600 shrink-0" />
+              <span>O veterinário não recebeu o e-mail de confirmação?</span>
+            </div>
+            <p className="text-[11px] text-amber-800 leading-relaxed">
+              O provedor gratuito do Supabase limita envios a <strong>3 a 4 e-mails por hora</strong> e costuma cair na pasta de <strong>Spam / Lixo Eletrônico</strong>.
+            </p>
+            <div className="bg-white/90 p-2.5 rounded-lg border border-amber-200/80 space-y-1 text-[11px] text-slate-700">
+              <p className="font-bold text-teal-800">💡 Como ativar o veterinário imediatamente:</p>
+              <p>1. Acesse o painel do Supabase: <strong>Authentication &gt; Users</strong></p>
+              <p>2. Clique nos 3 pontinhos (<strong>...</strong>) ao lado do e-mail do veterinário e clique em <strong>"Confirm email"</strong>.</p>
+              <p className="pt-1 font-bold text-slate-800">🚀 Para que os próximos cadastros não dependam de e-mail:</p>
+              <p>Vá em <strong>Authentication &gt; Providers &gt; Email</strong>, desmarque a caixa <strong>"Confirm email"</strong> e salve. Todos os cadastros ficarão ativos na hora!</p>
+            </div>
+          </div>
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Nome Completo</label>
@@ -587,6 +635,18 @@ NOTIFY pgrst, 'reload schema';`;
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex justify-center items-center gap-1.5">
+                        {user.email && user.email.includes('@') && (
+                          <button
+                            type="button"
+                            onClick={() => handleResendConfirmation(user.email)}
+                            disabled={resendingEmail === user.email}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-all cursor-pointer group"
+                            title={`Reenviar e-mail de confirmação para ${user.email}`}
+                          >
+                            <Mail size={16} className={`group-hover:scale-110 transition-transform ${resendingEmail === user.email ? 'animate-pulse text-blue-600' : 'text-slate-400 hover:text-blue-600'}`} />
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           onClick={() => handleOpenChangePassword(user)}

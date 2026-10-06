@@ -139,12 +139,29 @@ const VeterinaryForm: React.FC = () => {
         });
       }
 
-      setRecord(prev => ({
-        ...prev,
-        peso: prev.peso || currentAnimal.peso.toString(),
+      let initialData: any = {
+        peso: currentAnimal.peso.toString(),
         animalId: id,
         statusResultante: currentAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO,
         dataObito: new Date().toISOString().split('T')[0]
+      };
+
+      // Recuperação de Rascunho: impede perda de dados caso o veterinário saia da página acidentalmente
+      try {
+        const savedDraft = sessionStorage.getItem(`sisbem_attendance_draft_${id}`);
+        if (savedDraft) {
+          const parsedDraft = JSON.parse(savedDraft);
+          if (parsedDraft && typeof parsedDraft === 'object') {
+            initialData = { ...initialData, ...parsedDraft };
+          }
+        }
+      } catch (_) {}
+
+      setRecord(prev => ({
+        ...prev,
+        ...initialData,
+        peso: prev.peso || initialData.peso || currentAnimal.peso.toString(),
+        animalId: id,
       }));
       if (currentAnimal.temTutor) {
         if (currentAnimal.necessitaInternacao || currentAnimal.condicao === AnimalCondicao.EM_TRATAMENTO) {
@@ -155,6 +172,15 @@ const VeterinaryForm: React.FC = () => {
       }
     }
   }, [editId, user?.id, user?.role, user?.name, navigate, id]);
+
+  useEffect(() => {
+    if (!id || editId) return;
+    try {
+      if (record && (record.diagnosticoClinico || record.tratamentoAmbulatorial || record.observacoesGerais || (record.receitas && record.receitas.length > 0) || (record.encaminhamentos && record.encaminhamentos.length > 0))) {
+        sessionStorage.setItem(`sisbem_attendance_draft_${id}`, JSON.stringify(record));
+      }
+    } catch (_) {}
+  }, [record, id, editId]);
 
   const handleAddPrescription = () => {
     const newP: any = {
@@ -323,6 +349,11 @@ const VeterinaryForm: React.FC = () => {
       // OBSERVAÇÃO FASE 1: Preservada a acomodação atual até que a equipe realize a troca
       // de baia atômica via Controle de Baias, impedindo que o animal fique sem acomodação.
       
+      // Limpa rascunho temporário pós-finalização bem-sucedida
+      try {
+        sessionStorage.removeItem(`sisbem_attendance_draft_${id}`);
+      } catch (_) {}
+
       navigate(`/animais/ficha/${id}?tab=historico`); 
     } catch (err: any) {
       setError(err.message || 'Erro inesperado ao salvar o prontuário.');
@@ -341,6 +372,9 @@ const VeterinaryForm: React.FC = () => {
         setError(res.message || 'Não foi possível cancelar o atendimento.');
         return;
       }
+      try {
+        sessionStorage.removeItem(`sisbem_attendance_draft_${id}`);
+      } catch (_) {}
       navigate('/veterinario/fila');
     } catch (err: any) {
       setError(err.message || 'Erro ao cancelar atendimento.');

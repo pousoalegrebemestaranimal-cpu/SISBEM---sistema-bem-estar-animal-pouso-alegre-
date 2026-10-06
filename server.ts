@@ -6,6 +6,7 @@ import { animals, kennels, clinicalRecords, surgeries, users } from './src/db/sc
 import { createAuthToken, requireAuth, requireRoles, AuthenticatedRequest } from './src/lib/serverAuth.ts';
 import { verifyPassword, hashPassword } from './src/lib/authCrypto.ts';
 import { supabase } from './src/lib/supabase.ts';
+import { syncRecordToSupabase } from './src/lib/supabaseSync.ts';
 
 export const app = express();
 
@@ -855,10 +856,27 @@ app.get('/api/health', (req, res) => {
           [JSON.stringify(payload)]
         );
         const result = queryRes.rows[0]?.result;
-        if (result?.success && payload.record?.animalId && payload.record?.statusResultante) {
+        if (result?.success && payload.record?.animalId) {
           try {
-            await supabase.from('animals').update({ condicao: payload.record.statusResultante }).eq('id', payload.record.animalId);
-          } catch {}
+            const finalCondicao = payload.record.statusResultante || result.status_resultante || 'Em Tratamento';
+            await supabase.from('animals').update({
+              condicao: finalCondicao,
+              em_atendimento_vet_id: null,
+              em_atendimento_inicio: null,
+              necessita_internacao: payload.record.necessitaInternacao ?? false,
+              tipo_acomodacao_sugerida: payload.record.recommendedKennelType || null,
+              justificativa_internacao: payload.record.accommodationJustification || null,
+            }).eq('id', payload.record.animalId);
+            const recordToSync = {
+              ...payload.record,
+              receitas: payload.prescriptions || payload.record.receitas || [],
+              encaminhamentos: payload.referrals || payload.record.encaminhamentos || [],
+              examesLaboratoriais: payload.examFiles || payload.record.examesLaboratoriais || []
+            };
+            await syncRecordToSupabase(recordToSync);
+          } catch (syncErr) {
+            console.warn('Aviso ao sincronizar prontuário pós-finalização no Supabase:', syncErr);
+          }
         }
         return res.json(result || { success: false, code: 'INTERNAL_ERROR', message: 'Sem resposta da função de finalização.' });
       } catch (err: any) {
