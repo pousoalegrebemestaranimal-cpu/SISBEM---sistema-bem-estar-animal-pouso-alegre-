@@ -2,11 +2,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../services/db';
-import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile } from '../types';
-import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check } from 'lucide-react';
+import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile, Animal } from '../types';
+import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance } from '../src/lib/attendanceService';
+import { fetchAnimalById } from '../src/lib/supabaseQueries';
+import { safeSetLocalAnimals } from '../src/lib/safeStorage';
 
 const DIAGNOSTIC_OPTIONS = [
   'Tumores',
@@ -29,6 +31,10 @@ const VeterinaryForm: React.FC = () => {
   
   const user = useMemo(() => db.getCurrentUser(), []);
   const [animal, setAnimal] = useState<AnimalJoined | undefined>(undefined);
+
+  const [loadingAnimal, setLoadingAnimal] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,88 +96,159 @@ const VeterinaryForm: React.FC = () => {
       return;
     }
 
-    const currentAnimal = db.getAnimalsJoined().find(a => a.id === id);
-    setAnimal(currentAnimal);
+    if (!id) {
+      setLoadingAnimal(false);
+      return;
+    }
 
-    if (editId) {
-      const existing = db.getRecords().find(r => r.id === editId);
-      if (existing) {
-        setRecord(existing);
-        if (existing.necessitaInternacao !== undefined) {
-          setNecessitaInternacaoExterno(existing.necessitaInternacao);
-          if (existing.recommendedKennelType) setTipoAcomodacaoExterno(existing.recommendedKennelType);
-          if (existing.accommodationJustification) setJustificativaInternacaoExterno(existing.accommodationJustification);
+    let isMounted = true;
+
+    async function loadAnimalData() {
+      setLoadingAnimal(true);
+      setLoadError(null);
+
+      // 1. Opcionalmente verifica cache local como fallback inicial
+      const localAnimal = db.getAnimalsJoined().find(a => a.id === id);
+
+      let targetAnimal: AnimalJoined | null = null;
+      let networkFailed = false;
+
+      // 2. Busca o animal pelo UUID no Supabase usando fetchAnimalById(id)
+      try {
+        const remoteAnimal = await fetchAnimalById(id);
+        if (remoteAnimal) {
+          targetAnimal = remoteAnimal;
         }
+      } catch (err) {
+        console.warn('Erro ao consultar Supabase para carregar ficha do animal:', err);
+        networkFailed = true;
       }
-    } else if (currentAnimal) {
-      // 1. Verificação de Bloqueio Concorrente no Acesso Direto à URL
-      if (
-        currentAnimal.condicao === AnimalCondicao.EM_ATENDIMENTO &&
-        currentAnimal.emAtendimentoVetId &&
-        currentAnimal.emAtendimentoVetId !== user?.id &&
-        user?.role !== 'ADMIN'
-      ) {
-        const users = db.getUsers();
-        const otherVet = users.find(u => u.id === currentAnimal.emAtendimentoVetId);
-        setIsBlockedByOtherVet(true);
-        setBlockedVetName(otherVet?.name || 'outro profissional');
+
+      // 3. Fallback: se Supabase não retornou ou falhou a rede, usa cache local se disponível
+      if (!targetAnimal && localAnimal) {
+        targetAnimal = localAnimal;
+      }
+
+      if (!isMounted) return;
+
+      if (!targetAnimal) {
+        setLoadingAnimal(false);
+        if (networkFailed) {
+          setLoadError('Não foi possível conectar ao servidor para carregar a ficha do animal. Verifique sua conexão.');
+        }
         return;
       }
 
-      // 2. Se o animal ainda não estiver com status 'Em Atendimento', efetua o bloqueio atômico
-      if (currentAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
-        startClinicalAttendance(id, user.id, user.name).then(res => {
-          if (!res.success) {
-            if (res.code === 'ALREADY_IN_ATTENDANCE') {
-              setIsBlockedByOtherVet(true);
-              setBlockedVetName(res.vetName || 'outro profissional');
-            } else {
-              setError(res.message || 'Não foi possível iniciar o atendimento para este animal.');
-            }
-          } else {
-            setAnimal(prev => prev ? {
-              ...prev,
-              condicao: AnimalCondicao.EM_ATENDIMENTO,
-              emAtendimentoVetId: user.id,
-              emAtendimentoInicio: res.inicio || new Date().toISOString()
-            } : prev);
-          }
-        });
-      }
-
-      let initialData: any = {
-        peso: currentAnimal.peso.toString(),
-        animalId: id,
-        statusResultante: currentAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO,
-        dataObito: new Date().toISOString().split('T')[0]
-      };
-
-      // Recuperação de Rascunho: impede perda de dados caso o veterinário saia da página acidentalmente
+      // 4. Sincroniza o animal na camada local para manter o cache consistente
       try {
-        const savedDraft = sessionStorage.getItem(`sisbem_attendance_draft_${id}`);
-        if (savedDraft) {
-          const parsedDraft = JSON.parse(savedDraft);
-          if (parsedDraft && typeof parsedDraft === 'object') {
-            initialData = { ...initialData, ...parsedDraft };
+        const currentLocals = db.getAnimals();
+        const existsIdx = currentLocals.findIndex(a => a.id === targetAnimal!.id);
+        let updatedLocals: Animal[];
+        if (existsIdx >= 0) {
+          updatedLocals = currentLocals.map(a => a.id === targetAnimal!.id ? { ...a, ...targetAnimal! } : a);
+        } else {
+          updatedLocals = [targetAnimal, ...currentLocals];
+        }
+        safeSetLocalAnimals(updatedLocals);
+      } catch (err) {
+        console.warn('Erro ao sincronizar animal na camada local:', err);
+      }
+
+      // 5. Atualiza o estado oficial do animal
+      setAnimal(targetAnimal);
+
+      // 6. Inicializa os dados do formulário e controle de atendimento
+      if (editId) {
+        const existing = db.getRecords().find(r => r.id === editId) || targetAnimal.historico?.find(r => r.id === editId);
+        if (existing) {
+          setRecord(existing);
+          if (existing.necessitaInternacao !== undefined) {
+            setNecessitaInternacaoExterno(existing.necessitaInternacao);
+            if (existing.recommendedKennelType) setTipoAcomodacaoExterno(existing.recommendedKennelType);
+            if (existing.accommodationJustification) setJustificativaInternacaoExterno(existing.accommodationJustification);
           }
         }
-      } catch (_) {}
+      } else {
+        // 1. Verificação de Bloqueio Concorrente no Acesso Direto à URL
+        if (
+          targetAnimal.condicao === AnimalCondicao.EM_ATENDIMENTO &&
+          targetAnimal.emAtendimentoVetId &&
+          targetAnimal.emAtendimentoVetId !== user?.id &&
+          user?.role !== 'ADMIN'
+        ) {
+          const users = db.getUsers();
+          const otherVet = users.find(u => u.id === targetAnimal.emAtendimentoVetId);
+          setIsBlockedByOtherVet(true);
+          setBlockedVetName(otherVet?.name || 'outro profissional');
+          setLoadingAnimal(false);
+          return;
+        }
 
-      setRecord(prev => ({
-        ...prev,
-        ...initialData,
-        peso: prev.peso || initialData.peso || currentAnimal.peso.toString(),
-        animalId: id,
-      }));
-      if (currentAnimal.temTutor) {
-        if (currentAnimal.necessitaInternacao || currentAnimal.condicao === AnimalCondicao.EM_TRATAMENTO) {
-          setNecessitaInternacaoExterno(true);
-          if (currentAnimal.tipoAcomodacaoSugerida) setTipoAcomodacaoExterno(currentAnimal.tipoAcomodacaoSugerida);
-          if (currentAnimal.justificativaInternacao) setJustificativaInternacaoExterno(currentAnimal.justificativaInternacao);
+        // 2. Se o animal ainda não estiver com status 'Em Atendimento', efetua o bloqueio atômico
+        if (targetAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
+          startClinicalAttendance(id, user.id, user.name).then(res => {
+            if (!isMounted) return;
+            if (!res.success) {
+              if (res.code === 'ALREADY_IN_ATTENDANCE') {
+                setIsBlockedByOtherVet(true);
+                setBlockedVetName(res.vetName || 'outro profissional');
+              } else {
+                setError(res.message || 'Não foi possível iniciar o atendimento para este animal.');
+              }
+            } else {
+              setAnimal(prev => prev ? {
+                ...prev,
+                condicao: AnimalCondicao.EM_ATENDIMENTO,
+                emAtendimentoVetId: user.id,
+                emAtendimentoInicio: res.inicio || new Date().toISOString()
+              } : prev);
+            }
+          });
+        }
+
+        let initialData: any = {
+          peso: targetAnimal.peso !== undefined && targetAnimal.peso !== null ? targetAnimal.peso.toString() : '0',
+          animalId: id,
+          statusResultante: targetAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO,
+          dataObito: new Date().toISOString().split('T')[0]
+        };
+
+        // Recuperação de Rascunho: impede perda de dados caso o veterinário saia da página acidentalmente
+        try {
+          const savedDraft = sessionStorage.getItem(`sisbem_attendance_draft_${id}`);
+          if (savedDraft) {
+            const parsedDraft = JSON.parse(savedDraft);
+            if (parsedDraft && typeof parsedDraft === 'object') {
+              initialData = { ...initialData, ...parsedDraft };
+            }
+          }
+        } catch (_) {}
+
+        setRecord(prev => ({
+          ...prev,
+          ...initialData,
+          peso: prev.peso || initialData.peso || (targetAnimal?.peso?.toString() ?? '0'),
+          animalId: id,
+        }));
+
+        if (targetAnimal.temTutor) {
+          if (targetAnimal.necessitaInternacao || targetAnimal.condicao === AnimalCondicao.EM_TRATAMENTO) {
+            setNecessitaInternacaoExterno(true);
+            if (targetAnimal.tipoAcomodacaoSugerida) setTipoAcomodacaoExterno(targetAnimal.tipoAcomodacaoSugerida);
+            if (targetAnimal.justificativaInternacao) setJustificativaInternacaoExterno(targetAnimal.justificativaInternacao);
+          }
         }
       }
+
+      setLoadingAnimal(false);
     }
-  }, [editId, user?.id, user?.role, user?.name, navigate, id]);
+
+    loadAnimalData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [editId, user?.id, user?.role, user?.name, navigate, id, reloadKey]);
 
   useEffect(() => {
     if (!id || editId) return;
@@ -383,7 +460,22 @@ const VeterinaryForm: React.FC = () => {
     }
   };
 
-  // 1. TELA DE BLOQUEIO CONCORRENTE: Animal já assumido por outro veterinário
+  // 1. TELA DE CARREGAMENTO INICIAL
+  if (loadingAnimal) {
+    return (
+      <div className="max-w-xl mx-auto py-24 px-4 text-center animate-in fade-in">
+        <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm flex flex-col items-center justify-center gap-4">
+          <Activity className="animate-spin text-teal-600" size={40} />
+          <div className="space-y-1">
+            <h2 className="text-xl font-bold text-slate-800">Carregando ficha do paciente...</h2>
+            <p className="text-sm text-slate-500">Consultando a base de dados oficial do SISBEM</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. TELA DE BLOQUEIO CONCORRENTE: Animal já assumido por outro veterinário
   if (isBlockedByOtherVet) {
     return (
       <div className="max-w-2xl mx-auto py-16 px-4 animate-in fade-in">
@@ -420,7 +512,62 @@ const VeterinaryForm: React.FC = () => {
     );
   }
 
-  if (!animal) return <div className="p-8 text-center text-slate-500 font-bold">Animal não encontrado.</div>;
+  // 3. TELA DE ERRO DE REDE / SERVIDOR
+  if (loadError) {
+    return (
+      <div className="max-w-md mx-auto py-16 px-4 animate-in fade-in">
+        <div className="bg-white rounded-3xl p-8 border border-amber-200 shadow-md text-center space-y-4">
+          <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+            <AlertCircle size={32} />
+          </div>
+          <h2 className="text-xl font-bold text-slate-900">Falha ao carregar ficha do animal</h2>
+          <p className="text-sm text-slate-600 leading-relaxed">{loadError}</p>
+          <div className="flex flex-col sm:flex-row justify-center gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setReloadKey(prev => prev + 1)}
+              className="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-sm rounded-xl transition shadow flex items-center justify-center gap-2"
+            >
+              <RefreshCw size={16} /> Tentar novamente
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/veterinario/fila')}
+              className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold text-sm rounded-xl transition flex items-center justify-center gap-2"
+            >
+              <ArrowLeft size={16} /> Voltar para a Fila
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. ANIMAL NÃO ENCONTRADO
+  if (!animal) {
+    return (
+      <div className="max-w-md mx-auto py-16 px-4 animate-in fade-in">
+        <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-md text-center space-y-4">
+          <div className="w-16 h-16 bg-slate-100 text-slate-500 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+            <AlertCircle size={32} />
+          </div>
+          <h2 className="text-xl font-bold text-slate-900">Animal não encontrado ou indisponível</h2>
+          <p className="text-sm text-slate-500 leading-relaxed">
+            O cadastro deste animal não foi localizado no sistema ou não está disponível para atendimento.
+          </p>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => navigate('/veterinario/fila')}
+              className="px-6 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-sm font-bold rounded-xl shadow transition flex items-center gap-2 mx-auto"
+            >
+              <ArrowLeft size={16} /> Voltar para a Fila Veterinária
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 pb-20">
