@@ -650,21 +650,22 @@ export async function syncAnimalToSupabase(animal: Animal) {
   }
 }
 
-export async function deleteAnimalFromSupabase(animalId: string) {
+export async function deleteAnimalFromSupabase(animalId: string): Promise<{ success: boolean; error?: string }> {
   try {
     const { error } = await supabase.from('animals').delete().eq('id', animalId);
     if (error) {
       console.warn('Erro ao deletar animal no Supabase:', error.message);
-      return false;
+      return { success: false, error: error.message };
     }
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('sisbem-animals-changed', {
         detail: { action: 'deleted', animalId }
       }));
     }
-    return true;
-  } catch (err) {
-    return false;
+    return { success: true };
+  } catch (err: any) {
+    console.error('Exceção ao deletar animal no Supabase:', err);
+    return { success: false, error: err?.message || 'Falha na conexão com o banco de dados.' };
   }
 }
 

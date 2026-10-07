@@ -12,7 +12,15 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
-import { isOccupationActive, getAllActiveOccupations, fetchAllOccupationsWithKennel, buildKennelCanonicalLookup, fetchAllKennelsFromSupabase } from '../src/lib/supabaseQueries';
+import { 
+  isOccupationActive, 
+  getAllActiveOccupations, 
+  fetchAllOccupationsWithKennel, 
+  buildKennelCanonicalLookup, 
+  fetchAllKennelsFromSupabase,
+  fetchWaitingAccommodationAnimals,
+  WaitingAccommodationAnimal
+} from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 
@@ -114,6 +122,9 @@ const AccommodationDashboard: React.FC = () => {
   const [kennels, setKennels] = useState<Kennel[]>(() => db.getKennels());
   const [occupations, setOccupations] = useState<KennelOccupation[]>(() => db.getOccupations());
   const [allAnimals, setAllAnimals] = useState<AnimalJoined[]>(() => db.getAnimalsJoined());
+  const [waitingAnimalsList, setWaitingAnimalsList] = useState<Array<WaitingAccommodationAnimal | AnimalJoined>>([]);
+  const [isLoadingQueue, setIsLoadingQueue] = useState<boolean>(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
 
   // Busca todas as baias brutas do cache para unificar qualquer alias/duplicidade de UUID
   const rawKennels: Kennel[] = useMemo(() => {
@@ -154,16 +165,42 @@ const AccommodationDashboard: React.FC = () => {
     }
   };
 
+  // Consulta diretamente o Supabase como FONTE OFICIAL para a Fila de Acomodação
+  const fetchOfficialWaitingQueue = async () => {
+    setIsLoadingQueue(true);
+    setQueueError(null);
+    try {
+      const remoteWaiting = await fetchWaitingAccommodationAnimals();
+      setWaitingAnimalsList(remoteWaiting);
+    } catch (err: any) {
+      console.warn('Erro ao carregar fila de acomodação do Supabase. Utilizando fallback local:', err);
+      setQueueError('Falha temporária ao sincronizar fila com o Supabase. Exibindo dados locais em cache.');
+      // Fallback local caso Supabase esteja temporariamente indisponível
+      const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
+      const localWaiting = allAnimals.filter(a => 
+        !activeAnimalIds.has(a.id) && 
+        a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
+        ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
+        ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
+      );
+      setWaitingAnimalsList(localWaiting);
+    } finally {
+      setIsLoadingQueue(false);
+    }
+  };
+
   const refreshData = () => {
     setKennels(db.getKennels());
     setOccupations(db.getOccupations());
     setAllAnimals(db.getAnimalsJoined());
     fetchOfficialOccupations();
+    fetchOfficialWaitingQueue();
   };
 
   useEffect(() => {
     refreshData();
     fetchOfficialOccupations();
+    fetchOfficialWaitingQueue();
 
     // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela
     pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true }).then(() => {
@@ -191,11 +228,19 @@ const AccommodationDashboard: React.FC = () => {
 
   const handleManualSync = async () => {
     setIsSyncing(true);
+    setQueueError(null);
     try {
-      await pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true });
-      refreshData();
-    } catch (e) {
+      await Promise.all([
+        pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true }),
+        fetchOfficialOccupations(),
+        fetchOfficialWaitingQueue()
+      ]);
+      setKennels(db.getKennels());
+      setOccupations(db.getOccupations());
+      setAllAnimals(db.getAnimalsJoined());
+    } catch (e: any) {
       console.warn('Erro ao sincronizar baias:', e);
+      setQueueError('Erro ao consultar o servidor central. Tente novamente.');
     } finally {
       setIsSyncing(false);
     }
@@ -206,30 +251,28 @@ const AccommodationDashboard: React.FC = () => {
     return [...allocatingAnimal.historico].sort((a, b) => new Date(b.dataAtendimento).getTime() - new Date(a.dataAtendimento).getTime())[0];
   }, [allocatingAnimal]);
 
-  // Animais aguardando acomodação: 
-  // 1. Não possuem ocupação ativa
-  // 2. Não estão em atendimento ativo, óbito, soltura, adoção ou alta ambulatorial
-  // 3. Estão em condições que exigem abrigo no centro (Em Tratamento, Disponível Adoção) OU com indicação técnica de internação
-  const waitingAnimals = useMemo(() => {
-    const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
-    return allAnimals.filter(a => 
-      !activeAnimalIds.has(a.id) && 
-      a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
-      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
-      ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
-    );
-  }, [allAnimals, occupations]);
+  // Animais aguardando acomodação: Supabase é a fonte oficial
+  const waitingAnimals = waitingAnimalsList;
 
   // Animais aptos para serem alocados em baia (sem acomodação ativa)
   const unaccommodatedAnimals = useMemo(() => {
     const activeAnimalIds = new Set(getAllActiveOccupations(occupations).map(o => o.animalId));
-    return allAnimals.filter(a => 
-      !activeAnimalIds.has(a.id) && 
-      a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
-      ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
-      ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
-    );
-  }, [allAnimals, occupations]);
+    // Prioriza os animais da fila oficial; complementa com outros elegíveis se houver
+    const waitingIds = new Set(waitingAnimals.map(a => a.id));
+    const combined: Array<WaitingAccommodationAnimal | AnimalJoined> = [...waitingAnimals];
+    for (const a of allAnimals) {
+      if (
+        !waitingIds.has(a.id) &&
+        !activeAnimalIds.has(a.id) && 
+        a.condicao !== AnimalCondicao.EM_ATENDIMENTO &&
+        ![AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ATENDIDO, AnimalCondicao.ALTA].includes(a.condicao) &&
+        ([AnimalCondicao.EM_TRATAMENTO, AnimalCondicao.DISPONIVEL_ADOCAO].includes(a.condicao) || !!a.necessitaInternacao)
+      ) {
+        combined.push(a);
+      }
+    }
+    return combined;
+  }, [waitingAnimals, allAnimals, occupations]);
 
   const getKennelData = (kennelId: string) => {
     const activeOccs = getAllActiveOccupations(occupations).filter(o => {
@@ -1130,11 +1173,27 @@ const AccommodationDashboard: React.FC = () => {
       </div>
 
       {/* Fila de Acomodação (Pós-Veterinário) */}
+      {queueError && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-xl text-xs font-semibold flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-amber-600 shrink-0" />
+            <span>{queueError}</span>
+          </div>
+          <button 
+            onClick={() => handleManualSync()}
+            className="underline font-bold hover:text-amber-900 cursor-pointer"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      )}
+
       {waitingAnimals.length > 0 && (
         <section className="bg-amber-50 rounded-2xl border-2 border-amber-100 overflow-hidden shadow-sm">
           <div className="bg-amber-100/50 px-6 py-3 border-b border-amber-200 flex items-center gap-2">
             <ClipboardCheck size={18} className="text-amber-600" />
             <h3 className="text-xs font-black uppercase text-amber-800 tracking-widest">Aguardando Acomodação (Pós-Triagem Veterinária)</h3>
+            {isLoadingQueue && <RotateCw size={12} className="animate-spin text-amber-600 ml-1" />}
             <span className="ml-auto bg-amber-600 text-white px-2 py-0.5 rounded-full text-[10px] font-bold">{waitingAnimals.length} animais</span>
           </div>
           <div className="p-4 overflow-x-auto">

@@ -735,3 +735,119 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
     return null;
   }
 }
+
+/**
+ * Interface dos animais que aguardam vaga/alocação na fila de acomodação.
+ */
+export interface WaitingAccommodationAnimal {
+  id: string;
+  nome: string;
+  especie: string;
+  raca?: string;
+  condicao: AnimalCondicao;
+  dataCadastro: string;
+  temTutor: boolean;
+  tutorId?: string;
+  solicitanteId?: string;
+  necessitaInternacao: boolean;
+  tipoAcomodacaoSugerida?: string;
+  justificativaInternacao?: string;
+  localResgate?: string;
+  tutor?: {
+    id?: string;
+    nomeCompleto: string;
+  };
+  solicitante?: {
+    id?: string;
+    nomeCompleto: string;
+  };
+  historico?: ClinicalRecord[];
+}
+
+/**
+ * Consulta diretamente no Supabase a lista oficial de animais que estão aguardando acomodação.
+ * Regra:
+ * 1. Condição: 'Em Tratamento' OU 'Disponível para Adoção' OU necessita_internacao = true
+ * 2. Condições excluídas: 'Em Atendimento', 'Óbito', 'Soltura', 'Adotado', 'Atendido', 'Alta'
+ * 3. Não deve possuir ocupação ativa (exit_date IS NULL) em kennel_occupations
+ * 4. Projeção estrita: busca somente os campos necessários sem SELECT *
+ */
+export async function fetchWaitingAccommodationAnimals(): Promise<WaitingAccommodationAnimal[]> {
+  try {
+    // 1. Busca IDs de animais que possuem ocupação ativa no Supabase
+    const { data: activeOccRows, error: occError } = await supabase
+      .from('kennel_occupations')
+      .select('animal_id')
+      .is('exit_date', null);
+
+    if (occError) {
+      console.warn('[fetchWaitingAccommodationAnimals] Erro ao buscar ocupações ativas:', occError.message);
+    }
+
+    const activeAnimalIdSet = new Set((activeOccRows || []).map((o: any) => o.animal_id).filter(Boolean));
+
+    // 2. Consulta no Supabase somente os campos estritamente necessários
+    const { data: animalRows, error: animalError } = await supabase
+      .from('animals')
+      .select(`
+        id,
+        nome,
+        especie,
+        raca,
+        condicao,
+        data_cadastro,
+        tem_tutor,
+        tutor_id,
+        solicitante_id,
+        necessita_internacao,
+        tipo_acomodacao_sugerida,
+        justificativa_internacao,
+        local_resgate,
+        tutores (id, nome_completo),
+        solicitantes (id, nome_completo)
+      `)
+      .not('condicao', 'in', '("Em Atendimento","Óbito","Soltura","Adotado","Atendido","Alta")')
+      .or('condicao.eq.Em Tratamento,condicao.eq.Disponível para Adoção,necessita_internacao.eq.true')
+      .order('data_cadastro', { ascending: true });
+
+    if (animalError) {
+      console.error('[fetchWaitingAccommodationAnimals] Erro ao buscar animais:', animalError);
+      throw animalError;
+    }
+
+    // 3. Filtra os animais que NÃO estão com baia ativa no momento
+    const eligible = (animalRows || []).filter((row: any) => !activeAnimalIdSet.has(row.id));
+
+    // 4. Mapeia para a estrutura de WaitingAccommodationAnimal
+    return eligible.map((row: any) => {
+      const tutorData = row.tutores 
+        ? { id: row.tutores.id, nomeCompleto: row.tutores.nome_completo }
+        : undefined;
+
+      const solicitanteData = row.solicitantes
+        ? { id: row.solicitantes.id, nomeCompleto: row.solicitantes.nome_completo }
+        : undefined;
+
+      return {
+        id: row.id,
+        nome: row.nome || 'Sem Nome',
+        especie: row.especie || 'Cão',
+        raca: row.raca || 'SRD',
+        condicao: row.condicao as AnimalCondicao,
+        dataCadastro: row.data_cadastro,
+        temTutor: !!row.tem_tutor,
+        tutorId: row.tutor_id || undefined,
+        solicitanteId: row.solicitante_id || undefined,
+        necessitaInternacao: !!row.necessita_internacao,
+        tipoAcomodacaoSugerida: row.tipo_acomodacao_sugerida || undefined,
+        justificativaInternacao: row.justificativa_internacao || undefined,
+        localResgate: row.local_resgate || undefined,
+        tutor: tutorData,
+        solicitante: solicitanteData,
+      };
+    });
+  } catch (err) {
+    console.warn('[fetchWaitingAccommodationAnimals] Exceção na consulta Supabase:', err);
+    throw err;
+  }
+}

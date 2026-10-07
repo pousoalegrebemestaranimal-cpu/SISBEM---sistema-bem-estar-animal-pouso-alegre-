@@ -8,7 +8,7 @@ import { fetchAnimalsPaginated } from '../src/lib/supabaseQueries';
 import { getThumbnailUrl } from '../src/lib/storageService';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Search, Plus, Edit2, Trash2, Filter, Heart, Stethoscope, Clock, Eye, AlertCircle, Camera, Leaf, UserCheck, Skull, UserCircle, MapPin, CheckCircle2, Home, Cpu, Printer, Scissors, RefreshCw } from 'lucide-react';
+import { Search, Plus, Edit2, Trash2, Filter, Heart, Stethoscope, Clock, Eye, AlertCircle, Camera, Leaf, UserCheck, Skull, UserCircle, MapPin, CheckCircle2, Home, Cpu, Printer, Scissors, RefreshCw, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 
@@ -22,6 +22,8 @@ const AnimalList: React.FC = () => {
   const [filterCondicao, setFilterCondicao] = useState<string>('TODOS');
   const [filterOrigem, setFilterOrigem] = useState<string>('TODOS');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [animals, setAnimals] = useState<AnimalJoined[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -77,10 +79,24 @@ const AnimalList: React.FC = () => {
     await loadPaginatedAnimals();
   };
 
-  const handleDelete = (id: string) => {
-    db.deleteAnimal(id);
-    setShowDeleteConfirm(null);
-    loadPaginatedAnimals();
+  const handleDelete = async (id: string) => {
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await db.deleteAnimalAsync(id);
+      if (!res.success) {
+        setDeleteError(res.error || 'Erro ao excluir o animal no Supabase. O registro foi mantido.');
+        setIsDeleting(false);
+        return;
+      }
+      setShowDeleteConfirm(null);
+      setDeleteError(null);
+      await loadPaginatedAnimals();
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Falha na comunicação com o banco de dados.');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const renderCondicaoBadge = (condicao: AnimalCondicao) => {
@@ -301,11 +317,42 @@ const AnimalList: React.FC = () => {
             <div className="text-center space-y-2">
               <div className="bg-red-100 text-red-600 w-12 h-12 rounded-full flex items-center justify-center mx-auto"><AlertCircle size={24} /></div>
               <h3 className="text-xl font-bold">Confirmar Exclusão</h3>
-              <p className="text-sm text-slate-500 font-medium">Deseja remover este registro do sistema? Esta ação é irreversível e apagará todos os prontuários associados.</p>
+              <p className="text-sm text-slate-500 font-medium">Deseja remover este registro do sistema? Esta ação é irreversível e apagará todos os prontuários associados no banco de dados.</p>
             </div>
+
+            {deleteError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold flex items-start gap-2">
+                <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="font-bold">Falha ao excluir no Supabase:</p>
+                  <p>{deleteError}</p>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-4">
-              <button onClick={() => setShowDeleteConfirm(null)} className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50 transition-all">Cancelar</button>
-              <button onClick={() => handleDelete(showDeleteConfirm)} className="flex-1 px-4 py-3 bg-red-600 text-white rounded-xl font-bold shadow-lg shadow-red-600/20 hover:bg-red-700 transition-all">Excluir</button>
+              <button 
+                type="button"
+                disabled={isDeleting}
+                onClick={() => { setShowDeleteConfirm(null); setDeleteError(null); }} 
+                className="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-slate-600 font-bold hover:bg-slate-50 transition-all disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button 
+                type="button"
+                disabled={isDeleting}
+                onClick={() => handleDelete(showDeleteConfirm)} 
+                className="flex-1 px-4 py-3 bg-red-600 text-white rounded-xl font-bold shadow-lg shadow-red-600/20 hover:bg-red-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" /> Excluindo...
+                  </>
+                ) : (
+                  'Excluir'
+                )}
+              </button>
             </div>
           </div>
         </div>

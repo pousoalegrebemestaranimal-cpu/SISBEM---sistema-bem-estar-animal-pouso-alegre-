@@ -1749,6 +1749,35 @@ export const db = {
     }
   },
 
+  deleteAnimalAsync: async (id: string): Promise<{ success: boolean; error?: string }> => {
+    // 1. Supabase é a fonte oficial: aguarda exclusão no PostgreSQL primeiro
+    const res = await deleteAnimalFromSupabase(id);
+    if (!res.success) {
+      return { success: false, error: res.error || 'Não foi possível excluir o animal no banco de dados.' };
+    }
+
+    // 2. Apenas após confirmação oficial do Supabase, limpa o cache local
+    const animals = db.getAnimals().filter(a => a.id !== id);
+    safeSetLocalAnimals(animals);
+    
+    const records = db.getRecords().filter(r => r.animalId !== id);
+    localStorage.setItem(KEYS.RECORDS, JSON.stringify(records));
+    
+    const logs = db.getStatusLogs().filter(l => l.animalId !== id);
+    localStorage.setItem(KEYS.STATUS_LOGS, JSON.stringify(logs));
+    
+    const occupations = db.getOccupations().filter(o => o.animalId !== id);
+    localStorage.setItem(KEYS.OCCUPATIONS, JSON.stringify(occupations));
+
+    const cirurgias = db.getCirurgias().filter(c => c.animalId !== id);
+    localStorage.setItem(KEYS.CIRURGIAS, JSON.stringify(cirurgias));
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-animals-changed', { detail: { deletedId: id } }));
+    }
+    return { success: true };
+  },
+
   getCirurgias: (): AgendamentoCirurgia[] => {
     const list: AgendamentoCirurgia[] = JSON.parse(localStorage.getItem(KEYS.CIRURGIAS) || '[]');
     return list.sort((a, b) => {
