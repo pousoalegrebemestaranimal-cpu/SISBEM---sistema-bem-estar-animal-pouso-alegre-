@@ -1907,7 +1907,7 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
                   kennel: mapped.kennel || existing.kennel,
                   animal: mapped.animal || existing.animal,
                   animals: mapped.animals || existing.animals
-                };
+                } as any;
               } else {
                 list.push(mapped);
               }

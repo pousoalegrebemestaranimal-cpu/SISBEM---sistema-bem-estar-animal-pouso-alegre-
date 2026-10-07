@@ -3,7 +3,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import * as ReactRouterDOM from 'react-router-dom';
 const { useParams, useNavigate, Link, useSearchParams } = ReactRouterDOM as any;
 import { db } from '../services/db';
-import { AnimalCondicao, Especie, KennelType, Adotante, AnimalJoined, ClinicalRecord, Prescription, Referral, Porte, CirurgiaStatus, CirurgiaPrioridade, AgendamentoCirurgia } from '../types';
+import { AnimalCondicao, Especie, KennelType, Kennel, Adotante, AnimalJoined, ClinicalRecord, Prescription, Referral, Porte, CirurgiaStatus, CirurgiaPrioridade, AgendamentoCirurgia } from '../types';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 

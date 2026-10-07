@@ -1,43 +1,129 @@
 
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { db } from '../services/db';
 import { AnimalCondicao, Especie } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2 } from 'lucide-react';
+import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2, RotateCw } from 'lucide-react';
 // Fix: Use import * as and cast to any to bypass named export errors
 import * as ReactRouterDOM from 'react-router-dom';
 import { startClinicalAttendance } from '../src/lib/attendanceService';
+import { supabase } from '../src/lib/supabase';
 const { useNavigate } = ReactRouterDOM as any;
+
+interface WaitlistAnimal {
+  id: string;
+  nome: string;
+  especie: Especie;
+  condicao: AnimalCondicao;
+  dataCadastro: string;
+  temTutor: boolean;
+  localResgate: string;
+  tutorId?: string;
+  tutor?: {
+    id?: string;
+    nomeCompleto: string;
+  };
+  emAtendimentoVetId?: string;
+}
 
 const VetWaitlist: React.FC = () => {
   const navigate = useNavigate();
   const user = db.getCurrentUser();
-  const [animalsState, setAnimalsState] = useState(() => db.getAnimalsJoined());
+  const [waitlist, setWaitlist] = useState<WaitlistAnimal[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [startingAnimalId, setStartingAnimalId] = useState<string | null>(null);
   const [blockingError, setBlockingError] = useState<{ animalId: string; message: string; vetName?: string } | null>(null);
 
-  // Escuta alterações em tempo real via CustomEvents ou Realtime Supabase
-  useEffect(() => {
-    const handleAnimalsChanged = () => {
-      setAnimalsState(db.getAnimalsJoined());
-    };
-    window.addEventListener('sisbem-animals-changed', handleAnimalsChanged);
-    return () => {
-      window.removeEventListener('sisbem-animals-changed', handleAnimalsChanged);
-    };
+  // Consulta diretamente o Supabase como fonte oficial da fila
+  const fetchWaitlist = useCallback(async (isManual = false) => {
+    if (isManual) {
+      setIsRefreshing(true);
+    }
+    setFetchError(null);
+
+    try {
+      const { data, error } = await supabase
+        .from('animals')
+        .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, tutor_id, tutores(id, nome_completo)')
+        .in('condicao', ['Acolhido', 'Aguardando Atendimento', 'Em Atendimento'])
+        .order('data_cadastro', { ascending: true });
+
+      if (error) {
+        console.error('[VetWaitlist] Erro ao buscar fila do Supabase:', error);
+        setFetchError('Não foi possível consultar o Supabase. Exibindo dados locais em cache.');
+        // Fallback seguro para cache local se Supabase estiver offline
+        const localAnimals = db.getAnimalsJoined()
+          .filter(a => 
+            a.condicao === AnimalCondicao.ACOLHIDO || 
+            a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO ||
+            a.condicao === AnimalCondicao.EM_ATENDIMENTO
+          )
+          .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
+        setWaitlist(localAnimals);
+        return;
+      }
+
+      const localAnimals = db.getAnimals();
+      const mapped: WaitlistAnimal[] = (data || []).map((row: any) => {
+        const tutorData = row.tutores 
+          ? { id: row.tutores.id, nomeCompleto: row.tutores.nome_completo }
+          : (row.tutor_id ? db.getTutores().find(t => t.id === row.tutor_id) : undefined);
+
+        const localMatch = localAnimals.find(a => a.id === row.id);
+
+        return {
+          id: row.id,
+          nome: row.nome,
+          especie: row.especie as Especie,
+          condicao: row.condicao as AnimalCondicao,
+          dataCadastro: row.data_cadastro,
+          temTutor: !!row.tem_tutor,
+          localResgate: row.local_resgate || 'Local não informado',
+          tutorId: row.tutor_id || undefined,
+          tutor: tutorData ? { id: tutorData.id, nomeCompleto: tutorData.nomeCompleto || '' } : undefined,
+          emAtendimentoVetId: (row as any).em_atendimento_vet_id || localMatch?.emAtendimentoVetId,
+        };
+      });
+
+      setWaitlist(mapped);
+    } catch (err: any) {
+      console.error('[VetWaitlist] Exceção ao consultar fila:', err);
+      setFetchError('Falha ao comunicar com o banco de dados oficial.');
+    } finally {
+      setLoading(false);
+      setIsRefreshing(false);
+    }
   }, []);
 
-  // Filtra animais aguardando atendimento ou já em atendimento (para sinalizar aos veterinários)
-  const waitlist = useMemo(() => {
-    return animalsState
-      .filter(a => 
-        a.condicao === AnimalCondicao.ACOLHIDO || 
-        a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO ||
-        a.condicao === AnimalCondicao.EM_ATENDIMENTO
+  // Busca inicial + Realtime + eventos locais
+  useEffect(() => {
+    fetchWaitlist();
+
+    const handleAnimalsChanged = () => {
+      fetchWaitlist();
+    };
+    window.addEventListener('sisbem-animals-changed', handleAnimalsChanged);
+
+    // Canal Realtime específico para public.animals
+    const channel = supabase
+      .channel('sisbem-vetwaitlist-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'animals' },
+        () => {
+          fetchWaitlist();
+        }
       )
-      .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
-  }, [animalsState]);
+      .subscribe();
+
+    return () => {
+      window.removeEventListener('sisbem-animals-changed', handleAnimalsChanged);
+      supabase.removeChannel(channel);
+    };
+  }, [fetchWaitlist]);
 
   const handleStartAttendance = async (animalId: string, animalNome: string) => {
     if (!user) return;
@@ -54,8 +140,8 @@ const VetWaitlist: React.FC = () => {
           message: res.message || `Este animal já está em atendimento pelo veterinário ${res.vetName || 'outro profissional'}.`,
           vetName: res.vetName
         });
-        // Atualiza a lista para refletir a saída do animal
-        setAnimalsState(db.getAnimalsJoined());
+        // Atualiza a fila oficial para refletir o status atual
+        await fetchWaitlist();
         return;
       }
 
@@ -77,12 +163,42 @@ const VetWaitlist: React.FC = () => {
 
   return (
     <div className="space-y-8 animate-in fade-in">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-          <Stethoscope className="text-teal-600" /> Fila de Espera Veterinária
-        </h2>
-        <p className="text-slate-500">Triagem de prontuários para novos animais e consultas externas.</p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+            <Stethoscope className="text-teal-600" /> Fila de Espera Veterinária
+          </h2>
+          <p className="text-slate-500">Triagem de prontuários para novos animais e consultas externas (Sincronizado via Supabase).</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => fetchWaitlist(true)}
+            disabled={isRefreshing || loading}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-white hover:bg-slate-50 active:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-sm font-semibold shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+            title="Consultar novamente o Supabase para atualizar a lista"
+          >
+            <RotateCw size={16} className={`text-teal-600 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <span>{isRefreshing ? 'Atualizando...' : 'Atualizar fila'}</span>
+          </button>
+        </div>
       </div>
+
+      {fetchError && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 p-4 rounded-xl flex items-center justify-between gap-4 text-sm animate-in slide-in-from-top-1">
+          <div className="flex items-center gap-3">
+            <AlertCircle size={20} className="text-amber-600 shrink-0" />
+            <p className="text-xs font-semibold">{fetchError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => fetchWaitlist(true)}
+            className="text-xs font-bold text-amber-800 underline hover:no-underline whitespace-nowrap cursor-pointer"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      )}
 
       {blockingError && (
         <div className="bg-rose-50 border-2 border-rose-300 text-rose-900 p-4 rounded-2xl flex items-center justify-between gap-4 animate-in slide-in-from-top-2 shadow-sm">
@@ -106,7 +222,12 @@ const VetWaitlist: React.FC = () => {
       )}
 
       <div className="grid grid-cols-1 gap-6">
-        {waitlist.length === 0 ? (
+        {loading && waitlist.length === 0 ? (
+          <div className="bg-white p-12 rounded-2xl border border-dashed border-slate-300 text-center space-y-3">
+            <Loader2 size={32} className="animate-spin text-teal-600 mx-auto" />
+            <p className="text-slate-500 font-medium text-sm">Consultando fila oficial no Supabase...</p>
+          </div>
+        ) : waitlist.length === 0 ? (
           <div className="bg-white p-12 rounded-2xl border border-dashed border-slate-300 text-center space-y-3">
             <div className="bg-slate-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto text-slate-400">
               <Clock size={32} />
@@ -246,10 +367,11 @@ const VetWaitlist: React.FC = () => {
 
       <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl text-blue-800 text-xs flex items-start gap-3">
         <Info size={16} className="shrink-0 mt-0.5" />
-        <p>A fila prioriza a ordem de chegada. Animais com <strong>Atendimento Externo</strong> são consultas clínicas agendadas ou triagens de tutores munícipes. Animais <strong>Errantes</strong> são novos acolhimentos que necessitam de triagem epidemiológica completa.</p>
+        <p>A fila prioriza a ordem de chegada (FIFO). Animais com <strong>Atendimento Externo</strong> são consultas clínicas agendadas ou triagens de tutores munícipes. Animais <strong>Errantes</strong> são novos acolhimentos que necessitam de triagem epidemiológica completa.</p>
       </div>
     </div>
   );
 };
 
 export default VetWaitlist;
+
