@@ -9,13 +9,15 @@ import { ptBR } from 'date-fns/locale';
 import { 
   ArrowLeft, Dog, User, Clipboard, FileText, Heart, 
   Stethoscope, Clock, MapPin, Scale, Calendar, Info, Plus, History, Phone, ShieldCheck, Pill, Skull, AlertTriangle, Leaf, Home, ArrowRightLeft, CheckCircle2, Activity, ArrowRight, UserCheck, Share2, Thermometer, Droplets, HeartPulse, Wind, Microscope, Syringe, Palette, IdCard, Eye, Camera, FlaskConical, ExternalLink, FileSearch, X, FileBadge2, MessageSquare, BriefcaseMedical, Zap, FileType, HeartHandshake, Save, Printer, Ambulance, UserCircle, ClipboardCheck, LogOut, Cpu, QrCode, HelpCircle, Scissors, XCircle, Check,
-  ChevronDown, ChevronUp, ChevronsUpDown
+  ChevronDown, ChevronUp, ChevronsUpDown, Loader2
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
+import { generatePrintHTML as generatePrintHTMLShared } from '../utils/printPrescription';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
 import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
+import { sendAnimalToVetWaitlist } from '../src/lib/attendanceService';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -93,6 +95,38 @@ const AnimalDetail: React.FC = () => {
       reloadAnimal();
     } catch (err: any) {
       alert(err.message || 'Erro ao dar alta.');
+    }
+  };
+
+  // Fila Veterinária
+  const [isSendingToWaitlist, setIsSendingToWaitlist] = useState(false);
+  const [queueFeedback, setQueueFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const handleSendToWaitlist = async () => {
+    if (!animal || !user) return;
+    setIsSendingToWaitlist(true);
+    setQueueFeedback(null);
+    try {
+      const res = await sendAnimalToVetWaitlist(animal.id);
+      if (res.success) {
+        setQueueFeedback({
+          type: 'success',
+          message: `Paciente ${animal.nome} enviado para a Fila Veterinária com sucesso! Aguardando atendimento.`,
+        });
+        reloadAnimal();
+      } else {
+        setQueueFeedback({
+          type: 'error',
+          message: res.message || 'Não foi possível enviar o animal para a fila veterinária.',
+        });
+      }
+    } catch (err: any) {
+      setQueueFeedback({
+        type: 'error',
+        message: err.message || 'Erro inesperado ao enviar animal para a fila.',
+      });
+    } finally {
+      setIsSendingToWaitlist(false);
     }
   };
 
@@ -352,12 +386,14 @@ const AnimalDetail: React.FC = () => {
       alert('Permita pop-ups para imprimir o receituário.');
       return;
     }
-    const html = generatePrintHTML(
-      `Receituário Pós-Cirúrgico - ${c.tipoCirurgia}`,
+    const html = generatePrintHTMLShared(
+      'Receituário Clínico',
       animal,
       vet,
       c.receitasPosOperatorias,
-      'PRESCRIPTION'
+      'PRESCRIPTION',
+      effectiveCurrentOccupation?.kennel?.name,
+      c.observacoesPosOperatorias
     );
     printWindow.document.write(html);
     printWindow.document.close();
@@ -456,129 +492,21 @@ const AnimalDetail: React.FC = () => {
     printWindow.document.close();
   };
 
-  const generatePrintHTML = (title: string, animal: AnimalJoined, vet: any, items: any[], type: 'PRESCRIPTION' | 'REFERRAL') => {
-    return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>SISBEM - ${title}</title>
-        <style>
-          @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&display=swap');
-          body { font-family: 'Montserrat', sans-serif; padding: 40px; color: #000; line-height: 1.45; background: #fff; font-size: 13px; }
-          .header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; border-bottom: 3px solid #000; padding-bottom: 12px; }
-          .title-container { flex-grow: 1; }
-          .pref-de { font-size: 18px; font-weight: 400; letter-spacing: 10px; margin: 0; color: #000; }
-          .pref-nome { font-size: 46px; font-weight: 900; margin: -5px 0 0 0; line-height: 1; letter-spacing: -2px; color: #000; }
-          .sub-title { font-size: 16px; font-weight: 700; margin: 8px 0 0 0; color: #000; border-top: 2px solid #000; padding-top: 4px; }
-          .meta-info { text-align: right; min-width: 130px; }
-          .doc-date { font-size: 16px; font-weight: 700; color: #000; }
-          .doc-main-title { font-size: 24px; font-weight: 900; text-transform: uppercase; text-align: center; letter-spacing: 1.5px; color: #000; margin: 20px 0; }
-          .section { margin-bottom: 20px; }
-          .section-title { font-size: 12px; font-weight: 900; text-transform: uppercase; border-bottom: 1px solid #ddd; padding-bottom: 3px; margin-bottom: 10px; color: #444; letter-spacing: 1px; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-          .box { background: #fcfcfc; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 4px; }
-          .label { font-size: 10px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-bottom: 2px; }
-          .val { font-size: 13.5px; font-weight: 700; color: #000; }
-          .presc-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12.5px; }
-          .presc-table thead th { background: #f8fafc; color: #334155; font-size: 11px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 6px; border-bottom: 2px solid #000; border-top: 1px solid #e2e8f0; text-align: left; }
-          .presc-table thead th.th-num { text-align: center; width: 36px; }
-          .presc-table tbody td { padding: 8px 6px; border-bottom: 1px solid #e2e8f0; vertical-align: top; color: #000; }
-          .presc-table tbody tr { page-break-inside: avoid; }
-          .td-num { text-align: center; font-weight: 900; font-size: 13px; color: #000; width: 36px; }
-          .td-med { font-weight: 700; min-width: 140px; }
-          .med-name { font-size: 13px; font-weight: 900; text-transform: uppercase; color: #000; }
-          .med-via { font-size: 10.5px; font-weight: 600; color: #64748b; margin-top: 1px; }
-          .td-dos, .td-freq, .td-dur { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
-          .td-obs { font-size: 12px; color: #334155; line-height: 1.4; word-break: break-word; }
-          .item-box { border: 2px solid #000; padding: 20px; border-radius: 8px; margin-top: 15px; page-break-inside: avoid; }
-          .item-top { border-bottom: 1px solid #000; padding-bottom: 10px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
-          .item-name { font-size: 22px; font-weight: 900; text-transform: uppercase; }
-          .item-tag { font-size: 13px; font-weight: 900; background: #000; color: #fff; padding: 4px 12px; border-radius: 4px; }
-          .item-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
-          .obs-box { margin-top: 15px; padding: 14px; background: #f5f5f5; border-left: 5px solid #000; font-style: italic; font-size: 14.5px; line-height: 1.5; }
-          .footer { margin-top: 70px; text-align: center; }
-          .line { width: 300px; border-top: 1px solid #000; margin: 0 auto 10px; }
-          .vet { font-size: 16px; font-weight: 900; text-transform: uppercase; }
-          .crmv { font-size: 13.5px; font-weight: 700; color: #444; }
-          @media print { body { padding: 0; font-size: 13px; } .no-print { display: none; } }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div class="title-container">
-            <div class="pref-de">PREFEITURA DE</div>
-            <div class="pref-nome">POUSO ALEGRE</div>
-            <div class="sub-title">Superintendência de Proteção e Cuidado Animal</div>
-          </div>
-          <div class="meta-info">
-            <div class="doc-date">${format(new Date(), 'dd/MM/yyyy')}</div>
-          </div>
-        </div>
-        <div class="doc-main-title">${title}</div>
-        <div class="section">
-          <div class="section-title">Paciente</div>
-          <div class="grid">
-            <div class="box"><div class="label">Animal / Espécie</div><div class="val">${animal.nome} (${animal.especie})</div></div>
-            <div class="box"><div class="label">Raça / Sexo / Peso</div><div class="val">${animal.raca} • ${animal.sexo} • ${animal.peso}kg</div></div>
-            <div class="box" style="grid-column: span 2"><div class="label">${animal.temTutor ? 'Responsável Legal' : 'Acomodação Interna'}</div><div class="val">${animal.temTutor ? (animal.tutor?.nomeCompleto || 'Não informado') : (effectiveCurrentOccupation?.kennel?.name || 'Centro de Bem-Estar Animal')}</div></div>
-          </div>
-        </div>
-        <div class="section">
-          <div class="section-title">${type === 'PRESCRIPTION' ? 'Prescrições' : 'Detalhes do Encaminhamento'}</div>
-          ${type === 'PRESCRIPTION' ? `
-            <table class="presc-table">
-              <thead>
-                <tr>
-                  <th class="th-num">Nº</th>
-                  <th>Medicamento</th>
-                  <th>Dosagem</th>
-                  <th>Frequência</th>
-                  <th>Duração</th>
-                  <th>Observações</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${items.map((i, idx) => `
-                  <tr>
-                    <td class="td-num">${idx + 1}</td>
-                    <td class="td-med">
-                      <div class="med-name">${i.medicamento}</div>
-                      ${i.via ? `<div class="med-via">Via: ${i.via}</div>` : ''}
-                    </td>
-                    <td class="td-dos">${i.dosagem || '—'}</td>
-                    <td class="td-freq">${i.frequencia || '—'}</td>
-                    <td class="td-dur">${i.duracao || '—'}</td>
-                    <td class="td-obs">${i.observacoes && i.observacoes !== 'N/A' ? i.observacoes : '—'}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          ` : `
-            ${items.map(i => `
-              <div class="item-box">
-                <div class="item-top">
-                  <div class="item-name">${i.especialidade}</div>
-                  <div class="item-tag">${'URGÊNCIA: ' + i.urgencia}</div>
-                </div>
-                <div class="item-grid">
-                  <div style="grid-column: span 3"><div class="label">Local Sugerido</div><div class="val">${i.localSugerido || 'À critério do tutor'}</div></div>
-                </div>
-                <div class="obs-box">
-                  <strong>Justificativa Técnica:</strong> ${i.motivo}
-                </div>
-              </div>
-            `).join('')}
-          `}
-        </div>
-        <div class="footer">
-          <div class="line"></div>
-          <div class="vet">${vet?.name || 'Médico Veterinário'}</div>
-          <div class="crmv">${vet?.crmv ? `CRMV: ${vet.crmv}` : 'Responsável Técnico'}</div>
-        </div>
-        <script>window.onload = function() { window.print(); }</script>
-      </body>
-      </html>
-    `;
+  const generatePrintHTML = (
+    title: string,
+    animal: AnimalJoined,
+    vet: any,
+    items: any[],
+    type: 'PRESCRIPTION' | 'REFERRAL' = 'PRESCRIPTION'
+  ) => {
+    return generatePrintHTMLShared(
+      title,
+      animal,
+      vet,
+      items,
+      type,
+      effectiveCurrentOccupation?.kennel?.name
+    );
   };
 
   const handleSaveModal = async () => {
@@ -826,6 +754,40 @@ const AnimalDetail: React.FC = () => {
         </div>
 
         <div className="flex-1 space-y-6 w-full">
+          {queueFeedback && (
+            <div className={`p-4 rounded-2xl border-2 flex items-center justify-between gap-3 text-sm animate-in fade-in shadow-sm ${
+              queueFeedback.type === 'success' 
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-900' 
+                : 'bg-rose-50 border-rose-300 text-rose-900'
+            }`}>
+              <div className="flex items-center gap-2.5">
+                {queueFeedback.type === 'success' ? (
+                  <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertTriangle size={20} className="text-rose-600 shrink-0" />
+                )}
+                <span className="font-bold">{queueFeedback.message}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                {queueFeedback.type === 'success' && (
+                  <Link
+                    to="/veterinario/fila"
+                    className="px-3 py-1.5 bg-emerald-600 text-white font-bold text-xs rounded-xl hover:bg-emerald-700 transition-colors shadow-sm whitespace-nowrap"
+                  >
+                    Ver na Fila
+                  </Link>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setQueueFeedback(null)}
+                  className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-col md:flex-row justify-between items-start gap-4">
             <div className="space-y-1">
               <div className="flex items-center gap-3">
@@ -865,10 +827,32 @@ const AnimalDetail: React.FC = () => {
                       <Clock size={18} className="text-amber-700 animate-pulse" /> Em Atendimento
                     </button>
                   )
-                ) : (
-                  <Link to={`/animais/atendimento/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg shadow-teal-600/20 hover:bg-teal-700 transition-all">
-                    <Stethoscope size={18} /> Iniciar Atendimento
+                ) : animal.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO ? (
+                  <Link 
+                    to="/veterinario/fila" 
+                    className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-amber-50 text-amber-900 border-2 border-amber-300 font-bold rounded-xl hover:bg-amber-100 shadow-sm transition-all"
+                    title="Paciente já está na Fila Veterinária. Clique para ver a fila."
+                  >
+                    <Clock size={18} className="text-amber-700" /> Na Fila Veterinária
                   </Link>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSendToWaitlist}
+                    disabled={isSendingToWaitlist}
+                    className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl shadow-lg shadow-teal-600/20 transition-all cursor-pointer disabled:opacity-50"
+                    title="Enviar animal para a Fila Veterinária para novo atendimento"
+                  >
+                    {isSendingToWaitlist ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" /> Enviando para Fila...
+                      </>
+                    ) : (
+                      <>
+                        <Stethoscope size={18} /> Enviar para Fila Veterinária
+                      </>
+                    )}
+                  </button>
                 )
               )}
               <Link to={`/animais/editar/${animal.id}`} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all">

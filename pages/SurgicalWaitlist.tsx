@@ -11,6 +11,7 @@ import * as ReactRouterDOM from 'react-router-dom';
 const { Link, useSearchParams } = ReactRouterDOM as any;
 import { format, isToday, isTomorrow, isPast, parseISO, startOfDay, addDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+import { generatePrintHTML } from '../utils/printPrescription';
 
 const SurgicalWaitlist: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -367,91 +368,25 @@ const SurgicalWaitlist: React.FC = () => {
     ]);
   };
 
-  const handlePrintPrescriptionDirect = (animal: AnimalJoined, vet: any, prescriptions: Array<Partial<Prescription>>) => {
+  const handlePrintPrescriptionDirect = (
+    animal: AnimalJoined,
+    vet: any,
+    prescriptions: Array<Partial<Prescription>>,
+    orientacoesGerais?: string
+  ) => {
     if (!animal || prescriptions.length === 0) return;
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
 
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>SISBEM - Receituário Pós-Cirúrgico</title>
-        <style>
-          @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;900&display=swap');
-          body { font-family: 'Montserrat', sans-serif; padding: 40px; color: #000; line-height: 1.45; background: #fff; font-size: 14px; }
-          .header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 25px; border-bottom: 3px solid #000; padding-bottom: 15px; }
-          .title-container { flex-grow: 1; }
-          .pref-de { font-size: 20px; font-weight: 400; letter-spacing: 10px; margin: 0; color: #000; }
-          .pref-nome { font-size: 48px; font-weight: 900; margin: -5px 0 0 0; line-height: 1; letter-spacing: -2px; color: #000; }
-          .sub-title { font-size: 18px; font-weight: 700; margin: 8px 0 0 0; color: #000; border-top: 2px solid #000; padding-top: 5px; }
-          .meta-info { text-align: right; min-width: 140px; }
-          .doc-tag { font-size: 13px; font-weight: 900; text-transform: uppercase; color: #444; margin-bottom: 4px; }
-          .doc-date { font-size: 18px; font-weight: 700; }
-          .section { margin-bottom: 22px; }
-          .section-title { font-size: 13px; font-weight: 900; text-transform: uppercase; border-bottom: 1px solid #ddd; padding-bottom: 4px; margin-bottom: 10px; color: #444; letter-spacing: 1px; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-          .box { background: #fcfcfc; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 4px; }
-          .label { font-size: 11.5px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-bottom: 2px; }
-          .val { font-size: 15px; font-weight: 700; color: #000; }
-          .item-box { border: 2px solid #000; padding: 18px; border-radius: 8px; margin-top: 14px; page-break-inside: avoid; }
-          .item-top { border-bottom: 1px solid #000; padding-bottom: 8px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-          .item-name { font-size: 20px; font-weight: 900; text-transform: uppercase; }
-          .item-tag { font-size: 12px; font-weight: 900; background: #000; color: #fff; padding: 4px 10px; border-radius: 4px; }
-          .item-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
-          .obs-box { margin-top: 12px; padding: 12px; background: #f5f5f5; border-left: 4px solid #000; font-style: italic; font-size: 14px; line-height: 1.45; }
-          .footer { margin-top: 70px; text-align: center; }
-          .line { width: 280px; border-top: 1px solid #000; margin: 0 auto 8px; }
-          .vet { font-size: 16px; font-weight: 900; text-transform: uppercase; }
-          .crmv { font-size: 13px; font-weight: 700; color: #444; }
-          @media print { body { padding: 0; font-size: 14px; } }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div class="title-container">
-            <div class="pref-de">PREFEITURA DE</div>
-            <div class="pref-nome">POUSO ALEGRE</div>
-            <div class="sub-title">Superintendência de Proteção e Cuidado Animal</div>
-          </div>
-          <div class="meta-info">
-            <div class="doc-tag">Receituário Pós-Cirúrgico</div>
-            <div class="doc-date">${format(new Date(), 'dd/MM/yyyy')}</div>
-          </div>
-        </div>
-        <div class="section">
-          <div class="section-title">Paciente</div>
-          <div class="grid">
-            <div class="box"><div class="label">Animal / Espécie</div><div class="val">${animal.nome} (${animal.especie})</div></div>
-            <div class="box"><div class="label">Raça / Sexo / Porte</div><div class="val">${animal.raca} • ${animal.sexo} • ${animal.porte}</div></div>
-            <div class="box" style="grid-column: span 2"><div class="label">${animal.temTutor ? 'Tutor Responsável' : 'Acomodação / Custódia'}</div><div class="val">${animal.temTutor ? (animal.tutor?.nomeCompleto || 'Tutor Externo') : (animal.currentOccupation?.kennel?.name || 'Centro de Bem-Estar Animal de Pouso Alegre')}</div></div>
-          </div>
-        </div>
-        <div class="section">
-          <div class="section-title">Prescrição e Cuidados Pós-Operatórios</div>
-          ${prescriptions.map((i, idx) => `
-            <div class="item-box">
-              <div class="item-top">
-                <div class="item-name">${idx + 1}. ${i.medicamento}</div>
-                <div class="item-tag">${i.via || 'Oral'}</div>
-              </div>
-              <div class="item-grid">
-                <div><div class="label">Dosagem</div><div class="val">${i.dosagem || 'Conforme orientação médica'}</div></div>
-                <div><div class="label">Frequência</div><div class="val">${i.frequencia || '12/12h'}</div></div>
-                <div><div class="label">Duração</div><div class="val">${i.duracao || '5 a 7 dias'}</div></div>
-              </div>
-              ${i.observacoes ? `<div class="obs-box"><strong>Orientações:</strong> ${i.observacoes}</div>` : ''}
-            </div>
-          `).join('')}
-        </div>
-        <div class="footer">
-          <div class="line"></div>
-          <div class="vet">${vet?.name || 'Médico(a) Veterinário(a)'}</div>
-          <div class="crmv">${vet?.crmv ? `CRMV: ${vet.crmv}` : 'Responsável Técnico'}</div>
-        </div>
-      </body>
-      </html>
-    `;
+    const html = generatePrintHTML(
+      'Receituário Clínico',
+      animal,
+      vet,
+      prescriptions,
+      'PRESCRIPTION',
+      animal.currentOccupation?.kennel?.name,
+      orientacoesGerais
+    );
     printWindow.document.write(html);
     printWindow.document.close();
     printWindow.focus();
@@ -480,7 +415,8 @@ const SurgicalWaitlist: React.FC = () => {
       handlePrintPrescriptionDirect(
         selectedCirurgiaToConcluir.animal,
         vetObj || user,
-        validReceitas
+        validReceitas,
+        conclusaoObs
       );
     }
 
@@ -997,10 +933,11 @@ const SurgicalWaitlist: React.FC = () => {
                             onClick={() => handlePrintPrescriptionDirect(
                               c.animal!,
                               c.veterinarioResponsavel || users.find(u => u.id === c.realizadaPorId),
-                              c.receitasPosOperatorias!
+                              c.receitasPosOperatorias!,
+                              c.observacoesPosOperatorias
                             )}
                             className="flex items-center gap-1 px-3 py-1.5 bg-teal-50 text-teal-700 border border-teal-200 font-bold text-xs rounded-xl hover:bg-teal-100 transition-all shadow-sm"
-                            title="Imprimir Receituário Pós-Cirúrgico"
+                            title="Imprimir Receituário Clínico"
                           >
                             <Pill size={14} className="text-teal-600" /> Receita
                           </button>
@@ -1146,10 +1083,11 @@ const SurgicalWaitlist: React.FC = () => {
                                 onClick={() => handlePrintPrescriptionDirect(
                                   c.animal!,
                                   c.veterinarioResponsavel || users.find(u => u.id === c.realizadaPorId),
-                                  c.receitasPosOperatorias!
+                                  c.receitasPosOperatorias!,
+                                  c.observacoesPosOperatorias
                                 )}
                                 className="p-1.5 text-teal-600 hover:text-teal-800 hover:bg-teal-50 rounded-lg"
-                                title="Imprimir Receituário Pós-Cirúrgico"
+                                title="Imprimir Receituário Clínico"
                               >
                                 <Pill size={16} />
                               </button>
@@ -1747,7 +1685,8 @@ const SurgicalWaitlist: React.FC = () => {
                           onClick={() => handlePrintPrescriptionDirect(
                             selectedCirurgiaToConcluir.animal!,
                             users.find(u => u.id === conclusaoVetId) || user,
-                            prescricoesPosOp.filter(p => p.medicamento.trim() !== '')
+                            prescricoesPosOp.filter(p => p.medicamento.trim() !== ''),
+                            conclusaoObs
                           )}
                           className="flex items-center gap-1 text-xs font-bold text-teal-700 hover:text-teal-800 hover:underline"
                         >

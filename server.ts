@@ -816,6 +816,56 @@ app.get('/api/health', (req, res) => {
   );
 
   app.post(
+    '/api/attendance/queue',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const { animalId } = req.body;
+      if (!animalId) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_PARAM',
+          message: 'animalId é obrigatório.',
+        });
+      }
+
+      const pool = createPool();
+      try {
+        await pool.query(
+          "UPDATE public.animals SET condicao = 'Aguardando Atendimento', em_atendimento_vet_id = NULL, em_atendimento_inicio = NULL WHERE id = $1;",
+          [animalId]
+        );
+        try {
+          await supabase.from('animals').update({
+            condicao: 'Aguardando Atendimento',
+            em_atendimento_vet_id: null,
+            em_atendimento_inicio: null,
+          }).eq('id', animalId);
+        } catch (sbErr) {
+          console.warn('[attendance/queue] Aviso Supabase:', sbErr);
+        }
+        return res.json({ success: true });
+      } catch (err: any) {
+        console.error('Erro na rota /api/attendance/queue:', err);
+        try {
+          await supabase.from('animals').update({
+            condicao: 'Aguardando Atendimento',
+            em_atendimento_vet_id: null,
+            em_atendimento_inicio: null,
+          }).eq('id', animalId);
+          return res.json({ success: true });
+        } catch (sbErr: any) {
+          return res.status(500).json({
+            success: false,
+            code: 'INTERNAL_ERROR',
+            message: 'Erro interno ao colocar animal na fila.',
+          });
+        }
+      }
+    }
+  );
+
+  app.post(
     '/api/attendance/finish',
     requireAuth,
     requireRoles(['VETERINARIO', 'ADMIN']),

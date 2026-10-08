@@ -544,3 +544,83 @@ export async function finishClinicalAttendance(
     idempotent: serverResponse.idempotent,
   };
 }
+
+/**
+ * Envia o animal para a Fila Veterinária (estado de aguardando atendimento).
+ * NÃO inicia o atendimento nem cria novo prontuário clínico.
+ * O atendimento somente começará quando um veterinário assumir pela Fila Veterinária.
+ */
+export async function sendAnimalToVetWaitlist(
+  animalId: string
+): Promise<{ success: boolean; message?: string }> {
+  if (!animalId) {
+    return { success: false, message: 'Identificador do animal é obrigatório.' };
+  }
+
+  const currentUser = db.getCurrentUser();
+  if (!currentUser || (currentUser.role !== 'VETERINARIO' && currentUser.role !== 'ADMIN')) {
+    return { success: false, message: 'Apenas veterinários e administradores podem enviar animais para a fila.' };
+  }
+
+  // 1. Atualização oficial no Supabase (Fonte da verdade para Realtime e fila compartilhada)
+  try {
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase
+      .from('animals')
+      .update({
+        condicao: AnimalCondicao.AGUARDANDO_ATENDIMENTO,
+        em_atendimento_vet_id: null,
+        em_atendimento_inicio: null,
+      })
+      .eq('id', animalId);
+
+    if (error) {
+      console.error('[sendAnimalToVetWaitlist] Erro no Supabase:', error);
+      return { success: false, message: error.message || 'Erro ao atualizar condição no Supabase.' };
+    }
+  } catch (err: any) {
+    console.error('[sendAnimalToVetWaitlist] Falha de comunicação com Supabase:', err);
+    return { success: false, message: err.message || 'Falha de comunicação com o banco de dados oficial.' };
+  }
+
+  // 2. Sincronização secundária com o backend Express / Cloud SQL (se ativo)
+  try {
+    const token = await getAuthToken();
+    if (token) {
+      await fetch('/api/attendance/queue', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ animalId }),
+      }).catch(() => null);
+    }
+  } catch (err) {
+    console.warn('[sendAnimalToVetWaitlist] Aviso ao sincronizar com backend:', err);
+  }
+
+  // 3. Atualização do cache local apenas após sucesso do Supabase
+  try {
+    const localAnimals = db.getAnimals();
+    const idx = localAnimals.findIndex(a => a.id === animalId);
+    if (idx !== -1) {
+      localAnimals[idx].condicao = AnimalCondicao.AGUARDANDO_ATENDIMENTO;
+      localAnimals[idx].emAtendimentoVetId = undefined;
+      localAnimals[idx].emAtendimentoInicio = undefined;
+      safeSetLocalAnimals(localAnimals);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('sisbem-animals-changed', {
+          detail: { action: 'sent_to_waitlist', animalId },
+        })
+      );
+    }
+  } catch (e) {
+    console.warn('[sendAnimalToVetWaitlist] Aviso ao atualizar cache local:', e);
+  }
+
+  return { success: true };
+}
