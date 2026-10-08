@@ -383,7 +383,7 @@ const AnimalDetail: React.FC = () => {
           body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 40px; color: #1e293b; line-height: 1.55; font-size: 14px; }
           .header { text-align: center; border-bottom: 2px solid #0f766e; padding-bottom: 15px; margin-bottom: 20px; }
           .title { font-size: 19px; font-weight: bold; text-transform: uppercase; color: #0f766e; }
-          .subtitle { font-size: 13.5px; color: #64748b; }
+          .subtitle { font-size: 16px; font-weight: bold; color: #0f172a; text-align: center; margin-top: 6px; line-height: 1.35; }
           .box { border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
           .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
           .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
@@ -398,7 +398,7 @@ const AnimalDetail: React.FC = () => {
       <body>
         <div class="header">
           <div class="title">SISBEM - Centro Municipal de Bem-Estar Animal</div>
-          <div class="subtitle">TERMO DE AUTORIZAÇÃO E CONSENTIMENTO PARA PROCEDIMENTO CIRÚRGICO / CASTRAÇÃO</div>
+          <div class="subtitle">TERMO DE AUTORIZAÇÃO E CONSENTIMENTO<br>PARA PROCEDIMENTO ANESTÉSICO/CIRURGIA</div>
         </div>
 
         <div class="box">
