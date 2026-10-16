@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, Prescription, Referral, ExamFile } from '../../types';
 import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante, mapSupabaseToRecord } from './supabaseSync';
+import { safeSetLocalAnimals } from './safeStorage';
 import { db } from '../../services/db';
 
 /**
@@ -281,7 +282,7 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
     let query = supabase
       .from('animals')
       .select(
-        'id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto',
+        'id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto, tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro), solicitantes (id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email)',
         { count: 'exact' }
       );
 
@@ -321,24 +322,26 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
     const totalCount = count ?? (rows?.length || 0);
 
     // 6. Enriquecimento pontual (Join) APENAS para os registros da página atual
-    const solicitantes = db.getSolicitantes();
-    const tutores = db.getTutores();
-    const users = db.getUsers();
-    const records = db.getRecords();
-    const logs = db.getStatusLogs();
-    const occupations = db.getOccupations();
-    const kennels = db.getKennels();
-    const cirurgias = db.getCirurgias();
+    const solicitantes = typeof window !== 'undefined' ? db.getSolicitantes() : [];
+    const tutores = typeof window !== 'undefined' ? db.getTutores() : [];
+    const users = typeof window !== 'undefined' ? db.getUsers() : [];
+    const records = typeof window !== 'undefined' ? db.getRecords() : [];
+    const logs = typeof window !== 'undefined' ? db.getStatusLogs() : [];
+    const occupations = typeof window !== 'undefined' ? db.getOccupations() : [];
+    const kennels = typeof window !== 'undefined' ? db.getKennels() : [];
+    const cirurgias = typeof window !== 'undefined' ? db.getCirurgias() : [];
 
     const joinedList: AnimalJoined[] = (rows || []).map((row: any) => {
       const animal = mapSupabaseToAnimal(row);
       const currentOcc = getActiveOccupation(occupations, animal.id);
       const animalCirurgias = cirurgias.filter(c => c.animalId === animal.id);
+      const tutorFromDb = row.tutores ? mapSupabaseToTutor(row.tutores) : undefined;
+      const solFromDb = row.solicitantes ? mapSupabaseToSolicitante(row.solicitantes) : undefined;
 
       return {
         ...animal,
-        solicitante: solicitantes.find(s => s.id === animal.solicitanteId),
-        tutor: animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined,
+        solicitante: solFromDb || solicitantes.find(s => s.id === animal.solicitanteId),
+        tutor: tutorFromDb || (animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined),
         usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
         historico: records.filter(r => r.animalId === animal.id && !r.inativo),
         statusLogs: logs.filter(l => l.animalId === animal.id),
@@ -346,6 +349,41 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
         cirurgias: animalCirurgias
       };
     });
+
+    // 7. Sincroniza em segundo plano os tutores e solicitantes recuperados para o cache local
+    if (rows && rows.length > 0) {
+      try {
+        const localTutores = db.getTutores();
+        const tutMap = new Map<string, Tutor>();
+        localTutores.forEach(t => tutMap.set(t.id, t));
+        let tutUpdated = false;
+        rows.forEach((r: any) => {
+          if (r.tutores && r.tutores.id && !tutMap.has(r.tutores.id)) {
+            tutMap.set(r.tutores.id, mapSupabaseToTutor(r.tutores));
+            tutUpdated = true;
+          }
+        });
+        if (tutUpdated) {
+          localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(tutMap.values())));
+        }
+      } catch (e) {}
+
+      try {
+        const localSols = db.getSolicitantes();
+        const solMap = new Map<string, Solicitante>();
+        localSols.forEach(s => solMap.set(s.id, s));
+        let solUpdated = false;
+        rows.forEach((r: any) => {
+          if (r.solicitantes && r.solicitantes.id && !solMap.has(r.solicitantes.id)) {
+            solMap.set(r.solicitantes.id, mapSupabaseToSolicitante(r.solicitantes));
+            solUpdated = true;
+          }
+        });
+        if (solUpdated) {
+          localStorage.setItem('sisbem_solicitantes', JSON.stringify(Array.from(solMap.values())));
+        }
+      } catch (e) {}
+    }
 
     return {
       data: joinedList,
@@ -631,7 +669,7 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
     });
 
     // 5. Mescla de forma segura com o cache local (sem apagar nem substituir registros existentes)
-    const localRecords = db.getRecords().filter(r => r.animalId === animalId);
+    const localRecords = typeof window !== 'undefined' ? db.getRecords().filter(r => r.animalId === animalId) : [];
     const recordsMap = new Map<string, ClinicalRecord>();
 
     // Primeiro insere os remotos
@@ -661,51 +699,90 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
       .sort((a, b) => new Date(b.dataAtendimento).getTime() - new Date(a.dataAtendimento).getTime());
 
     // Atualiza pontualmente o cache local de records deste animal
-    try {
-      const allLocal = db.getRecords();
-      const otherRecords = allLocal.filter(r => r.animalId !== animalId);
-      const newAllRecords = [...otherRecords, ...finalRecords];
-      localStorage.setItem('sisbem_records', JSON.stringify(newAllRecords));
-    } catch (_) {}
+    if (typeof window !== 'undefined') {
+      try {
+        const allLocal = db.getRecords();
+        const otherRecords = allLocal.filter(r => r.animalId !== animalId);
+        const newAllRecords = [...otherRecords, ...finalRecords];
+        localStorage.setItem('sisbem_records', JSON.stringify(newAllRecords));
+      } catch (_) {}
+    }
 
     return finalRecords;
   } catch (err) {
     console.warn('Erro ao consultar prontuários no Supabase:', err);
-    return db.getRecords().filter(r => r.animalId === animalId && !r.inativo);
+    return typeof window !== 'undefined' ? db.getRecords().filter(r => r.animalId === animalId && !r.inativo) : [];
   }
 }
 
 /**
  * Busca os dados de um animal específico diretamente no Supabase por ID com relacionamentos.
- * Usado para abrir a ficha completa mesmo que o animal não esteja no cache local recente.
+ * Usado para abrir a ficha completa e carregar dados na edição mesmo que o animal não esteja no cache local recente.
  */
 export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> {
   try {
     const { data: row, error } = await supabase
       .from('animals')
-      .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao, foto, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, resgate_samuvet, responsavel_samuvet')
+      .select(`
+        id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao, foto, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, resgate_samuvet, responsavel_samuvet,
+        tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro),
+        solicitantes (id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email)
+      `)
       .eq('id', id)
       .maybeSingle();
 
     if (error || !row) return null;
 
     const animal = mapSupabaseToAnimal(row);
-    const solicitantes = db.getSolicitantes();
-    const tutores = db.getTutores();
-    const users = db.getUsers();
-    const logs = db.getStatusLogs();
-    const kennels = db.getKennels();
-    const cirurgias = db.getCirurgias();
+    const solicitantes = typeof window !== 'undefined' ? db.getSolicitantes() : [];
+    const tutores = typeof window !== 'undefined' ? db.getTutores() : [];
+    const users = typeof window !== 'undefined' ? db.getUsers() : [];
+    const logs = typeof window !== 'undefined' ? db.getStatusLogs() : [];
+    const kennels = typeof window !== 'undefined' ? db.getKennels() : [];
+    const cirurgias = typeof window !== 'undefined' ? db.getCirurgias() : [];
+
+    const tutorData = row.tutores 
+      ? mapSupabaseToTutor(row.tutores)
+      : (animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined);
+
+    const solicitanteData = row.solicitantes 
+      ? mapSupabaseToSolicitante(row.solicitantes)
+      : (animal.solicitanteId ? solicitantes.find(s => s.id === animal.solicitanteId) : undefined);
+
+    // Sincroniza pontualmente o cache local deste animal e tutor para que qualquer tela reflita imediatamente
+    if (typeof window !== 'undefined') {
+      try {
+        if (tutorData) {
+          const localTutores = db.getTutores();
+          const tutMap = new Map<string, Tutor>();
+          localTutores.forEach(t => tutMap.set(t.id, t));
+          tutMap.set(tutorData.id, tutorData);
+          localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(tutMap.values())));
+        }
+        if (solicitanteData) {
+          const localSols = db.getSolicitantes();
+          const solMap = new Map<string, Solicitante>();
+          localSols.forEach(s => solMap.set(s.id, s));
+          solMap.set(solicitanteData.id, solicitanteData);
+          localStorage.setItem('sisbem_solicitantes', JSON.stringify(Array.from(solMap.values())));
+        }
+        const localAnimals = db.getAnimals();
+        const animMap = new Map<string, any>();
+        localAnimals.forEach(a => animMap.set(a.id, a));
+        animMap.set(animal.id, animal);
+        safeSetLocalAnimals(Array.from(animMap.values()));
+      } catch (e) {}
+    }
 
     // 1. Busca prontuários clínicos completos no Supabase (Fonte Canônica Oficial)
     const animalRecords = await fetchClinicalRecordsByAnimalId(id);
 
     // 2. Busca ocupações do animal diretamente no Supabase (fonte oficial)
     const remoteOccs = await fetchOccupationsByAnimalId(id);
-    const activeOcc = getActiveOccupation(remoteOccs) || getActiveOccupation(db.getOccupations(), animal.id);
+    const activeOcc = getActiveOccupation(remoteOccs) || (typeof window !== 'undefined' ? getActiveOccupation(db.getOccupations(), animal.id) : undefined);
 
     // 3. Se obteve dados do Supabase, sincroniza pontualmente o cache local deste animal
-    if (remoteOccs && remoteOccs.length > 0) {
+    if (typeof window !== 'undefined' && remoteOccs && remoteOccs.length > 0) {
       try {
         const localOccs: KennelOccupation[] = JSON.parse(localStorage.getItem('sisbem_occupations') || '[]');
         const map = new Map<string, KennelOccupation>();
@@ -722,8 +799,8 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
 
     return {
       ...animal,
-      solicitante: solicitantes.find(s => s.id === animal.solicitanteId),
-      tutor: animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined,
+      solicitante: solicitanteData,
+      tutor: tutorData,
       usuarioResponsavel: users.find(u => u.id === animal.usuarioResponsavelId),
       historico: animalRecords,
       statusLogs: logs.filter(l => l.animalId === animal.id),
@@ -732,6 +809,88 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
     };
   } catch (err) {
     console.warn('Erro ao buscar animal por id no Supabase:', err);
+    return null;
+  }
+}
+
+/**
+ * Consulta um tutor diretamente no Supabase com seus animais vinculados.
+ */
+export async function fetchTutorById(id: string): Promise<{ tutor: Tutor; animals: AnimalJoined[] } | null> {
+  try {
+    const { data: row, error } = await supabase
+      .from('tutores')
+      .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !row) return null;
+
+    const tutor = mapSupabaseToTutor(row);
+
+    const { data: animalRows } = await supabase
+      .from('animals')
+      .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto')
+      .eq('tutor_id', id)
+      .order('data_cadastro', { ascending: false });
+
+    const animals: AnimalJoined[] = (animalRows || []).map((r: any) => ({
+      ...mapSupabaseToAnimal(r),
+      tutor
+    }));
+
+    try {
+      const localTutores = db.getTutores();
+      const map = new Map<string, Tutor>();
+      localTutores.forEach(t => map.set(t.id, t));
+      map.set(tutor.id, tutor);
+      localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(map.values())));
+    } catch (e) {}
+
+    return { tutor, animals };
+  } catch (err) {
+    console.warn('Erro ao buscar tutor por id no Supabase:', err);
+    return null;
+  }
+}
+
+/**
+ * Consulta um solicitante diretamente no Supabase com seus animais vinculados.
+ */
+export async function fetchSolicitanteById(id: string): Promise<{ solicitante: Solicitante; animals: AnimalJoined[] } | null> {
+  try {
+    const { data: row, error } = await supabase
+      .from('solicitantes')
+      .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email, observacoes, data_cadastro')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !row) return null;
+
+    const solicitante = mapSupabaseToSolicitante(row);
+
+    const { data: animalRows } = await supabase
+      .from('animals')
+      .select('id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto')
+      .eq('solicitante_id', id)
+      .order('data_cadastro', { ascending: false });
+
+    const animals: AnimalJoined[] = (animalRows || []).map((r: any) => ({
+      ...mapSupabaseToAnimal(r),
+      solicitante
+    }));
+
+    try {
+      const localSols = db.getSolicitantes();
+      const map = new Map<string, Solicitante>();
+      localSols.forEach(s => map.set(s.id, s));
+      map.set(solicitante.id, solicitante);
+      localStorage.setItem('sisbem_solicitantes', JSON.stringify(Array.from(map.values())));
+    } catch (e) {}
+
+    return { solicitante, animals };
+  } catch (err) {
+    console.warn('Erro ao buscar solicitante por id no Supabase:', err);
     return null;
   }
 }

@@ -1,8 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { db } from '../services/db';
-import { Solicitante } from '../types';
-import { ArrowLeft, IdCard, Phone, User, Calendar, ClipboardCheck, Dog, MapPin, Eye, Building2, QrCode, Copy, Check, Edit2, Mail, Home, Info, X } from 'lucide-react';
+import { Solicitante, AnimalJoined } from '../types';
+import { fetchSolicitanteById } from '../src/lib/supabaseQueries';
+import { ArrowLeft, IdCard, Phone, User, Calendar, ClipboardCheck, Dog, MapPin, Eye, Building2, QrCode, Copy, Check, Edit2, Mail, Home, Info, X, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { formatCPF, formatTelefone } from '../utils/validation';
@@ -28,8 +29,36 @@ const SolicitanteDetail: React.FC = () => {
   });
   const [formError, setFormError] = useState<string | null>(null);
 
-  const solicitante = useMemo(() => db.getSolicitantes().find(s => s.id === id), [id, refreshKey]);
-  const animals = useMemo(() => id ? db.getAnimalsBySolicitante(id) : [], [id, refreshKey]);
+  const [solicitante, setSolicitante] = useState<Solicitante | null>(() => (id ? db.getSolicitantes().find(s => s.id === id) || null : null));
+  const [animals, setAnimals] = useState<AnimalJoined[]>(() => (id ? db.getAnimalsBySolicitante(id) : []));
+  const [isLoading, setIsLoading] = useState(!solicitante);
+
+  useEffect(() => {
+    if (!id) return;
+    fetchSolicitanteById(id)
+      .then(res => {
+        if (res) {
+          setSolicitante(res.solicitante);
+          setAnimals(res.animals);
+        }
+      })
+      .catch(err => {
+        console.warn('Erro ao carregar solicitante do Supabase:', err);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [id, refreshKey]);
+
+  if (isLoading) {
+    return (
+      <div className="p-16 text-center space-y-4 bg-white rounded-3xl border border-slate-200">
+        <Loader2 className="w-10 h-10 animate-spin text-teal-600 mx-auto" />
+        <p className="text-sm font-bold text-slate-700">Carregando dados do solicitante e animais vinculados...</p>
+        <p className="text-xs text-slate-400">Consultando a base de dados oficial no Supabase.</p>
+      </div>
+    );
+  }
 
   if (!solicitante) return <div className="p-8 text-center text-slate-500 font-bold">Solicitante não encontrado.</div>;
 

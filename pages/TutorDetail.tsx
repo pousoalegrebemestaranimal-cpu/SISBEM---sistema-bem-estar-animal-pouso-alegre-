@@ -1,8 +1,10 @@
 
-import React, { useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { db } from '../services/db';
-import { ArrowLeft, IdCard, Phone, UserCircle, Calendar, ClipboardCheck, Dog, MapPin, Eye, Home, HeartPulse, User, FileText, ExternalLink, ShieldCheck } from 'lucide-react';
+import { Tutor, AnimalJoined } from '../types';
+import { fetchTutorById } from '../src/lib/supabaseQueries';
+import { ArrowLeft, IdCard, Phone, UserCircle, Calendar, ClipboardCheck, Dog, MapPin, Eye, Home, HeartPulse, User, FileText, ExternalLink, ShieldCheck, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
@@ -10,8 +12,26 @@ const TutorDetail: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   
-  const tutor = useMemo(() => db.getTutores().find(t => t.id === id), [id]);
-  const animals = useMemo(() => id ? db.getAnimalsByTutor(id) : [], [id]);
+  const [tutor, setTutor] = useState<Tutor | null>(() => (id ? db.getTutores().find(t => t.id === id) || null : null));
+  const [animals, setAnimals] = useState<AnimalJoined[]>(() => (id ? db.getAnimalsByTutor(id) : []));
+  const [isLoading, setIsLoading] = useState(!tutor);
+
+  useEffect(() => {
+    if (!id) return;
+    fetchTutorById(id)
+      .then(res => {
+        if (res) {
+          setTutor(res.tutor);
+          setAnimals(res.animals);
+        }
+      })
+      .catch(err => {
+        console.warn('Erro ao carregar tutor do Supabase:', err);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [id]);
 
   const handleOpenDoc = (base64: string) => {
     const win = window.open();
@@ -26,6 +46,16 @@ const TutorDetail: React.FC = () => {
       win.document.close();
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="p-16 text-center space-y-4 bg-white rounded-3xl border border-slate-200">
+        <Loader2 className="w-10 h-10 animate-spin text-indigo-600 mx-auto" />
+        <p className="text-sm font-bold text-slate-700">Carregando dados do tutor e pacientes vinculados...</p>
+        <p className="text-xs text-slate-400">Consultando a base de dados oficial no Supabase.</p>
+      </div>
+    );
+  }
 
   if (!tutor) return <div className="p-8 text-center text-slate-500 font-bold">Tutor não encontrado no sistema.</div>;
 

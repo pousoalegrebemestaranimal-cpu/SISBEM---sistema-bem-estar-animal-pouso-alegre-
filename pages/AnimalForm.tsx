@@ -4,11 +4,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as ReactRouterDOM from 'react-router-dom';
 const { useParams, useNavigate } = ReactRouterDOM as any;
 import { db } from '../services/db';
-import { Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
+import { Animal, Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
 import { syncAnimalToSupabase, syncTutorToSupabase, syncSolicitanteToSupabase } from '../src/lib/supabaseSync';
+import { fetchAnimalById } from '../src/lib/supabaseQueries';
+import { supabase } from '../src/lib/supabase';
 import { uploadAnimalPhoto, compressImage } from '../src/lib/storageService';
 import { validateCPF, formatCPF, formatTelefone } from '../utils/validation';
-import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock } from 'lucide-react';
+import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock, Loader2 } from 'lucide-react';
 
 const AnimalForm: React.FC = () => {
   const { id } = useParams();
@@ -62,6 +64,7 @@ const AnimalForm: React.FC = () => {
   });
 
   const [tutor, setTutor] = useState<any>({
+    id: '',
     nomeCompleto: '',
     cpf: '',
     telefone: '',
@@ -70,74 +73,108 @@ const AnimalForm: React.FC = () => {
     documentoCadUnico: ''
   });
 
+  const [loadingInitial, setLoadingInitial] = useState(false);
+
   useEffect(() => {
     setOngs(db.getOngs());
   }, []);
 
+  const applyAnimalData = (data: any) => {
+    setAnimal({
+      ...data,
+      id: data.id,
+      peso: data.peso !== undefined && data.peso !== null ? data.peso.toString() : '',
+      idade: data.idade || '',
+      corPelagem: data.corPelagem || '',
+      dataObito: data.dataObito || '',
+      causaObito: data.causaObito || '',
+      dataSoltura: data.dataSoltura || '',
+      localSoltura: data.localSoltura || '',
+      foto: data.foto || '',
+      resgateSamuvet: !!data.resgateSamuvet,
+      responsavelSamuvet: data.responsavelSamuvet || '',
+      temTutor: !!data.temTutor,
+      tutorId: data.tutorId || (data.tutor ? data.tutor.id : undefined),
+      solicitanteId: data.solicitanteId || (data.solicitante ? data.solicitante.id : undefined),
+      castrado: !!data.castrado,
+      microchipado: !!data.microchipado,
+      numeroMicrochip: data.numeroMicrochip || ''
+    });
+    setActiveTab(data.temTutor ? 'EXTERNO' : 'RESGATE');
+
+    if (data.tutor) {
+      setTutor({
+        id: data.tutor.id || data.tutorId || '',
+        nomeCompleto: data.tutor.nomeCompleto || '',
+        cpf: data.tutor.cpf || '',
+        telefone: data.tutor.telefone || '',
+        endereco: data.tutor.endereco || '',
+        temCadUnico: !!data.tutor.temCadUnico,
+        documentoCadUnico: data.tutor.documentoCadUnico || ''
+      });
+    }
+
+    if (data.solicitante) {
+      setSolicitante({
+        id: data.solicitante.id || data.solicitanteId || '',
+        nomeCompleto: data.solicitante.nomeCompleto || '',
+        cpf: data.solicitante.cpf || '',
+        telefone: data.solicitante.telefone || '',
+        tipo: data.solicitante.tipo || (data.solicitante.codigoOng ? 'ONG' : 'CIDADAO'),
+        codigoOng: data.solicitante.codigoOng || '',
+        responsavel: data.solicitante.responsavel || '',
+        endereco: data.solicitante.endereco || ''
+      });
+
+      if (data.solicitante.cpf === 'INST-BOMBEIROS') setSolicitanteType('BOMBEIROS');
+      else if (data.solicitante.cpf === 'INST-PM') setSolicitanteType('PM');
+      else if (data.solicitante.cpf === 'INST-PA') setSolicitanteType('AMBIENTAL');
+      else if (data.solicitante.tipo === 'DESCONHECIDO' || data.solicitante.cpf === 'DESC-ANONIMO' || data.solicitante.nomeCompleto?.toLowerCase().includes('desconhecido')) setSolicitanteType('DESCONHECIDO');
+      else if (data.solicitante.tipo === 'ONG' || data.solicitante.codigoOng) setSolicitanteType('ONG');
+      else setSolicitanteType('PARTICULAR');
+    }
+  };
+
   useEffect(() => {
     if (id) {
-      const existing = db.getAnimalsJoined().find(a => a.id === id);
-      if (existing) {
-        setAnimal({
-          ...existing,
-          peso: existing.peso.toString(),
-          idade: existing.idade || '',
-          corPelagem: existing.corPelagem || '',
-          dataObito: existing.dataObito || '',
-          causaObito: existing.causaObito || '',
-          dataSoltura: existing.dataSoltura || '',
-          localSoltura: existing.localSoltura || '',
-          foto: existing.foto || '',
-          resgateSamuvet: !!existing.resgateSamuvet,
-          responsavelSamuvet: existing.responsavelSamuvet || '',
-          temTutor: !!existing.temTutor,
-          castrado: !!existing.castrado,
-          microchipado: !!existing.microchipado,
-          numeroMicrochip: existing.numeroMicrochip || ''
-        });
-        setActiveTab(existing.temTutor ? 'EXTERNO' : 'RESGATE');
-        
-        if (existing.tutor) {
-          setTutor({
-            nomeCompleto: existing.tutor.nomeCompleto || '',
-            cpf: existing.tutor.cpf || '',
-            telefone: existing.tutor.telefone || '',
-            endereco: existing.tutor.endereco || '',
-            temCadUnico: !!existing.tutor.temCadUnico,
-            documentoCadUnico: existing.tutor.documentoCadUnico || ''
-          });
-        }
-
-        if (existing.solicitante) {
-          setSolicitante({
-            id: existing.solicitante.id || '',
-            nomeCompleto: existing.solicitante.nomeCompleto || '',
-            cpf: existing.solicitante.cpf || '',
-            telefone: existing.solicitante.telefone || '',
-            tipo: existing.solicitante.tipo || (existing.solicitante.codigoOng ? 'ONG' : 'CIDADAO'),
-            codigoOng: existing.solicitante.codigoOng || '',
-            responsavel: existing.solicitante.responsavel || '',
-            endereco: existing.solicitante.endereco || ''
-          });
-          
-          if (existing.solicitante.cpf === 'INST-BOMBEIROS') setSolicitanteType('BOMBEIROS');
-          else if (existing.solicitante.cpf === 'INST-PM') setSolicitanteType('PM');
-          else if (existing.solicitante.cpf === 'INST-PA') setSolicitanteType('AMBIENTAL');
-          else if (existing.solicitante.tipo === 'DESCONHECIDO' || existing.solicitante.cpf === 'DESC-ANONIMO' || existing.solicitante.nomeCompleto?.toLowerCase().includes('desconhecido')) setSolicitanteType('DESCONHECIDO');
-          else if (existing.solicitante.tipo === 'ONG' || existing.solicitante.codigoOng) setSolicitanteType('ONG');
-          else setSolicitanteType('PARTICULAR');
-        }
+      // 1. Carrega imediatamente do cache local se disponível (render instantâneo)
+      const local = db.getAnimalsJoined().find(a => a.id === id);
+      if (local) {
+        applyAnimalData(local);
+      } else {
+        setLoadingInitial(true);
       }
+
+      // 2. Consulta SEMPRE no Supabase (Fonte Canônica Oficial) para garantir dados atualizados e completos em qualquer computador
+      fetchAnimalById(id)
+        .then(remoteAnimal => {
+          if (remoteAnimal) {
+            applyAnimalData(remoteAnimal);
+          } else if (!local) {
+            setMessage({ type: 'error', text: 'Registro do animal não foi localizado no banco de dados Supabase.' });
+          }
+        })
+        .catch(err => {
+          console.warn('Erro ao carregar animal do Supabase:', err);
+          if (!local) {
+            setMessage({ type: 'error', text: 'Falha ao buscar dados do animal no servidor.' });
+          }
+        })
+        .finally(() => {
+          setLoadingInitial(false);
+        });
     }
   }, [id]);
 
-  // Busca automática de Tutor por CPF
+  // Busca automática de Tutor por CPF (cache local + Supabase)
   useEffect(() => {
-    const cleanCPF = tutor.cpf.replace(/\D/g, '');
+    const cleanCPF = tutor.cpf ? tutor.cpf.replace(/\D/g, '') : '';
     if (cleanCPF.length === 11 && activeTab === 'EXTERNO') {
-      const existingTutor = db.getTutores().find(t => t.cpf === formatCPF(cleanCPF));
+      const formatted = formatCPF(cleanCPF);
+      const existingTutor = db.getTutores().find(t => t.cpf === formatted);
       if (existingTutor) {
         setTutor({
+          id: existingTutor.id,
           nomeCompleto: existingTutor.nomeCompleto,
           cpf: existingTutor.cpf,
           telefone: existingTutor.telefone,
@@ -146,15 +183,40 @@ const AnimalForm: React.FC = () => {
           documentoCadUnico: existingTutor.documentoCadUnico || ''
         });
         setMessage({ type: 'info', text: 'Tutor já cadastrado no sistema.' });
+      } else {
+        // Consulta no Supabase diretamente
+        (async () => {
+          try {
+            const { data: remoteTut } = await supabase
+              .from('tutores')
+              .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico')
+              .eq('cpf', formatted)
+              .maybeSingle();
+
+            if (remoteTut) {
+              setTutor({
+                id: remoteTut.id,
+                nomeCompleto: remoteTut.nome_completo,
+                cpf: remoteTut.cpf,
+                telefone: remoteTut.telefone || '',
+                endereco: remoteTut.endereco || '',
+                temCadUnico: !!remoteTut.tem_cad_unico,
+                documentoCadUnico: remoteTut.documento_cad_unico || ''
+              });
+              setMessage({ type: 'info', text: 'Tutor localizado no banco de dados em nuvem (Supabase).' });
+            }
+          } catch {}
+        })();
       }
     }
   }, [tutor.cpf, activeTab]);
 
-  // Busca automática de Solicitante por CPF
+  // Busca automática de Solicitante por CPF (cache local + Supabase)
   useEffect(() => {
-    const cleanCPF = solicitante.cpf.replace(/\D/g, '');
+    const cleanCPF = solicitante.cpf ? solicitante.cpf.replace(/\D/g, '') : '';
     if (cleanCPF.length === 11 && !id && activeTab === 'RESGATE' && solicitanteType === 'PARTICULAR') { 
-      const existingSolicitante = db.getSolicitantes().find(s => s.cpf === formatCPF(cleanCPF));
+      const formatted = formatCPF(cleanCPF);
+      const existingSolicitante = db.getSolicitantes().find(s => s.cpf === formatted);
       if (existingSolicitante) {
         setSolicitante({
           id: existingSolicitante.id,
@@ -164,6 +226,30 @@ const AnimalForm: React.FC = () => {
           tipo: 'CIDADAO'
         });
         setMessage({ type: 'info', text: 'Solicitante já cadastrado no sistema.' });
+      } else {
+        (async () => {
+          try {
+            const { data: remoteSol } = await supabase
+              .from('solicitantes')
+              .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco')
+              .eq('cpf', formatted)
+              .maybeSingle();
+
+            if (remoteSol) {
+              setSolicitante({
+                id: remoteSol.id,
+                nomeCompleto: remoteSol.nome_completo,
+                cpf: remoteSol.cpf,
+                telefone: remoteSol.telefone || '',
+                tipo: remoteSol.tipo || 'CIDADAO',
+                codigoOng: remoteSol.codigo_ong || '',
+                responsavel: remoteSol.responsavel || '',
+                endereco: remoteSol.endereco || ''
+              });
+              setMessage({ type: 'info', text: 'Solicitante localizado no banco de dados em nuvem (Supabase).' });
+            }
+          } catch {}
+        })();
       }
     }
   }, [solicitante.cpf, id, solicitanteType, activeTab]);
@@ -355,33 +441,96 @@ const AnimalForm: React.FC = () => {
         }
       }
 
-      const personaData = isExterno ? tutor : solicitante;
       const targetAnimalId = animal.id || id || crypto.randomUUID();
-      const animalToSave = {
+
+      // 2. Resolve e persiste TUTOR ou SOLICITANTE no Supabase (Fonte Oficial)
+      let finalTutorId = tutor.id || animal.tutorId;
+      let finalSolId = solicitante.id || animal.solicitanteId;
+
+      if (isExterno) {
+        if (!finalTutorId && tutor.cpf && tutor.cpf.trim()) {
+          const cleanCpf = tutor.cpf.replace(/\D/g, '');
+          if (cleanCpf.length === 11) {
+            const { data: existingTutorRow } = await supabase
+              .from('tutores')
+              .select('id')
+              .eq('cpf', formatCPF(cleanCpf))
+              .maybeSingle();
+            if (existingTutorRow?.id) {
+              finalTutorId = existingTutorRow.id;
+            }
+          }
+        }
+        if (!finalTutorId) {
+          finalTutorId = crypto.randomUUID();
+        }
+
+        const tutorToSync: Tutor = {
+          id: finalTutorId,
+          nomeCompleto: tutor.nomeCompleto || 'Tutor Desconhecido',
+          cpf: tutor.cpf || '',
+          telefone: tutor.telefone || '',
+          endereco: tutor.endereco || '',
+          temCadUnico: !!tutor.temCadUnico,
+          documentoCadUnico: tutor.documentoCadUnico || '',
+          dataCadastro: tutor.dataCadastro || new Date().toISOString()
+        };
+
+        await syncTutorToSupabase(tutorToSync);
+      } else {
+        if (!finalSolId && solicitante.cpf && solicitante.cpf.trim()) {
+          const cleanCpf = solicitante.cpf.replace(/\D/g, '');
+          if (cleanCpf.length === 11) {
+            const { data: existingSolRow } = await supabase
+              .from('solicitantes')
+              .select('id')
+              .eq('cpf', formatCPF(cleanCpf))
+              .maybeSingle();
+            if (existingSolRow?.id) {
+              finalSolId = existingSolRow.id;
+            }
+          }
+        }
+        if (!finalSolId) {
+          finalSolId = crypto.randomUUID();
+        }
+
+        const solToSync: Solicitante = {
+          id: finalSolId,
+          nomeCompleto: solicitante.nomeCompleto || 'Solicitante Desconhecido',
+          cpf: solicitante.cpf || '',
+          telefone: solicitante.telefone || '',
+          tipo: solicitante.tipo || (solicitante.codigoOng ? 'ONG' : 'CIDADAO'),
+          codigoOng: solicitante.codigoOng ? solicitante.codigoOng.trim().toUpperCase() : undefined,
+          responsavel: solicitante.responsavel || '',
+          endereco: solicitante.endereco || '',
+          email: solicitante.email || ''
+        };
+
+        await syncSolicitanteToSupabase(solToSync);
+      }
+
+      // 3. Monta o animal com os vínculos oficiais corretos
+      const animalToSave: Animal = {
         ...animal,
         id: targetAnimalId,
         foto: finalFoto,
         peso: Number(animal.peso) || 0,
+        temTutor: isExterno,
+        tutorId: isExterno ? finalTutorId : undefined,
+        solicitanteId: !isExterno ? finalSolId : undefined,
         usuarioResponsavelId: animal.usuarioResponsavelId || user!.id,
         dataCadastro: animal.dataCadastro || new Date().toISOString()
       };
 
-      // 2. SALVAR PRIMEIRO NO SUPABASE (Fonte oficial dos dados)
-      let supabaseSuccess = false;
-      try {
-        if (personaData && personaData.cpf) {
-          if (isExterno) {
-            await syncTutorToSupabase(personaData as Tutor);
-          } else {
-            await syncSolicitanteToSupabase(personaData as Solicitante);
-          }
-        }
-        supabaseSuccess = await syncAnimalToSupabase(animalToSave);
-      } catch (syncErr) {
-        console.warn('Falha preliminar no sync do Supabase:', syncErr);
-      }
+      // 4. Salva no Supabase (Fonte Oficial dos Dados)
+      const supabaseSuccess = await syncAnimalToSupabase(animalToSave);
 
-      // 3. ATUALIZA CACHE LOCAL (Cópia secundária, resiliente e protegida de QuotaExceededError)
+      // 5. Atualiza cache local de forma consistente com os mesmos IDs
+      const personaData = isExterno 
+        ? { ...tutor, id: finalTutorId } 
+        : { ...solicitante, id: finalSolId };
+
       try {
         db.saveAnimal(animalToSave, personaData, user!.id);
       } catch (cacheErr) {
@@ -422,8 +571,14 @@ const AnimalForm: React.FC = () => {
         </div>
       )}
 
-      {/* TRIAGEM DE IDENTIFICAÇÃO E NAVEGAÇÃO POR ABAS */}
-      <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-sm overflow-hidden">
+      {loadingInitial ? (
+        <div className="bg-white p-16 rounded-2xl border-2 border-slate-100 shadow-sm text-center space-y-4 animate-in fade-in">
+          <Loader2 className="w-10 h-10 animate-spin text-teal-600 mx-auto" />
+          <h3 className="text-base font-black text-slate-800 uppercase tracking-tight">Carregando Cadastro do Animal e Tutor...</h3>
+          <p className="text-xs text-slate-500 max-w-md mx-auto">Sincronizando os dados oficiais da nuvem Supabase para este computador.</p>
+        </div>
+      ) : (
+        <section className="bg-white rounded-2xl border-2 border-slate-100 shadow-sm overflow-hidden">
         <div className="bg-slate-50 p-6 border-b border-slate-100">
           <div className="flex items-center gap-3 mb-6">
             <div className="p-2 bg-slate-900 text-white rounded-lg">
@@ -889,6 +1044,7 @@ const AnimalForm: React.FC = () => {
           </form>
         </div>
       </section>
+      )}
     </div>
   );
 };

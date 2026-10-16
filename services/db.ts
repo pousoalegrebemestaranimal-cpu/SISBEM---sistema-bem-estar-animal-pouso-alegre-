@@ -1564,18 +1564,18 @@ export const db = {
     if (personaData && personaData.cpf) {
       if (isExterno) {
         // Lógica para Tutor
-        let tutorIdx = tutores.findIndex(t => t.cpf === personaData.cpf);
+        let tutorIdx = tutores.findIndex(t => (personaData.id && t.id === personaData.id) || (personaData.cpf && t.cpf === personaData.cpf));
         const tutorPersona = personaData as any;
         if (tutorIdx === -1) {
           const newTutor: Tutor = { 
-            id: crypto.randomUUID(), 
+            id: personaData.id || crypto.randomUUID(), 
             nomeCompleto: personaData.nomeCompleto || 'Tutor Desconhecido', 
             cpf: personaData.cpf, 
             telefone: personaData.telefone || '', 
             endereco: tutorPersona.endereco || '',
             temCadUnico: !!tutorPersona.temCadUnico,
             documentoCadUnico: tutorPersona.documentoCadUnico || '',
-            dataCadastro: new Date().toISOString()
+            dataCadastro: (personaData as any).dataCadastro || new Date().toISOString()
           };
           tutores.push(newTutor);
           tutorId = newTutor.id;
@@ -1583,6 +1583,7 @@ export const db = {
         } else {
           tutores[tutorIdx] = { 
             ...tutores[tutorIdx], 
+            id: personaData.id || tutores[tutorIdx].id,
             nomeCompleto: personaData.nomeCompleto || tutores[tutorIdx].nomeCompleto, 
             telefone: personaData.telefone || tutores[tutorIdx].telefone,
             endereco: tutorPersona.endereco || tutores[tutorIdx].endereco,
