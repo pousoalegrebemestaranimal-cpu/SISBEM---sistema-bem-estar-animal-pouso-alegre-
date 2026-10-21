@@ -741,13 +741,43 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
     const kennels = typeof window !== 'undefined' ? db.getKennels() : [];
     const cirurgias = typeof window !== 'undefined' ? db.getCirurgias() : [];
 
-    const tutorData = row.tutores 
-      ? mapSupabaseToTutor(row.tutores)
-      : (animal.tutorId ? tutores.find(t => t.id === animal.tutorId) : undefined);
+    let tutorData = row.tutores ? mapSupabaseToTutor(row.tutores) : undefined;
+    if (!tutorData && animal.tutorId) {
+      try {
+        const { data: remoteTut } = await supabase
+          .from('tutores')
+          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro')
+          .eq('id', animal.tutorId)
+          .maybeSingle();
+        if (remoteTut) {
+          tutorData = mapSupabaseToTutor(remoteTut);
+        }
+      } catch (tErr) {
+        console.warn('Erro ao buscar tutor de contingência no Supabase:', tErr);
+      }
+    }
+    if (!tutorData && animal.tutorId) {
+      tutorData = tutores.find(t => t.id === animal.tutorId);
+    }
 
-    const solicitanteData = row.solicitantes 
-      ? mapSupabaseToSolicitante(row.solicitantes)
-      : (animal.solicitanteId ? solicitantes.find(s => s.id === animal.solicitanteId) : undefined);
+    let solicitanteData = row.solicitantes ? mapSupabaseToSolicitante(row.solicitantes) : undefined;
+    if (!solicitanteData && animal.solicitanteId) {
+      try {
+        const { data: remoteSol } = await supabase
+          .from('solicitantes')
+          .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email')
+          .eq('id', animal.solicitanteId)
+          .maybeSingle();
+        if (remoteSol) {
+          solicitanteData = mapSupabaseToSolicitante(remoteSol);
+        }
+      } catch (sErr) {
+        console.warn('Erro ao buscar solicitante de contingência no Supabase:', sErr);
+      }
+    }
+    if (!solicitanteData && animal.solicitanteId) {
+      solicitanteData = solicitantes.find(s => s.id === animal.solicitanteId);
+    }
 
     // Sincroniza pontualmente o cache local deste animal e tutor para que qualquer tela reflita imediatamente
     if (typeof window !== 'undefined') {

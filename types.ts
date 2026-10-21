@@ -177,6 +177,27 @@ export interface ClinicalRecord {
   numeroMicrochipAplicado?: string;
 }
 
+export type ClinicalDraftStatus = 'draft' | 'paused' | 'finished' | 'cancelled';
+
+export interface ClinicalDraft {
+  id: string;
+  animalId: string;
+  attendanceId: string;
+  vetId: string;
+  vetName?: string;
+  formData: Partial<ClinicalRecord> & {
+    necessitaInternacaoExterno?: boolean;
+    tipoAcomodacaoExterno?: string;
+    justificativaInternacaoExterno?: string;
+    tipoObito?: 'Óbito Natural' | 'Eutanásia';
+    causaObitoInput?: string;
+  };
+  status: ClinicalDraftStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface StatusLog {
   id: string;
   animalId: string;

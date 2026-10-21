@@ -765,6 +765,9 @@ app.get('/api/health', (req, res) => {
     }
   );
 
+  // Armazenamento em memória de rascunhos para fallback rápido
+  const serverClinicalDrafts = new Map<string, any>();
+
   app.post(
     '/api/attendance/cancel',
     requireAuth,
@@ -799,6 +802,14 @@ app.get('/api/health', (req, res) => {
         );
         const result = queryRes.rows[0]?.result;
         if (result?.success) {
+          serverClinicalDrafts.delete(animalId);
+          try {
+            await pool.query(
+              "UPDATE public.clinical_drafts SET status = 'cancelled', updated_at = NOW() WHERE animal_id = $1 AND status IN ('draft', 'paused');",
+              [animalId]
+            );
+            await supabase.from('clinical_drafts').update({ status: 'cancelled' }).eq('animal_id', animalId);
+          } catch {}
           try {
             await supabase.from('animals').update({ condicao: 'Aguardando Atendimento' }).eq('id', animalId);
           } catch {}
@@ -927,6 +938,16 @@ app.get('/api/health', (req, res) => {
           } catch (syncErr) {
             console.warn('Aviso ao sincronizar prontuário pós-finalização no Supabase:', syncErr);
           }
+          serverClinicalDrafts.delete(payload.record.animalId);
+          try {
+            await pool.query(
+              "UPDATE public.clinical_drafts SET status = 'finished', updated_at = NOW() WHERE animal_id = $1 AND status IN ('draft', 'paused');",
+              [payload.record.animalId]
+            );
+            await supabase.from('clinical_drafts').update({ status: 'finished' }).eq('animal_id', payload.record.animalId);
+          } catch (dErr) {
+            console.warn('[attendance/finish] Aviso ao finalizar rascunho:', dErr);
+          }
         }
         return res.json(result || { success: false, code: 'INTERNAL_ERROR', message: 'Sem resposta da função de finalização.' });
       } catch (err: any) {
@@ -937,6 +958,466 @@ app.get('/api/health', (req, res) => {
           message: 'Falha interna ao processar finalização transacional do atendimento.',
         });
       }
+    }
+  );
+
+  // Endpoints para Gerenciamento de Rascunhos Clínicos (Auto-Save e Pausa com Salvar e Sair)
+
+  app.get(
+    '/api/attendance/draft/:animalId',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const animalId = String(req.params.animalId);
+      const user = req.user!;
+
+      if (!animalId) {
+        return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'animalId obrigatório.' });
+      }
+
+      try {
+        const pool = createPool();
+
+        // 1. Tenta recuperar do PostgreSQL (Cloud SQL)
+        try {
+          const pgRes = await pool.query(
+            `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.form_data, cd.status, cd.version, cd.created_at, cd.updated_at, u.name as vet_name
+             FROM public.clinical_drafts cd
+             LEFT JOIN public.users u ON u.id = cd.vet_id
+             WHERE cd.animal_id = $1 AND cd.status IN ('draft', 'paused')
+             ORDER BY cd.updated_at DESC LIMIT 1`,
+            [animalId]
+          );
+
+          if (pgRes.rows && pgRes.rows.length > 0) {
+            const row = pgRes.rows[0];
+            if (row.vet_id !== user.id && user.role !== 'ADMIN') {
+              return res.status(403).json({
+                success: false,
+                code: 'ALREADY_IN_ATTENDANCE',
+                message: `Este atendimento possui rascunho reservado para o veterinário ${row.vet_name || 'outro profissional'}.`,
+                vetId: row.vet_id,
+                vetName: row.vet_name,
+              });
+            }
+
+            return res.json({
+              success: true,
+              draft: {
+                id: row.id,
+                animalId: row.animal_id,
+                attendanceId: row.attendance_id,
+                vetId: row.vet_id,
+                vetName: row.vet_name,
+                formData: row.form_data || {},
+                status: row.status,
+                version: row.version || 1,
+                createdAt: row.created_at,
+                updatedAt: row.updated_at,
+              },
+            });
+          }
+        } catch (pgErr: any) {
+          console.warn('[attendance/draft/get] Cloud SQL check fallback:', pgErr.message);
+        }
+
+        // 2. Tenta recuperar do Supabase
+        const { data: remoteDraft } = await supabase
+          .from('clinical_drafts')
+          .select('*')
+          .eq('animal_id', animalId)
+          .in('status', ['draft', 'paused'])
+          .order('updated_at', { ascending: false })
+          .maybeSingle();
+
+        if (remoteDraft) {
+          if (remoteDraft.vet_id !== user.id && user.role !== 'ADMIN') {
+            const { data: otherUser } = await supabase.from('users').select('name').eq('id', remoteDraft.vet_id).maybeSingle();
+            return res.status(403).json({
+              success: false,
+              code: 'ALREADY_IN_ATTENDANCE',
+              message: `Este atendimento possui rascunho reservado para o veterinário ${otherUser?.name || 'outro profissional'}.`,
+              vetId: remoteDraft.vet_id,
+              vetName: otherUser?.name
+            });
+          }
+
+          return res.json({
+            success: true,
+            draft: {
+              id: remoteDraft.id,
+              animalId: remoteDraft.animal_id,
+              attendanceId: remoteDraft.attendance_id,
+              vetId: remoteDraft.vet_id,
+              formData: remoteDraft.form_data || {},
+              status: remoteDraft.status,
+              version: remoteDraft.version || 1,
+              createdAt: remoteDraft.created_at,
+              updatedAt: remoteDraft.updated_at
+            }
+          });
+        }
+
+        // 3. Fallback de cache de memória do servidor
+        const memoryDraft = serverClinicalDrafts.get(animalId);
+        if (memoryDraft && ['draft', 'paused'].includes(memoryDraft.status)) {
+          if (memoryDraft.vetId !== user.id && user.role !== 'ADMIN') {
+            return res.status(403).json({
+              success: false,
+              code: 'ALREADY_IN_ATTENDANCE',
+              message: `Este atendimento possui rascunho reservado para o veterinário ${memoryDraft.vetName || 'outro profissional'}.`,
+              vetId: memoryDraft.vetId,
+              vetName: memoryDraft.vetName
+            });
+          }
+          return res.json({ success: true, draft: memoryDraft });
+        }
+
+        return res.json({ success: true, draft: null });
+      } catch (err: any) {
+        console.warn('[attendance/draft/get] Aviso:', err.message);
+        const memoryDraft = serverClinicalDrafts.get(animalId);
+        return res.json({ success: true, draft: memoryDraft || null });
+      }
+    }
+  );
+
+  app.post(
+    '/api/attendance/draft/save',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const { animalId, attendanceId, formData, clientVersion, status = 'draft' } = req.body;
+      const user = req.user!;
+
+      if (!animalId || !formData) {
+        return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'animalId e formData são obrigatórios.' });
+      }
+
+      // Sanitiza payload: remove fotos pesadas em Base64 para não estourar banco/memória
+      const sanitizedFormData = { ...formData };
+      if (sanitizedFormData.examesLaboratoriais && Array.isArray(sanitizedFormData.examesLaboratoriais)) {
+        sanitizedFormData.examesLaboratoriais = sanitizedFormData.examesLaboratoriais.map((ex: any) => {
+          if (ex.base64 && typeof ex.base64 === 'string' && ex.base64.length > 50000) {
+            return { ...ex, base64: '' };
+          }
+          return ex;
+        });
+      }
+
+      const pool = createPool();
+      let currentVersion = 1;
+      let existingId: string | null = null;
+      let createdAtIso = new Date().toISOString();
+
+      try {
+        const pgCheck = await pool.query(
+          `SELECT id, version, created_at, vet_id FROM public.clinical_drafts WHERE animal_id = $1 AND status IN ('draft', 'paused') LIMIT 1`,
+          [animalId]
+        );
+        if (pgCheck.rows && pgCheck.rows.length > 0) {
+          existingId = pgCheck.rows[0].id;
+          currentVersion = pgCheck.rows[0].version || 1;
+          createdAtIso = pgCheck.rows[0].created_at || createdAtIso;
+
+          if (pgCheck.rows[0].vet_id !== user.id && user.role !== 'ADMIN') {
+            return res.status(403).json({
+              success: false,
+              code: 'FORBIDDEN',
+              message: 'Este atendimento pertence a outro profissional e não pode ser alterado.',
+            });
+          }
+        }
+      } catch (pgErr) {
+        const existingMemory = serverClinicalDrafts.get(animalId);
+        currentVersion = existingMemory?.version || 1;
+        existingId = existingMemory?.id || null;
+        createdAtIso = existingMemory?.createdAt || createdAtIso;
+      }
+
+      // Detecção de conflito de versão
+      if (clientVersion && clientVersion < currentVersion) {
+        return res.status(409).json({
+          success: false,
+          code: 'VERSION_CONFLICT',
+          message: 'Existe uma versão mais recente deste rascunho gravada no servidor.',
+          serverVersion: currentVersion,
+        });
+      }
+
+      const newVersion = (clientVersion ? Math.max(clientVersion, currentVersion) : currentVersion) + 1;
+      const nowIso = new Date().toISOString();
+      const draftId = existingId || crypto.randomUUID();
+
+      const draftObj = {
+        id: draftId,
+        animalId,
+        attendanceId: attendanceId || `att_${animalId}_${Date.now()}`,
+        vetId: user.id,
+        vetName: user.name,
+        formData: sanitizedFormData,
+        status: status === 'paused' ? 'paused' : 'draft',
+        version: newVersion,
+        createdAt: createdAtIso,
+        updatedAt: nowIso
+      };
+
+      // 1. Grava no cache de servidor
+      serverClinicalDrafts.set(animalId, draftObj);
+
+      // 2. Persiste no PostgreSQL (Cloud SQL)
+      try {
+        await pool.query(
+          `INSERT INTO public.clinical_drafts (id, animal_id, attendance_id, vet_id, form_data, status, version, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (animal_id) WHERE status IN ('draft', 'paused')
+           DO UPDATE SET
+             attendance_id = EXCLUDED.attendance_id,
+             vet_id = EXCLUDED.vet_id,
+             form_data = EXCLUDED.form_data,
+             status = EXCLUDED.status,
+             version = EXCLUDED.version,
+             updated_at = EXCLUDED.updated_at;`,
+          [
+            draftObj.id,
+            draftObj.animalId,
+            draftObj.attendanceId,
+            draftObj.vetId,
+            JSON.stringify(draftObj.formData),
+            draftObj.status,
+            draftObj.version,
+            draftObj.createdAt,
+            draftObj.updatedAt,
+          ]
+        );
+      } catch (pgErr: any) {
+        console.warn('[attendance/draft/save] Cloud SQL upsert fallback:', pgErr.message);
+      }
+
+      // 3. Tenta persistir no Supabase (se a tabela clinical_drafts existir)
+      try {
+        await supabase.from('clinical_drafts').upsert([{
+          id: draftObj.id,
+          animal_id: draftObj.animalId,
+          attendance_id: draftObj.attendanceId,
+          vet_id: draftObj.vetId,
+          form_data: draftObj.formData,
+          status: draftObj.status,
+          version: draftObj.version,
+          updated_at: draftObj.updatedAt
+        }]);
+      } catch (sbErr) {
+        console.warn('[attendance/draft/save] Supabase table fallback:', sbErr);
+      }
+
+      return res.json({
+        success: true,
+        draftId: draftObj.id,
+        animalId,
+        version: draftObj.version,
+        status: draftObj.status,
+        updatedAt: draftObj.updatedAt
+      });
+    }
+  );
+
+  app.post(
+    '/api/attendance/draft/pause',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const { animalId, attendanceId, formData, clientVersion } = req.body;
+      const user = req.user!;
+
+      if (!animalId) {
+        return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'animalId obrigatório.' });
+      }
+
+      const pool = createPool();
+      let currentVersion = 1;
+      let existingId: string | null = null;
+      let createdAtIso = new Date().toISOString();
+
+      try {
+        const pgCheck = await pool.query(
+          `SELECT id, version, created_at FROM public.clinical_drafts WHERE animal_id = $1 AND status IN ('draft', 'paused') LIMIT 1`,
+          [animalId]
+        );
+        if (pgCheck.rows && pgCheck.rows.length > 0) {
+          existingId = pgCheck.rows[0].id;
+          currentVersion = pgCheck.rows[0].version || 1;
+          createdAtIso = pgCheck.rows[0].created_at || createdAtIso;
+        }
+      } catch (pgErr) {
+        const existingMemory = serverClinicalDrafts.get(animalId);
+        currentVersion = existingMemory?.version || 1;
+        existingId = existingMemory?.id || null;
+        createdAtIso = existingMemory?.createdAt || createdAtIso;
+      }
+
+      const newVersion = (clientVersion ? Math.max(clientVersion, currentVersion) : currentVersion) + 1;
+      const nowIso = new Date().toISOString();
+
+      const draftObj = {
+        id: existingId || crypto.randomUUID(),
+        animalId,
+        attendanceId: attendanceId || `att_${animalId}_${Date.now()}`,
+        vetId: user.id,
+        vetName: user.name,
+        formData: formData || {},
+        status: 'paused',
+        version: newVersion,
+        createdAt: createdAtIso,
+        updatedAt: nowIso
+      };
+
+      serverClinicalDrafts.set(animalId, draftObj);
+
+      // Garante que o animal permaneça com a trava de atendimento para o veterinário no PostgreSQL
+      try {
+        await pool.query(
+          `UPDATE public.animals
+           SET condicao = 'Em Atendimento',
+               em_atendimento_vet_id = $1,
+               em_atendimento_inicio = COALESCE(em_atendimento_inicio, $2::timestamptz)
+           WHERE id = $3;`,
+          [user.id, nowIso, animalId]
+        );
+
+        await pool.query(
+          `INSERT INTO public.clinical_drafts (id, animal_id, attendance_id, vet_id, form_data, status, version, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'paused', $6, $7, $8)
+           ON CONFLICT (animal_id) WHERE status IN ('draft', 'paused')
+           DO UPDATE SET
+             attendance_id = EXCLUDED.attendance_id,
+             vet_id = EXCLUDED.vet_id,
+             form_data = EXCLUDED.form_data,
+             status = 'paused',
+             version = EXCLUDED.version,
+             updated_at = EXCLUDED.updated_at;`,
+          [
+            draftObj.id,
+            draftObj.animalId,
+            draftObj.attendanceId,
+            draftObj.vetId,
+            JSON.stringify(draftObj.formData),
+            draftObj.version,
+            draftObj.createdAt,
+            draftObj.updatedAt,
+          ]
+        );
+      } catch (pgErr: any) {
+        console.warn('[attendance/draft/pause] Cloud SQL pause error:', pgErr.message);
+      }
+
+      // Garante a trava e persistência no Supabase
+      try {
+        await supabase.from('animals').update({
+          condicao: 'Em Atendimento',
+          em_atendimento_vet_id: user.id,
+          em_atendimento_inicio: nowIso
+        }).eq('id', animalId);
+
+        await supabase.from('clinical_drafts').upsert([{
+          id: draftObj.id,
+          animal_id: draftObj.animalId,
+          attendance_id: draftObj.attendanceId,
+          vet_id: draftObj.vetId,
+          form_data: draftObj.formData,
+          status: 'paused',
+          version: draftObj.version,
+          updated_at: draftObj.updatedAt
+        }]);
+      } catch (err: any) {
+        console.warn('[attendance/draft/pause] Supabase Aviso:', err.message);
+      }
+
+      return res.json({
+        success: true,
+        draftId: draftObj.id,
+        animalId,
+        version: draftObj.version,
+        status: 'paused',
+        updatedAt: draftObj.updatedAt
+      });
+    }
+  );
+
+  app.get(
+    '/api/attendance/drafts/active',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (_req: AuthenticatedRequest, res) => {
+      const draftsMap = new Map<string, any>();
+
+      // 1. Inclui da memória
+      serverClinicalDrafts.forEach((val, key) => {
+        if (['draft', 'paused'].includes(val.status)) {
+          draftsMap.set(key, {
+            id: val.id,
+            animalId: val.animalId,
+            attendanceId: val.attendanceId,
+            vetId: val.vetId,
+            vetName: val.vetName,
+            status: val.status,
+            version: val.version,
+            updatedAt: val.updatedAt
+          });
+        }
+      });
+
+      // 2. Consulta PostgreSQL (Cloud SQL)
+      try {
+        const pool = createPool();
+        const pgRes = await pool.query(
+          `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.status, cd.version, cd.updated_at, u.name as vet_name
+           FROM public.clinical_drafts cd
+           LEFT JOIN public.users u ON u.id = cd.vet_id
+           WHERE cd.status IN ('draft', 'paused');`
+        );
+        if (pgRes.rows) {
+          pgRes.rows.forEach(r => {
+            draftsMap.set(r.animal_id, {
+              id: r.id,
+              animalId: r.animal_id,
+              attendanceId: r.attendance_id,
+              vetId: r.vet_id,
+              vetName: r.vet_name,
+              status: r.status,
+              version: r.version,
+              updatedAt: r.updated_at
+            });
+          });
+        }
+      } catch (pgErr: any) {
+        console.warn('[attendance/drafts/active] Cloud SQL check fallback:', pgErr.message);
+      }
+
+      // 3. Mescla com os do Supabase
+      try {
+        const { data: remoteDrafts } = await supabase
+          .from('clinical_drafts')
+          .select('id, animal_id, attendance_id, vet_id, status, version, updated_at')
+          .in('status', ['draft', 'paused']);
+
+        if (remoteDrafts && Array.isArray(remoteDrafts)) {
+          remoteDrafts.forEach((rd: any) => {
+            draftsMap.set(rd.animal_id, {
+              id: rd.id,
+              animalId: rd.animal_id,
+              attendanceId: rd.attendance_id,
+              vetId: rd.vet_id,
+              status: rd.status,
+              version: rd.version,
+              updatedAt: rd.updated_at
+            });
+          });
+        }
+      } catch (err: any) {
+        // Fallback silencioso
+      }
+
+      return res.json({ success: true, drafts: Array.from(draftsMap.values()) });
     }
   );
 

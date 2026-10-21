@@ -74,21 +74,36 @@ const AnimalForm: React.FC = () => {
   });
 
   const [loadingInitial, setLoadingInitial] = useState(false);
+  const loadedTutorCpfRef = useRef<string>('');
+  const loadedSolCpfRef = useRef<string>('');
 
   useEffect(() => {
     setOngs(db.getOngs());
   }, []);
 
   const applyAnimalData = (data: any) => {
+    const rawResgate = data.dataResgate ? String(data.dataResgate).split('T')[0] : '';
+    const rawObito = data.dataObito ? String(data.dataObito).split('T')[0] : '';
+    const rawSoltura = data.dataSoltura ? String(data.dataSoltura).split('T')[0] : '';
+
     setAnimal({
       ...data,
       id: data.id,
+      nome: data.nome || '',
       peso: data.peso !== undefined && data.peso !== null ? data.peso.toString() : '',
       idade: data.idade || '',
       corPelagem: data.corPelagem || '',
-      dataObito: data.dataObito || '',
+      especie: data.especie || Especie.CAO,
+      raca: data.raca || 'SRD',
+      porte: data.porte || Porte.MEDIO,
+      sexo: data.sexo || Sexo.MACHO,
+      condicao: data.condicao || AnimalCondicao.ACOLHIDO,
+      localResgate: data.localResgate || '',
+      dataResgate: rawResgate || new Date().toISOString().split('T')[0],
+      motivo: data.motivo || '',
+      dataObito: rawObito,
       causaObito: data.causaObito || '',
-      dataSoltura: data.dataSoltura || '',
+      dataSoltura: rawSoltura,
       localSoltura: data.localSoltura || '',
       foto: data.foto || '',
       resgateSamuvet: !!data.resgateSamuvet,
@@ -98,16 +113,24 @@ const AnimalForm: React.FC = () => {
       solicitanteId: data.solicitanteId || (data.solicitante ? data.solicitante.id : undefined),
       castrado: !!data.castrado,
       microchipado: !!data.microchipado,
-      numeroMicrochip: data.numeroMicrochip || ''
+      numeroMicrochip: data.numeroMicrochip || '',
+      necessitaInternacao: !!data.necessitaInternacao,
+      tipoAcomodacaoSugerida: data.tipoAcomodacaoSugerida || '',
+      justificativaInternacao: data.justificativaInternacao || '',
+      dataInternacao: data.dataInternacao || ''
     });
-    setActiveTab(data.temTutor ? 'EXTERNO' : 'RESGATE');
+
+    const isExterno = !!data.temTutor;
+    setActiveTab(isExterno ? 'EXTERNO' : 'RESGATE');
 
     if (data.tutor) {
+      const formattedCpf = data.tutor.cpf ? formatCPF(data.tutor.cpf) : '';
+      loadedTutorCpfRef.current = formattedCpf.replace(/\D/g, '');
       setTutor({
         id: data.tutor.id || data.tutorId || '',
         nomeCompleto: data.tutor.nomeCompleto || '',
-        cpf: data.tutor.cpf || '',
-        telefone: data.tutor.telefone || '',
+        cpf: formattedCpf,
+        telefone: data.tutor.telefone ? formatTelefone(data.tutor.telefone) : '',
         endereco: data.tutor.endereco || '',
         temCadUnico: !!data.tutor.temCadUnico,
         documentoCadUnico: data.tutor.documentoCadUnico || ''
@@ -115,15 +138,21 @@ const AnimalForm: React.FC = () => {
     }
 
     if (data.solicitante) {
+      const formattedSolCpf = (data.solicitante.cpf && !data.solicitante.cpf.startsWith('INST-') && !data.solicitante.cpf.startsWith('DESC-'))
+        ? formatCPF(data.solicitante.cpf)
+        : (data.solicitante.cpf || '');
+      loadedSolCpfRef.current = formattedSolCpf.replace(/\D/g, '');
+
       setSolicitante({
         id: data.solicitante.id || data.solicitanteId || '',
         nomeCompleto: data.solicitante.nomeCompleto || '',
-        cpf: data.solicitante.cpf || '',
-        telefone: data.solicitante.telefone || '',
+        cpf: formattedSolCpf,
+        telefone: data.solicitante.telefone ? formatTelefone(data.solicitante.telefone) : '',
         tipo: data.solicitante.tipo || (data.solicitante.codigoOng ? 'ONG' : 'CIDADAO'),
         codigoOng: data.solicitante.codigoOng || '',
         responsavel: data.solicitante.responsavel || '',
-        endereco: data.solicitante.endereco || ''
+        endereco: data.solicitante.endereco || '',
+        email: data.solicitante.email || ''
       });
 
       if (data.solicitante.cpf === 'INST-BOMBEIROS') setSolicitanteType('BOMBEIROS');
@@ -166,91 +195,111 @@ const AnimalForm: React.FC = () => {
     }
   }, [id]);
 
-  // Busca automática de Tutor por CPF (cache local + Supabase)
+  // Busca automática de Tutor por CPF (apenas quando o usuário DIGITA um CPF novo e diferente do carregado da edição)
   useEffect(() => {
     const cleanCPF = tutor.cpf ? tutor.cpf.replace(/\D/g, '') : '';
     if (cleanCPF.length === 11 && activeTab === 'EXTERNO') {
-      const formatted = formatCPF(cleanCPF);
-      const existingTutor = db.getTutores().find(t => t.cpf === formatted);
-      if (existingTutor) {
-        setTutor({
-          id: existingTutor.id,
-          nomeCompleto: existingTutor.nomeCompleto,
-          cpf: existingTutor.cpf,
-          telefone: existingTutor.telefone,
-          endereco: existingTutor.endereco || '',
-          temCadUnico: !!existingTutor.temCadUnico,
-          documentoCadUnico: existingTutor.documentoCadUnico || ''
-        });
-        setMessage({ type: 'info', text: 'Tutor já cadastrado no sistema.' });
-      } else {
-        // Consulta no Supabase diretamente
-        (async () => {
-          try {
-            const { data: remoteTut } = await supabase
-              .from('tutores')
-              .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico')
-              .eq('cpf', formatted)
-              .maybeSingle();
-
-            if (remoteTut) {
-              setTutor({
-                id: remoteTut.id,
-                nomeCompleto: remoteTut.nome_completo,
-                cpf: remoteTut.cpf,
-                telefone: remoteTut.telefone || '',
-                endereco: remoteTut.endereco || '',
-                temCadUnico: !!remoteTut.tem_cad_unico,
-                documentoCadUnico: remoteTut.documento_cad_unico || ''
-              });
-              setMessage({ type: 'info', text: 'Tutor localizado no banco de dados em nuvem (Supabase).' });
-            }
-          } catch {}
-        })();
+      if (id && cleanCPF === loadedTutorCpfRef.current) {
+        return;
       }
+
+      const formatted = formatCPF(cleanCPF);
+      (async () => {
+        try {
+          const { data: remoteTut } = await supabase
+            .from('tutores')
+            .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico')
+            .or(`cpf.eq.${formatted},cpf.eq.${cleanCPF}`)
+            .maybeSingle();
+
+          if (remoteTut) {
+            loadedTutorCpfRef.current = cleanCPF;
+            setTutor({
+              id: remoteTut.id,
+              nomeCompleto: remoteTut.nome_completo || '',
+              cpf: formatCPF(remoteTut.cpf || cleanCPF),
+              telefone: remoteTut.telefone ? formatTelefone(remoteTut.telefone) : '',
+              endereco: remoteTut.endereco || '',
+              temCadUnico: !!remoteTut.tem_cad_unico,
+              documentoCadUnico: remoteTut.documento_cad_unico || ''
+            });
+            setMessage({ type: 'info', text: 'Tutor localizado no banco de dados oficial (Supabase).' });
+          } else {
+            const existingTutor = db.getTutores().find(t => t.cpf === formatted || t.cpf?.replace(/\D/g, '') === cleanCPF);
+            if (existingTutor) {
+              loadedTutorCpfRef.current = cleanCPF;
+              setTutor({
+                id: existingTutor.id,
+                nomeCompleto: existingTutor.nomeCompleto || '',
+                cpf: formatCPF(existingTutor.cpf || cleanCPF),
+                telefone: existingTutor.telefone ? formatTelefone(existingTutor.telefone) : '',
+                endereco: existingTutor.endereco || '',
+                temCadUnico: !!existingTutor.temCadUnico,
+                documentoCadUnico: existingTutor.documentoCadUnico || ''
+              });
+              setMessage({ type: 'info', text: 'Tutor já cadastrado no sistema.' });
+            }
+          }
+        } catch (err) {
+          console.warn('Erro ao verificar CPF do tutor:', err);
+        }
+      })();
     }
-  }, [tutor.cpf, activeTab]);
+  }, [tutor.cpf, activeTab, id]);
 
   // Busca automática de Solicitante por CPF (cache local + Supabase)
   useEffect(() => {
     const cleanCPF = solicitante.cpf ? solicitante.cpf.replace(/\D/g, '') : '';
-    if (cleanCPF.length === 11 && !id && activeTab === 'RESGATE' && solicitanteType === 'PARTICULAR') { 
-      const formatted = formatCPF(cleanCPF);
-      const existingSolicitante = db.getSolicitantes().find(s => s.cpf === formatted);
-      if (existingSolicitante) {
-        setSolicitante({
-          id: existingSolicitante.id,
-          nomeCompleto: existingSolicitante.nomeCompleto,
-          cpf: existingSolicitante.cpf,
-          telefone: existingSolicitante.telefone,
-          tipo: 'CIDADAO'
-        });
-        setMessage({ type: 'info', text: 'Solicitante já cadastrado no sistema.' });
-      } else {
-        (async () => {
-          try {
-            const { data: remoteSol } = await supabase
-              .from('solicitantes')
-              .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco')
-              .eq('cpf', formatted)
-              .maybeSingle();
-
-            if (remoteSol) {
-              setSolicitante({
-                id: remoteSol.id,
-                nomeCompleto: remoteSol.nome_completo,
-                cpf: remoteSol.cpf,
-                telefone: remoteSol.telefone || '',
-                tipo: remoteSol.tipo || 'CIDADAO',
-                codigoOng: remoteSol.codigo_ong || '',
-                responsavel: remoteSol.responsavel || '',
-                endereco: remoteSol.endereco || ''
-              });
-              setMessage({ type: 'info', text: 'Solicitante localizado no banco de dados em nuvem (Supabase).' });
-            }
-          } catch {}
-        })();
+    if (cleanCPF.length === 11 && activeTab === 'RESGATE' && solicitanteType === 'PARTICULAR') {
+      if (id && cleanCPF === loadedSolCpfRef.current) {
+        return;
       }
+
+      const formatted = formatCPF(cleanCPF);
+      (async () => {
+        try {
+          const { data: remoteSol } = await supabase
+            .from('solicitantes')
+            .select('id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email')
+            .or(`cpf.eq.${formatted},cpf.eq.${cleanCPF}`)
+            .maybeSingle();
+
+          if (remoteSol) {
+            loadedSolCpfRef.current = cleanCPF;
+            setSolicitante({
+              id: remoteSol.id,
+              nomeCompleto: remoteSol.nome_completo || '',
+              cpf: formatCPF(remoteSol.cpf || cleanCPF),
+              telefone: remoteSol.telefone ? formatTelefone(remoteSol.telefone) : '',
+              tipo: remoteSol.tipo || 'CIDADAO',
+              codigoOng: remoteSol.codigo_ong || '',
+              responsavel: remoteSol.responsavel || '',
+              endereco: remoteSol.endereco || '',
+              email: remoteSol.email || ''
+            });
+            setMessage({ type: 'info', text: 'Solicitante localizado no banco de dados oficial (Supabase).' });
+          } else {
+            const existingSolicitante = db.getSolicitantes().find(s => s.cpf === formatted || s.cpf?.replace(/\D/g, '') === cleanCPF);
+            if (existingSolicitante) {
+              loadedSolCpfRef.current = cleanCPF;
+              setSolicitante({
+                id: existingSolicitante.id,
+                nomeCompleto: existingSolicitante.nomeCompleto || '',
+                cpf: formatCPF(existingSolicitante.cpf || cleanCPF),
+                telefone: existingSolicitante.telefone ? formatTelefone(existingSolicitante.telefone) : '',
+                tipo: existingSolicitante.tipo || 'CIDADAO',
+                codigoOng: existingSolicitante.codigoOng || '',
+                responsavel: existingSolicitante.responsavel || '',
+                endereco: existingSolicitante.endereco || '',
+                email: existingSolicitante.email || ''
+              });
+              setMessage({ type: 'info', text: 'Solicitante já cadastrado no sistema.' });
+            }
+          }
+        } catch (err) {
+          console.warn('Erro ao verificar CPF do solicitante:', err);
+        }
+      })();
     }
   }, [solicitante.cpf, id, solicitanteType, activeTab]);
 
@@ -454,7 +503,7 @@ const AnimalForm: React.FC = () => {
             const { data: existingTutorRow } = await supabase
               .from('tutores')
               .select('id')
-              .eq('cpf', formatCPF(cleanCpf))
+              .or(`cpf.eq.${formatCPF(cleanCpf)},cpf.eq.${cleanCpf}`)
               .maybeSingle();
             if (existingTutorRow?.id) {
               finalTutorId = existingTutorRow.id;
@@ -468,8 +517,8 @@ const AnimalForm: React.FC = () => {
         const tutorToSync: Tutor = {
           id: finalTutorId,
           nomeCompleto: tutor.nomeCompleto || 'Tutor Desconhecido',
-          cpf: tutor.cpf || '',
-          telefone: tutor.telefone || '',
+          cpf: tutor.cpf ? formatCPF(tutor.cpf) : '',
+          telefone: tutor.telefone ? formatTelefone(tutor.telefone) : '',
           endereco: tutor.endereco || '',
           temCadUnico: !!tutor.temCadUnico,
           documentoCadUnico: tutor.documentoCadUnico || '',
@@ -478,13 +527,13 @@ const AnimalForm: React.FC = () => {
 
         await syncTutorToSupabase(tutorToSync);
       } else {
-        if (!finalSolId && solicitante.cpf && solicitante.cpf.trim()) {
+        if (!finalSolId && solicitante.cpf && solicitante.cpf.trim() && solicitanteType === 'PARTICULAR') {
           const cleanCpf = solicitante.cpf.replace(/\D/g, '');
           if (cleanCpf.length === 11) {
             const { data: existingSolRow } = await supabase
               .from('solicitantes')
               .select('id')
-              .eq('cpf', formatCPF(cleanCpf))
+              .or(`cpf.eq.${formatCPF(cleanCpf)},cpf.eq.${cleanCpf}`)
               .maybeSingle();
             if (existingSolRow?.id) {
               finalSolId = existingSolRow.id;
@@ -498,8 +547,8 @@ const AnimalForm: React.FC = () => {
         const solToSync: Solicitante = {
           id: finalSolId,
           nomeCompleto: solicitante.nomeCompleto || 'Solicitante Desconhecido',
-          cpf: solicitante.cpf || '',
-          telefone: solicitante.telefone || '',
+          cpf: (solicitanteType === 'PARTICULAR' && solicitante.cpf) ? formatCPF(solicitante.cpf) : (solicitante.cpf || ''),
+          telefone: solicitante.telefone ? formatTelefone(solicitante.telefone) : '',
           tipo: solicitante.tipo || (solicitante.codigoOng ? 'ONG' : 'CIDADAO'),
           codigoOng: solicitante.codigoOng ? solicitante.codigoOng.trim().toUpperCase() : undefined,
           responsavel: solicitante.responsavel || '',

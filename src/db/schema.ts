@@ -233,6 +233,25 @@ export const examFiles = pgTable('exam_files', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// 13. Rascunhos Clínicos (Salvamento Automático & Pausa de Atendimento)
+export const clinicalDrafts = pgTable('clinical_drafts', {
+  id: text('id').primaryKey(),
+  animalId: text('animal_id').references(() => animals.id, { onDelete: 'cascade' }).notNull(),
+  attendanceId: text('attendance_id').notNull(),
+  vetId: text('vet_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  formData: jsonb('form_data').notNull(),
+  status: text('status').default('draft').notNull(), // 'draft' | 'paused' | 'finished' | 'cancelled'
+  version: integer('version').default(1).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex('idx_clinical_drafts_active_animal')
+    .on(table.animalId)
+    .where(sql`status IN ('draft', 'paused')`),
+  index('idx_clinical_drafts_vet_id').on(table.vetId),
+  index('idx_clinical_drafts_status').on(table.status),
+]);
+
 // Relacionamentos Drizzle
 export const usersRelations = relations(users, ({ many }) => ({
   animals: many(animals),
@@ -240,6 +259,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   prescriptions: many(prescriptions),
   referrals: many(referrals),
   surgeries: many(surgeries),
+  clinicalDrafts: many(clinicalDrafts),
 }));
 
 export const animalsRelations = relations(animals, ({ one, many }) => ({
@@ -261,6 +281,18 @@ export const animalsRelations = relations(animals, ({ one, many }) => ({
   surgeries: many(surgeries),
   occupations: many(kennelOccupations),
   statusLogs: many(statusLogs),
+  clinicalDrafts: many(clinicalDrafts),
+}));
+
+export const clinicalDraftsRelations = relations(clinicalDrafts, ({ one }) => ({
+  animal: one(animals, {
+    fields: [clinicalDrafts.animalId],
+    references: [animals.id],
+  }),
+  vet: one(users, {
+    fields: [clinicalDrafts.vetId],
+    references: [users.id],
+  }),
 }));
 
 export const clinicalRecordsRelations = relations(clinicalRecords, ({ one, many }) => ({
@@ -279,3 +311,4 @@ export const clinicalRecordsRelations = relations(clinicalRecords, ({ one, many 
 export const kennelsRelations = relations(kennels, ({ many }) => ({
   occupations: many(kennelOccupations),
 }));
+

@@ -42,6 +42,7 @@ const AnimalDetail: React.FC = () => {
   const isVetOrAdmin = user?.role === 'VETERINARIO' || user?.role === 'ADMIN';
 
   const [animal, setAnimal] = useState<AnimalJoined | undefined>(undefined);
+  const [initialLoading, setInitialLoading] = useState(() => (id ? !db.getAnimals().some(a => a.id === id) : false));
   const [modalType, setModalType] = useState<'ADOCAO' | 'SOLTURA' | 'OBITO' | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -168,7 +169,10 @@ const AnimalDetail: React.FC = () => {
             setOccupations(db.getOccupations());
           }
         }
-      }).catch(err => console.warn('Erro ao carregar animal do Supabase:', err));
+      }).catch(err => console.warn('Erro ao carregar animal do Supabase:', err))
+        .finally(() => {
+          setInitialLoading(false);
+        });
 
       fetchOccupationsByAnimalId(id).then(remoteOccs => {
         if (remoteOccs && remoteOccs.length > 0) {
@@ -546,6 +550,18 @@ const AnimalDetail: React.FC = () => {
       setLoading(false);
     }
   };
+
+  if (initialLoading && !animal) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <Loader2 className="w-10 h-10 animate-spin text-teal-600" />
+        <div className="text-center space-y-1">
+          <h2 className="text-lg font-bold text-slate-800">Carregando Cadastro do Animal...</h2>
+          <p className="text-xs text-slate-500">Consultando a base de dados oficial no Supabase.</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!animal) {
     return (
