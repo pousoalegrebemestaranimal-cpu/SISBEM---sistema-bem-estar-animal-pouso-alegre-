@@ -849,8 +849,6 @@ app.get('/api/health', (req, res) => {
         try {
           await supabase.from('animals').update({
             condicao: 'Aguardando Atendimento',
-            em_atendimento_vet_id: null,
-            em_atendimento_inicio: null,
           }).eq('id', animalId);
         } catch (sbErr) {
           console.warn('[attendance/queue] Aviso Supabase:', sbErr);
@@ -861,8 +859,6 @@ app.get('/api/health', (req, res) => {
         try {
           await supabase.from('animals').update({
             condicao: 'Aguardando Atendimento',
-            em_atendimento_vet_id: null,
-            em_atendimento_inicio: null,
           }).eq('id', animalId);
           return res.json({ success: true });
         } catch (sbErr: any) {
@@ -922,8 +918,6 @@ app.get('/api/health', (req, res) => {
             const finalCondicao = payload.record.statusResultante || result.status_resultante || 'Em Tratamento';
             await supabase.from('animals').update({
               condicao: finalCondicao,
-              em_atendimento_vet_id: null,
-              em_atendimento_inicio: null,
               necessita_internacao: payload.record.necessitaInternacao ?? false,
               tipo_acomodacao_sugerida: payload.record.recommendedKennelType || null,
               justificativa_internacao: payload.record.accommodationJustification || null,
@@ -961,7 +955,9 @@ app.get('/api/health', (req, res) => {
     }
   );
 
-  // Endpoints para Gerenciamento de Rascunhos Clínicos (Auto-Save e Pausa com Salvar e Sair)
+  // ==============================================================================
+  // RASCUNHOS CLÍNICOS PERSISTENTES (ETAPA 1.1: SUPABASE COMO FONTE OFICIAL)
+  // ==============================================================================
 
   app.get(
     '/api/attendance/draft/:animalId',
@@ -976,89 +972,101 @@ app.get('/api/health', (req, res) => {
       }
 
       try {
-        const pool = createPool();
-
-        // 1. Tenta recuperar do PostgreSQL (Cloud SQL)
+        // 1. FONTE OFICIAL: Consulta Supabase Remoto
+        let isFromSupabase = false;
         try {
-          const pgRes = await pool.query(
-            `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.form_data, cd.status, cd.version, cd.created_at, cd.updated_at, u.name as vet_name
-             FROM public.clinical_drafts cd
-             LEFT JOIN public.users u ON u.id = cd.vet_id
-             WHERE cd.animal_id = $1 AND cd.status IN ('draft', 'paused')
-             ORDER BY cd.updated_at DESC LIMIT 1`,
-            [animalId]
-          );
+          const { data: remoteDraft, error: sbDraftErr } = await supabase
+            .from('clinical_drafts')
+            .select('*')
+            .eq('animal_id', animalId)
+            .in('status', ['draft', 'paused'])
+            .order('updated_at', { ascending: false })
+            .maybeSingle();
 
-          if (pgRes.rows && pgRes.rows.length > 0) {
-            const row = pgRes.rows[0];
-            if (row.vet_id !== user.id && user.role !== 'ADMIN') {
+          if (!sbDraftErr && remoteDraft) {
+            isFromSupabase = true;
+            if (remoteDraft.vet_id !== user.id && user.role !== 'ADMIN') {
+              const { data: otherUser } = await supabase.from('users').select('name').eq('id', remoteDraft.vet_id).maybeSingle();
               return res.status(403).json({
                 success: false,
                 code: 'ALREADY_IN_ATTENDANCE',
-                message: `Este atendimento possui rascunho reservado para o veterinário ${row.vet_name || 'outro profissional'}.`,
-                vetId: row.vet_id,
-                vetName: row.vet_name,
+                message: `Este atendimento possui rascunho reservado para o veterinário ${otherUser?.name || 'outro profissional'}.`,
+                vetId: remoteDraft.vet_id,
+                vetName: otherUser?.name,
               });
             }
 
             return res.json({
               success: true,
+              persisted: true,
+              storage: 'supabase',
               draft: {
-                id: row.id,
-                animalId: row.animal_id,
-                attendanceId: row.attendance_id,
-                vetId: row.vet_id,
-                vetName: row.vet_name,
-                formData: row.form_data || {},
-                status: row.status,
-                version: row.version || 1,
-                createdAt: row.created_at,
-                updatedAt: row.updated_at,
+                id: remoteDraft.id,
+                animalId: remoteDraft.animal_id,
+                attendanceId: remoteDraft.attendance_id,
+                vetId: remoteDraft.vet_id,
+                formData: remoteDraft.form_data || {},
+                status: remoteDraft.status,
+                version: remoteDraft.version || 1,
+                createdAt: remoteDraft.created_at,
+                updatedAt: remoteDraft.updated_at,
               },
             });
           }
-        } catch (pgErr: any) {
-          console.warn('[attendance/draft/get] Cloud SQL check fallback:', pgErr.message);
+        } catch (sbErr: any) {
+          console.warn('[attendance/draft/get] Supabase oficial indisponível ou tabela ainda não aplicada:', sbErr.message);
         }
 
-        // 2. Tenta recuperar do Supabase
-        const { data: remoteDraft } = await supabase
-          .from('clinical_drafts')
-          .select('*')
-          .eq('animal_id', animalId)
-          .in('status', ['draft', 'paused'])
-          .order('updated_at', { ascending: false })
-          .maybeSingle();
+        // 2. CONTINGÊNCIA LOCAL (Cloud SQL) apenas se o Supabase não contiver o registro
+        if (!isFromSupabase) {
+          try {
+            const pool = createPool();
+            const pgRes = await pool.query(
+              `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.form_data, cd.status, cd.version, cd.created_at, cd.updated_at, u.name as vet_name
+               FROM public.clinical_drafts cd
+               LEFT JOIN public.users u ON u.id = cd.vet_id
+               WHERE cd.animal_id = $1 AND cd.status IN ('draft', 'paused')
+               ORDER BY cd.updated_at DESC LIMIT 1`,
+              [animalId]
+            );
 
-        if (remoteDraft) {
-          if (remoteDraft.vet_id !== user.id && user.role !== 'ADMIN') {
-            const { data: otherUser } = await supabase.from('users').select('name').eq('id', remoteDraft.vet_id).maybeSingle();
-            return res.status(403).json({
-              success: false,
-              code: 'ALREADY_IN_ATTENDANCE',
-              message: `Este atendimento possui rascunho reservado para o veterinário ${otherUser?.name || 'outro profissional'}.`,
-              vetId: remoteDraft.vet_id,
-              vetName: otherUser?.name
-            });
-          }
+            if (pgRes.rows && pgRes.rows.length > 0) {
+              const row = pgRes.rows[0];
+              if (row.vet_id !== user.id && user.role !== 'ADMIN') {
+                return res.status(403).json({
+                  success: false,
+                  code: 'ALREADY_IN_ATTENDANCE',
+                  message: `Este atendimento possui rascunho reservado para o veterinário ${row.vet_name || 'outro profissional'}.`,
+                  vetId: row.vet_id,
+                  vetName: row.vet_name,
+                });
+              }
 
-          return res.json({
-            success: true,
-            draft: {
-              id: remoteDraft.id,
-              animalId: remoteDraft.animal_id,
-              attendanceId: remoteDraft.attendance_id,
-              vetId: remoteDraft.vet_id,
-              formData: remoteDraft.form_data || {},
-              status: remoteDraft.status,
-              version: remoteDraft.version || 1,
-              createdAt: remoteDraft.created_at,
-              updatedAt: remoteDraft.updated_at
+              return res.json({
+                success: true,
+                persisted: false,
+                storage: 'cloudsql_fallback',
+                warning: 'CENTRAL_SYNC_PENDING',
+                draft: {
+                  id: row.id,
+                  animalId: row.animal_id,
+                  attendanceId: row.attendance_id,
+                  vetId: row.vet_id,
+                  vetName: row.vet_name,
+                  formData: row.form_data || {},
+                  status: row.status,
+                  version: row.version || 1,
+                  createdAt: row.created_at,
+                  updatedAt: row.updated_at,
+                },
+              });
             }
-          });
+          } catch (pgErr: any) {
+            console.warn('[attendance/draft/get] Cloud SQL fallback aviso:', pgErr.message);
+          }
         }
 
-        // 3. Fallback de cache de memória do servidor
+        // 3. Fallback de cache em memória
         const memoryDraft = serverClinicalDrafts.get(animalId);
         if (memoryDraft && ['draft', 'paused'].includes(memoryDraft.status)) {
           if (memoryDraft.vetId !== user.id && user.role !== 'ADMIN') {
@@ -1067,15 +1075,21 @@ app.get('/api/health', (req, res) => {
               code: 'ALREADY_IN_ATTENDANCE',
               message: `Este atendimento possui rascunho reservado para o veterinário ${memoryDraft.vetName || 'outro profissional'}.`,
               vetId: memoryDraft.vetId,
-              vetName: memoryDraft.vetName
+              vetName: memoryDraft.vetName,
             });
           }
-          return res.json({ success: true, draft: memoryDraft });
+          return res.json({
+            success: true,
+            persisted: false,
+            storage: 'memory',
+            warning: 'CENTRAL_SYNC_PENDING',
+            draft: memoryDraft,
+          });
         }
 
         return res.json({ success: true, draft: null });
       } catch (err: any) {
-        console.warn('[attendance/draft/get] Aviso:', err.message);
+        console.warn('[attendance/draft/get] Erro geral:', err.message);
         const memoryDraft = serverClinicalDrafts.get(animalId);
         return res.json({ success: true, draft: memoryDraft || null });
       }
@@ -1105,22 +1119,26 @@ app.get('/api/health', (req, res) => {
         });
       }
 
-      const pool = createPool();
       let currentVersion = 1;
       let existingId: string | null = null;
       let createdAtIso = new Date().toISOString();
+      const nowIso = new Date().toISOString();
 
+      // 1. VERIFICAÇÃO DE VERSÃO NO SUPABASE (FONTE OFICIAL)
       try {
-        const pgCheck = await pool.query(
-          `SELECT id, version, created_at, vet_id FROM public.clinical_drafts WHERE animal_id = $1 AND status IN ('draft', 'paused') LIMIT 1`,
-          [animalId]
-        );
-        if (pgCheck.rows && pgCheck.rows.length > 0) {
-          existingId = pgCheck.rows[0].id;
-          currentVersion = pgCheck.rows[0].version || 1;
-          createdAtIso = pgCheck.rows[0].created_at || createdAtIso;
+        const { data: remoteDraft, error: sbGetErr } = await supabase
+          .from('clinical_drafts')
+          .select('id, version, created_at, vet_id')
+          .eq('animal_id', animalId)
+          .in('status', ['draft', 'paused'])
+          .maybeSingle();
 
-          if (pgCheck.rows[0].vet_id !== user.id && user.role !== 'ADMIN') {
+        if (!sbGetErr && remoteDraft) {
+          existingId = remoteDraft.id;
+          currentVersion = remoteDraft.version || 1;
+          createdAtIso = remoteDraft.created_at || createdAtIso;
+
+          if (remoteDraft.vet_id !== user.id && user.role !== 'ADMIN') {
             return res.status(403).json({
               success: false,
               code: 'FORBIDDEN',
@@ -1128,15 +1146,56 @@ app.get('/api/health', (req, res) => {
             });
           }
         }
-      } catch (pgErr) {
-        const existingMemory = serverClinicalDrafts.get(animalId);
-        currentVersion = existingMemory?.version || 1;
-        existingId = existingMemory?.id || null;
-        createdAtIso = existingMemory?.createdAt || createdAtIso;
+      } catch (sbErr) {
+        console.warn('[attendance/draft/save] Supabase check fallback:', sbErr);
       }
 
-      // Detecção de conflito de versão
-      if (clientVersion && clientVersion < currentVersion) {
+      // Se não encontrou no Supabase, consulta Cloud SQL temporário
+      if (!existingId) {
+        try {
+          const pool = createPool();
+          const pgCheck = await pool.query(
+            `SELECT id, version, created_at, vet_id FROM public.clinical_drafts WHERE animal_id = $1 AND status IN ('draft', 'paused') LIMIT 1`,
+            [animalId]
+          );
+          if (pgCheck.rows && pgCheck.rows.length > 0) {
+            existingId = pgCheck.rows[0].id;
+            currentVersion = pgCheck.rows[0].version || 1;
+            createdAtIso = pgCheck.rows[0].created_at || createdAtIso;
+
+            if (pgCheck.rows[0].vet_id !== user.id && user.role !== 'ADMIN') {
+              return res.status(403).json({
+                success: false,
+                code: 'FORBIDDEN',
+                message: 'Este atendimento pertence a outro profissional e não pode ser alterado.',
+              });
+            }
+          }
+        } catch (pgErr) {
+          console.warn('[attendance/draft/save] Cloud SQL check fallback:', pgErr);
+        }
+      }
+
+      // Se ainda não encontrou nem no Supabase nem no Cloud SQL, verifica memória do processo
+      if (!existingId) {
+        const existingMemory = serverClinicalDrafts.get(animalId);
+        if (existingMemory && ['draft', 'paused'].includes(existingMemory.status)) {
+          existingId = existingMemory.id || null;
+          currentVersion = existingMemory.version || 1;
+          createdAtIso = existingMemory.createdAt || createdAtIso;
+
+          if (existingMemory.vetId !== user.id && user.role !== 'ADMIN') {
+            return res.status(403).json({
+              success: false,
+              code: 'FORBIDDEN',
+              message: 'Este atendimento pertence a outro profissional e não pode ser alterado.',
+            });
+          }
+        }
+      }
+
+      // Detecção de conflito de concorrência (versão desatualizada enviada pelo cliente)
+      if (typeof clientVersion === 'number' && clientVersion < currentVersion) {
         return res.status(409).json({
           success: false,
           code: 'VERSION_CONFLICT',
@@ -1145,8 +1204,9 @@ app.get('/api/health', (req, res) => {
         });
       }
 
-      const newVersion = (clientVersion ? Math.max(clientVersion, currentVersion) : currentVersion) + 1;
-      const nowIso = new Date().toISOString();
+
+      const newVersion = ((typeof clientVersion === 'number' && clientVersion > 0) ? Math.max(clientVersion, currentVersion) : currentVersion) + 1;
+
       const draftId = existingId || crypto.randomUUID();
 
       const draftObj = {
@@ -1159,14 +1219,40 @@ app.get('/api/health', (req, res) => {
         status: status === 'paused' ? 'paused' : 'draft',
         version: newVersion,
         createdAt: createdAtIso,
-        updatedAt: nowIso
+        updatedAt: nowIso,
       };
 
-      // 1. Grava no cache de servidor
+      // 1. Grava no cache de memória do processo
       serverClinicalDrafts.set(animalId, draftObj);
 
-      // 2. Persiste no PostgreSQL (Cloud SQL)
+      // 2. Tenta persistência primária no SUPABASE OFICIAL
+      let persistedInSupabase = false;
       try {
+        const { error: sbUpsertErr } = await supabase.from('clinical_drafts').upsert([
+          {
+            id: draftObj.id,
+            animal_id: draftObj.animalId,
+            attendance_id: draftObj.attendanceId,
+            vet_id: draftObj.vetId,
+            form_data: draftObj.formData,
+            status: draftObj.status,
+            version: draftObj.version,
+            updated_at: draftObj.updatedAt,
+          },
+        ]);
+
+        if (!sbUpsertErr) {
+          persistedInSupabase = true;
+        } else {
+          console.warn('[attendance/draft/save] Supabase retornou erro (tabela ausente ou RLS):', sbUpsertErr.message);
+        }
+      } catch (sbErr: any) {
+        console.warn('[attendance/draft/save] Exceção ao gravar no Supabase:', sbErr.message);
+      }
+
+      // 3. Contingência: grava no Cloud SQL local caso o Supabase remoto ainda não tenha a tabela aplicada
+      try {
+        const pool = createPool();
         await pool.query(
           `INSERT INTO public.clinical_drafts (id, animal_id, attendance_id, vet_id, form_data, status, version, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1191,32 +1277,20 @@ app.get('/api/health', (req, res) => {
           ]
         );
       } catch (pgErr: any) {
-        console.warn('[attendance/draft/save] Cloud SQL upsert fallback:', pgErr.message);
-      }
-
-      // 3. Tenta persistir no Supabase (se a tabela clinical_drafts existir)
-      try {
-        await supabase.from('clinical_drafts').upsert([{
-          id: draftObj.id,
-          animal_id: draftObj.animalId,
-          attendance_id: draftObj.attendanceId,
-          vet_id: draftObj.vetId,
-          form_data: draftObj.formData,
-          status: draftObj.status,
-          version: draftObj.version,
-          updated_at: draftObj.updatedAt
-        }]);
-      } catch (sbErr) {
-        console.warn('[attendance/draft/save] Supabase table fallback:', sbErr);
+        console.warn('[attendance/draft/save] Cloud SQL contingência aviso:', pgErr.message);
       }
 
       return res.json({
         success: true,
+        persisted: persistedInSupabase,
+        storage: persistedInSupabase ? 'supabase' : 'cloudsql_fallback',
+        warning: persistedInSupabase ? undefined : 'CENTRAL_SYNC_PENDING',
+        message: persistedInSupabase ? 'Rascunho salvo no Supabase com sucesso.' : 'Rascunho salvo em contingência local.',
         draftId: draftObj.id,
         animalId,
         version: draftObj.version,
         status: draftObj.status,
-        updatedAt: draftObj.updatedAt
+        updatedAt: draftObj.updatedAt,
       });
     }
   );
@@ -1233,22 +1307,28 @@ app.get('/api/health', (req, res) => {
         return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'animalId obrigatório.' });
       }
 
-      const pool = createPool();
       let currentVersion = 1;
       let existingId: string | null = null;
       let createdAtIso = new Date().toISOString();
+      const nowIso = new Date().toISOString();
 
+      // 1. Verifica no Supabase
       try {
-        const pgCheck = await pool.query(
-          `SELECT id, version, created_at FROM public.clinical_drafts WHERE animal_id = $1 AND status IN ('draft', 'paused') LIMIT 1`,
-          [animalId]
-        );
-        if (pgCheck.rows && pgCheck.rows.length > 0) {
-          existingId = pgCheck.rows[0].id;
-          currentVersion = pgCheck.rows[0].version || 1;
-          createdAtIso = pgCheck.rows[0].created_at || createdAtIso;
+        const { data: remoteDraft } = await supabase
+          .from('clinical_drafts')
+          .select('id, version, created_at')
+          .eq('animal_id', animalId)
+          .in('status', ['draft', 'paused'])
+          .maybeSingle();
+
+        if (remoteDraft) {
+          existingId = remoteDraft.id;
+          currentVersion = remoteDraft.version || 1;
+          createdAtIso = remoteDraft.created_at || createdAtIso;
         }
-      } catch (pgErr) {
+      } catch {}
+
+      if (!existingId) {
         const existingMemory = serverClinicalDrafts.get(animalId);
         currentVersion = existingMemory?.version || 1;
         existingId = existingMemory?.id || null;
@@ -1256,7 +1336,6 @@ app.get('/api/health', (req, res) => {
       }
 
       const newVersion = (clientVersion ? Math.max(clientVersion, currentVersion) : currentVersion) + 1;
-      const nowIso = new Date().toISOString();
 
       const draftObj = {
         id: existingId || crypto.randomUUID(),
@@ -1268,13 +1347,45 @@ app.get('/api/health', (req, res) => {
         status: 'paused',
         version: newVersion,
         createdAt: createdAtIso,
-        updatedAt: nowIso
+        updatedAt: nowIso,
       };
 
       serverClinicalDrafts.set(animalId, draftObj);
 
-      // Garante que o animal permaneça com a trava de atendimento para o veterinário no PostgreSQL
+      // Trava oficial em animals no Supabase
       try {
+        await supabase.from('animals').update({
+          condicao: 'Em Atendimento',
+          em_atendimento_vet_id: user.id,
+          em_atendimento_inicio: nowIso,
+        }).eq('id', animalId);
+      } catch (err: any) {
+        console.warn('[attendance/draft/pause] Trava em animals no Supabase aviso:', err.message);
+      }
+
+      // Persistência primária do rascunho pausado no Supabase
+      let persistedInSupabase = false;
+      try {
+        const { error: sbErr } = await supabase.from('clinical_drafts').upsert([
+          {
+            id: draftObj.id,
+            animal_id: draftObj.animalId,
+            attendance_id: draftObj.attendanceId,
+            vet_id: draftObj.vetId,
+            form_data: draftObj.formData,
+            status: 'paused',
+            version: draftObj.version,
+            updated_at: draftObj.updatedAt,
+          },
+        ]);
+        if (!sbErr) persistedInSupabase = true;
+      } catch (err: any) {
+        console.warn('[attendance/draft/pause] Supabase pause aviso:', err.message);
+      }
+
+      // Contingência local no Cloud SQL (trava + rascunho)
+      try {
+        const pool = createPool();
         await pool.query(
           `UPDATE public.animals
            SET condicao = 'Em Atendimento',
@@ -1307,38 +1418,19 @@ app.get('/api/health', (req, res) => {
           ]
         );
       } catch (pgErr: any) {
-        console.warn('[attendance/draft/pause] Cloud SQL pause error:', pgErr.message);
-      }
-
-      // Garante a trava e persistência no Supabase
-      try {
-        await supabase.from('animals').update({
-          condicao: 'Em Atendimento',
-          em_atendimento_vet_id: user.id,
-          em_atendimento_inicio: nowIso
-        }).eq('id', animalId);
-
-        await supabase.from('clinical_drafts').upsert([{
-          id: draftObj.id,
-          animal_id: draftObj.animalId,
-          attendance_id: draftObj.attendanceId,
-          vet_id: draftObj.vetId,
-          form_data: draftObj.formData,
-          status: 'paused',
-          version: draftObj.version,
-          updated_at: draftObj.updatedAt
-        }]);
-      } catch (err: any) {
-        console.warn('[attendance/draft/pause] Supabase Aviso:', err.message);
+        console.warn('[attendance/draft/pause] Cloud SQL contingência pausa aviso:', pgErr.message);
       }
 
       return res.json({
         success: true,
+        persisted: persistedInSupabase,
+        storage: persistedInSupabase ? 'supabase' : 'cloudsql_fallback',
+        warning: persistedInSupabase ? undefined : 'CENTRAL_SYNC_PENDING',
         draftId: draftObj.id,
         animalId,
         version: draftObj.version,
         status: 'paused',
-        updatedAt: draftObj.updatedAt
+        updatedAt: draftObj.updatedAt,
       });
     }
   );
@@ -1350,9 +1442,77 @@ app.get('/api/health', (req, res) => {
     async (_req: AuthenticatedRequest, res) => {
       const draftsMap = new Map<string, any>();
 
-      // 1. Inclui da memória
+      // 1. SUPABASE OFICIAL: Consulta primária via RPC segura resumida (sem form_data)
+      try {
+        const { data: summaryData, error: rpcErr } = await supabase.rpc('get_active_clinical_drafts_summary');
+        if (!rpcErr && summaryData && Array.isArray(summaryData)) {
+          summaryData.forEach((rd: any) => {
+            draftsMap.set(rd.animal_id, {
+              id: rd.id,
+              animalId: rd.animal_id,
+              attendanceId: rd.attendance_id,
+              vetId: rd.vet_id,
+              vetName: rd.vet_name,
+              status: rd.status,
+              version: rd.version,
+              updatedAt: rd.updated_at,
+            });
+          });
+        } else {
+          // Fallback para select caso a RPC ainda não tenha sido aplicada
+          const { data: remoteDrafts, error: sbErr } = await supabase
+            .from('clinical_drafts')
+            .select('id, animal_id, attendance_id, vet_id, status, version, updated_at')
+            .in('status', ['draft', 'paused']);
+
+          if (!sbErr && remoteDrafts && Array.isArray(remoteDrafts)) {
+            remoteDrafts.forEach((rd: any) => {
+              draftsMap.set(rd.animal_id, {
+                id: rd.id,
+                animalId: rd.animal_id,
+                attendanceId: rd.attendance_id,
+                vetId: rd.vet_id,
+                status: rd.status,
+                version: rd.version,
+                updatedAt: rd.updated_at,
+              });
+            });
+          }
+        }
+      } catch (err: any) {
+        console.warn('[attendance/drafts/active] Supabase aviso:', err.message);
+      }
+
+      // 2. Se o mapa estiver vazio (ex: tabela Supabase pendente), consulta contingência Cloud SQL
+      if (draftsMap.size === 0) {
+        try {
+          const pool = createPool();
+          const pgRes = await pool.query(
+            `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.status, cd.version, cd.updated_at, u.name as vet_name
+             FROM public.clinical_drafts cd
+             LEFT JOIN public.users u ON u.id = cd.vet_id
+             WHERE cd.status IN ('draft', 'paused');`
+          );
+          if (pgRes.rows) {
+            pgRes.rows.forEach(r => {
+              draftsMap.set(r.animal_id, {
+                id: r.id,
+                animalId: r.animal_id,
+                attendanceId: r.attendance_id,
+                vetId: r.vet_id,
+                vetName: r.vet_name,
+                status: r.status,
+                version: r.version,
+                updatedAt: r.updated_at,
+              });
+            });
+          }
+        } catch {}
+      }
+
+      // 3. Mescla com entradas em memória
       serverClinicalDrafts.forEach((val, key) => {
-        if (['draft', 'paused'].includes(val.status)) {
+        if (['draft', 'paused'].includes(val.status) && !draftsMap.has(key)) {
           draftsMap.set(key, {
             id: val.id,
             animalId: val.animalId,
@@ -1361,61 +1521,10 @@ app.get('/api/health', (req, res) => {
             vetName: val.vetName,
             status: val.status,
             version: val.version,
-            updatedAt: val.updatedAt
+            updatedAt: val.updatedAt,
           });
         }
       });
-
-      // 2. Consulta PostgreSQL (Cloud SQL)
-      try {
-        const pool = createPool();
-        const pgRes = await pool.query(
-          `SELECT cd.id, cd.animal_id, cd.attendance_id, cd.vet_id, cd.status, cd.version, cd.updated_at, u.name as vet_name
-           FROM public.clinical_drafts cd
-           LEFT JOIN public.users u ON u.id = cd.vet_id
-           WHERE cd.status IN ('draft', 'paused');`
-        );
-        if (pgRes.rows) {
-          pgRes.rows.forEach(r => {
-            draftsMap.set(r.animal_id, {
-              id: r.id,
-              animalId: r.animal_id,
-              attendanceId: r.attendance_id,
-              vetId: r.vet_id,
-              vetName: r.vet_name,
-              status: r.status,
-              version: r.version,
-              updatedAt: r.updated_at
-            });
-          });
-        }
-      } catch (pgErr: any) {
-        console.warn('[attendance/drafts/active] Cloud SQL check fallback:', pgErr.message);
-      }
-
-      // 3. Mescla com os do Supabase
-      try {
-        const { data: remoteDrafts } = await supabase
-          .from('clinical_drafts')
-          .select('id, animal_id, attendance_id, vet_id, status, version, updated_at')
-          .in('status', ['draft', 'paused']);
-
-        if (remoteDrafts && Array.isArray(remoteDrafts)) {
-          remoteDrafts.forEach((rd: any) => {
-            draftsMap.set(rd.animal_id, {
-              id: rd.id,
-              animalId: rd.animal_id,
-              attendanceId: rd.attendance_id,
-              vetId: rd.vet_id,
-              status: rd.status,
-              version: rd.version,
-              updatedAt: rd.updated_at
-            });
-          });
-        }
-      } catch (err: any) {
-        // Fallback silencioso
-      }
 
       return res.json({ success: true, drafts: Array.from(draftsMap.values()) });
     }

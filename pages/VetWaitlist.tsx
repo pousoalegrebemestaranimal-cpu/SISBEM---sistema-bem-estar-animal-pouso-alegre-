@@ -54,7 +54,7 @@ const VetWaitlist: React.FC = () => {
     try {
       const { data, error } = await supabase
         .from('animals')
-        .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, tutor_id, em_atendimento_vet_id, tutores(id, nome_completo)')
+        .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, tutor_id, tutores(id, nome_completo)')
         .in('condicao', ['Acolhido', 'Aguardando Atendimento', 'Em Atendimento'])
         .order('data_cadastro', { ascending: true });
 

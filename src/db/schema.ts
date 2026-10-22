@@ -236,9 +236,9 @@ export const examFiles = pgTable('exam_files', {
 // 13. Rascunhos Clínicos (Salvamento Automático & Pausa de Atendimento)
 export const clinicalDrafts = pgTable('clinical_drafts', {
   id: text('id').primaryKey(),
-  animalId: text('animal_id').references(() => animals.id, { onDelete: 'cascade' }).notNull(),
+  animalId: text('animal_id').references(() => animals.id, { onDelete: 'restrict' }).notNull(),
   attendanceId: text('attendance_id').notNull(),
-  vetId: text('vet_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  vetId: text('vet_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
   formData: jsonb('form_data').notNull(),
   status: text('status').default('draft').notNull(), // 'draft' | 'paused' | 'finished' | 'cancelled'
   version: integer('version').default(1).notNull(),

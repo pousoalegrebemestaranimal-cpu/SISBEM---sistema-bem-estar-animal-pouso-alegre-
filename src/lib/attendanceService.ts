@@ -11,7 +11,11 @@ export interface SaveDraftResult {
   message?: string;
   code?: string;
   serverVersion?: number;
+  persisted?: boolean;
+  storage?: 'supabase' | 'cloudsql_fallback' | 'memory';
+  warning?: string;
 }
+
 
 export interface GetDraftResult {
   success: boolean;
@@ -361,8 +365,6 @@ export async function cancelClinicalAttendance(
         const { supabase } = await import('./supabase');
         await supabase.from('animals').update({
           condicao: 'Acolhido',
-          em_atendimento_vet_id: null,
-          em_atendimento_inicio: null,
         }).eq('id', animalId);
         serverResponse = { success: true };
       } catch (sbErr) {
@@ -380,8 +382,6 @@ export async function cancelClinicalAttendance(
       const { supabase } = await import('./supabase');
       await supabase.from('animals').update({
         condicao: 'Acolhido',
-        em_atendimento_vet_id: null,
-        em_atendimento_inicio: null,
       }).eq('id', animalId);
       serverResponse = { success: true };
     } catch {
@@ -516,8 +516,6 @@ export async function finishClinicalAttendance(
       await syncRecordToSupabase(fullRecord as ClinicalRecord);
       await supabase.from('animals').update({
         condicao: resStatus,
-        em_atendimento_vet_id: null,
-        em_atendimento_inicio: null,
         necessita_internacao: fullRecord.necessitaInternacao ?? false,
         tipo_acomodacao_sugerida: fullRecord.recommendedKennelType || null,
         justificativa_internacao: fullRecord.accommodationJustification || null,
@@ -589,8 +587,6 @@ export async function sendAnimalToVetWaitlist(
       .from('animals')
       .update({
         condicao: AnimalCondicao.AGUARDANDO_ATENDIMENTO,
-        em_atendimento_vet_id: null,
-        em_atendimento_inicio: null,
       })
       .eq('id', animalId);
 
@@ -701,6 +697,9 @@ export async function saveClinicalDraft(
           version: serverRes.version,
           status: serverRes.status,
           updatedAt: serverRes.updatedAt,
+          persisted: serverRes.persisted !== false,
+          storage: serverRes.storage || 'supabase',
+          warning: serverRes.warning,
         };
       }
     }
@@ -735,18 +734,24 @@ export async function saveClinicalDraft(
         version: newVersion,
         status: (options?.status as ClinicalDraftStatus) || 'draft',
         updatedAt: nowIso,
+        persisted: true,
+        storage: 'supabase',
       };
     }
   } catch (sbError) {
     console.warn('[attendanceService] Fallback Supabase draft save aviso:', sbError);
   }
 
-  // Rascunho salvo ao menos no sessionStorage
+  // Rascunho salvo ao menos no sessionStorage (contingência local não confirmada no servidor central)
   return {
     success: true,
     version: options?.clientVersion || 1,
     status: (options?.status as ClinicalDraftStatus) || 'draft',
     updatedAt: new Date().toISOString(),
+    persisted: false,
+    storage: 'memory',
+    warning: 'CENTRAL_SYNC_PENDING',
+    message: 'Salvo em contingência local no navegador. Sincronização central com Supabase pendente.',
   };
 }
 
@@ -796,6 +801,9 @@ export async function pauseClinicalAttendance(
           version: serverRes.version,
           status: 'paused',
           updatedAt: serverRes.updatedAt,
+          persisted: serverRes.persisted !== false,
+          storage: serverRes.storage || 'supabase',
+          warning: serverRes.warning,
         };
       }
     }
@@ -813,7 +821,7 @@ export async function pauseClinicalAttendance(
         em_atendimento_inicio: nowIso,
       }).eq('id', animalId);
 
-      await supabase.from('clinical_drafts').upsert([
+      const { error: sbErr } = await supabase.from('clinical_drafts').upsert([
         {
           id: `draft_${animalId}`,
           animal_id: animalId,
@@ -825,6 +833,17 @@ export async function pauseClinicalAttendance(
           updated_at: nowIso,
         },
       ]);
+
+      if (!sbErr) {
+        return {
+          success: true,
+          status: 'paused',
+          version: (options?.clientVersion || 1) + 1,
+          updatedAt: nowIso,
+          persisted: true,
+          storage: 'supabase',
+        };
+      }
     }
   } catch (sbErr) {
     console.warn('[attendanceService] Fallback pause Supabase aviso:', sbErr);
@@ -847,6 +866,10 @@ export async function pauseClinicalAttendance(
     status: 'paused',
     version: (options?.clientVersion || 1) + 1,
     updatedAt: nowIso,
+    persisted: false,
+    storage: 'memory',
+    warning: 'CENTRAL_SYNC_PENDING',
+    message: 'Atendimento pausado em contingência local. Sincronização central com Supabase pendente.',
   };
 }
 
@@ -972,9 +995,26 @@ export async function getActiveClinicalDrafts(): Promise<{ success: boolean; dra
     console.warn('[attendanceService] Aviso ao consultar /api/attendance/drafts/active:', err.message);
   }
 
-  // Fallback para Supabase
+  // Fallback para Supabase via RPC resumida
   try {
     const { supabase } = await import('./supabase');
+    const { data: summaryData, error: rpcErr } = await supabase.rpc('get_active_clinical_drafts_summary');
+    if (!rpcErr && summaryData && Array.isArray(summaryData)) {
+      const mapped: ClinicalDraft[] = summaryData.map((rd: any) => ({
+        id: rd.id,
+        animalId: rd.animal_id,
+        attendanceId: rd.attendance_id,
+        vetId: rd.vet_id,
+        vetName: rd.vet_name,
+        formData: {},
+        status: rd.status,
+        version: rd.version || 1,
+        createdAt: rd.updated_at,
+        updatedAt: rd.updated_at,
+      }));
+      return { success: true, drafts: mapped };
+    }
+
     const { data: remoteDrafts } = await supabase
       .from('clinical_drafts')
       .select('id, animal_id, attendance_id, vet_id, status, version, updated_at')

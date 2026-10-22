@@ -50,7 +50,7 @@ const VeterinaryForm: React.FC = () => {
   const isSubmittingRef = useRef(false);
 
   // Estado de Rascunho Persistente & Salvamento Automático
-  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error' | 'conflict'>('idle');
+  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'saved_local' | 'error' | 'conflict'>('idle');
   const [draftLastSaved, setDraftLastSaved] = useState<string | null>(null);
   const [isPausing, setIsPausing] = useState(false);
   const [draftNotification, setDraftNotification] = useState<string | null>(null);
@@ -359,7 +359,11 @@ const VeterinaryForm: React.FC = () => {
       if (res.success) {
         if (res.version) draftVersionRef.current = res.version;
         if (res.draftId) draftIdRef.current = res.draftId;
-        setDraftStatus('saved');
+        if (res.persisted === false) {
+          setDraftStatus('saved_local');
+        } else {
+          setDraftStatus('saved');
+        }
         setDraftLastSaved(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
       } else if (res.code === 'VERSION_CONFLICT') {
         setDraftStatus('conflict');
@@ -369,6 +373,7 @@ const VeterinaryForm: React.FC = () => {
     }).catch(() => {
       if (isMounted) setDraftStatus('error');
     });
+
 
     return () => {
       isMounted = false;
@@ -743,25 +748,32 @@ const VeterinaryForm: React.FC = () => {
                 </span>
               )}
               {draftStatus === 'saved' && (
-                <span className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl font-bold shadow-sm">
+                <span className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Rascunho persistido na base de dados oficial do Supabase">
                   <CheckCircle2 size={13} className="text-emerald-600" />
-                  Rascunho salvo {draftLastSaved ? `às ${draftLastSaved}` : ''}
+                  Rascunho salvo no Supabase {draftLastSaved ? `às ${draftLastSaved}` : ''}
+                </span>
+              )}
+              {draftStatus === 'saved_local' && (
+                <span className="flex items-center gap-1.5 text-amber-800 bg-amber-50 border border-amber-300 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Salvo em contingência local temporária. Sincronização central com Supabase pendente.">
+                  <AlertCircle size={13} className="text-amber-600" />
+                  Salvo localmente (sincronização central pendente) {draftLastSaved ? `às ${draftLastSaved}` : ''}
                 </span>
               )}
               {draftStatus === 'conflict' && (
-                <span className="flex items-center gap-1.5 text-amber-800 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-xl font-bold shadow-sm">
-                  <AlertCircle size={13} className="text-amber-700" />
-                  Conflito de versão
+                <span className="flex items-center gap-1.5 text-rose-800 bg-rose-50 border border-rose-300 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Existe uma versão mais recente deste rascunho gravada por outro atendimento. Suas alterações locais foram mantidas no formulário.">
+                  <AlertCircle size={13} className="text-rose-700" />
+                  Conflito de versão (alterado externamente)
                 </span>
               )}
               {draftStatus === 'error' && (
-                <span className="flex items-center gap-1.5 text-rose-700 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl font-bold shadow-sm">
+                <span className="flex items-center gap-1.5 text-rose-700 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Falha de conexão. Suas alterações foram preservadas no navegador.">
                   <AlertCircle size={13} className="text-rose-600" />
-                  Erro ao salvar rascunho
+                  Erro de rede (preservado no navegador)
                 </span>
               )}
             </div>
           )}
+
         </div>
       </div>
 
