@@ -3,11 +3,10 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../services/db';
 import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile, Animal } from '../types';
-import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw, Clock, CloudUpload } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance, saveClinicalDraft, pauseClinicalAttendance, getClinicalDraft } from '../src/lib/attendanceService';
-import { useDebounce } from '../src/hooks/useDebounce';
+import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance } from '../src/lib/attendanceService';
 import { fetchAnimalById } from '../src/lib/supabaseQueries';
 import { safeSetLocalAnimals } from '../src/lib/safeStorage';
 
@@ -48,16 +47,6 @@ const VeterinaryForm: React.FC = () => {
   const [blockedVetName, setBlockedVetName] = useState('');
   const [isCancelling, setIsCancelling] = useState(false);
   const isSubmittingRef = useRef(false);
-
-  // Estado de Rascunho Persistente & Salvamento Automático
-  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'saved_local' | 'error' | 'conflict'>('idle');
-  const [draftLastSaved, setDraftLastSaved] = useState<string | null>(null);
-  const [isPausing, setIsPausing] = useState(false);
-  const [draftNotification, setDraftNotification] = useState<string | null>(null);
-  const draftVersionRef = useRef<number>(1);
-  const draftIdRef = useRef<string | null>(null);
-  const attendanceIdRef = useRef<string>(`att_${id}_${Date.now()}`);
-  const isInitialLoadedRef = useRef<boolean>(false);
   
   // Internação para Animal Externo (Com Tutor)
   const [necessitaInternacaoExterno, setNecessitaInternacaoExterno] = useState<boolean>(false);
@@ -196,16 +185,13 @@ const VeterinaryForm: React.FC = () => {
         }
 
         // 2. Se o animal ainda não estiver com status 'Em Atendimento', efetua o bloqueio atômico
-        if (!editId && targetAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
-          try {
-            const res = await startClinicalAttendance(id, user.id, user.name);
+        if (targetAnimal.condicao !== AnimalCondicao.EM_ATENDIMENTO && id && user) {
+          startClinicalAttendance(id, user.id, user.name).then(res => {
             if (!isMounted) return;
             if (!res.success) {
               if (res.code === 'ALREADY_IN_ATTENDANCE') {
                 setIsBlockedByOtherVet(true);
                 setBlockedVetName(res.vetName || 'outro profissional');
-                setLoadingAnimal(false);
-                return;
               } else {
                 setError(res.message || 'Não foi possível iniciar o atendimento para este animal.');
               }
@@ -217,9 +203,7 @@ const VeterinaryForm: React.FC = () => {
                 emAtendimentoInicio: res.inicio || new Date().toISOString()
               } : prev);
             }
-          } catch (stErr) {
-            console.warn('Aviso ao iniciar atendimento:', stErr);
-          }
+          });
         }
 
         let initialData: any = {
@@ -229,46 +213,16 @@ const VeterinaryForm: React.FC = () => {
           dataObito: new Date().toISOString().split('T')[0]
         };
 
-        // Recuperação de Rascunho Persistente (Cloud SQL / Supabase / Cache Local)
-        if (!editId && id) {
-          try {
-            const draftRes = await getClinicalDraft(id);
-            if (draftRes.success && draftRes.draft && draftRes.draft.formData) {
-              const dData = draftRes.draft.formData;
-              initialData = { ...initialData, ...dData };
-              draftVersionRef.current = draftRes.draft.version || 1;
-              draftIdRef.current = draftRes.draft.id;
-              if (draftRes.draft.attendanceId) {
-                attendanceIdRef.current = draftRes.draft.attendanceId;
-              }
-              if (dData.necessitaInternacaoExterno !== undefined) {
-                setNecessitaInternacaoExterno(Boolean(dData.necessitaInternacaoExterno));
-              }
-              if (dData.tipoAcomodacaoExterno) {
-                setTipoAcomodacaoExterno(dData.tipoAcomodacaoExterno as KennelType);
-              }
-              if (dData.justificativaInternacaoExterno) {
-                setJustificativaInternacaoExterno(dData.justificativaInternacaoExterno);
-              }
-              if (dData.tipoObito) {
-                setTipoObito(dData.tipoObito);
-              }
-              if (dData.causaObitoInput) {
-                setCausaObitoInput(dData.causaObitoInput);
-              }
-              setDraftStatus('saved');
-              const updatedAtDate = new Date(draftRes.draft.updatedAt);
-              setDraftLastSaved(updatedAtDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
-              setDraftNotification(
-                draftRes.draft.status === 'paused'
-                  ? 'Atendimento retomado! O rascunho salvo anteriormente foi restaurado com sucesso.'
-                  : 'Rascunho de atendimento recuperado com sucesso.'
-              );
+        // Recuperação de Rascunho: impede perda de dados caso o veterinário saia da página acidentalmente
+        try {
+          const savedDraft = sessionStorage.getItem(`sisbem_attendance_draft_${id}`);
+          if (savedDraft) {
+            const parsedDraft = JSON.parse(savedDraft);
+            if (parsedDraft && typeof parsedDraft === 'object') {
+              initialData = { ...initialData, ...parsedDraft };
             }
-          } catch (dErr) {
-            console.warn('Aviso ao carregar rascunho persistente:', dErr);
           }
-        }
+        } catch (_) {}
 
         setRecord(prev => ({
           ...prev,
@@ -284,11 +238,6 @@ const VeterinaryForm: React.FC = () => {
             if (targetAnimal.justificativaInternacao) setJustificativaInternacaoExterno(targetAnimal.justificativaInternacao);
           }
         }
-
-        // Marca que a carga inicial terminou para ativar o autosave nas próximas alterações do usuário
-        setTimeout(() => {
-          isInitialLoadedRef.current = true;
-        }, 600);
       }
 
       setLoadingAnimal(false);
@@ -301,111 +250,14 @@ const VeterinaryForm: React.FC = () => {
     };
   }, [editId, user?.id, user?.role, user?.name, navigate, id, reloadKey]);
 
-  // Prepara payload atual do formulário para o rascunho
-  const currentFormData = useMemo(() => {
-    return {
-      ...record,
-      animalId: id,
-      necessitaInternacaoExterno,
-      tipoAcomodacaoExterno,
-      justificativaInternacaoExterno,
-      tipoObito,
-      causaObitoInput,
-    };
-  }, [record, id, necessitaInternacaoExterno, tipoAcomodacaoExterno, justificativaInternacaoExterno, tipoObito, causaObitoInput]);
-
-  // Debounce de 1500ms para evitar requisições a cada tecla digitada
-  const debouncedFormData = useDebounce(currentFormData, 1500);
-
-  // Efeito de Salvamento Automático do Rascunho
   useEffect(() => {
-    if (!id || editId || !isInitialLoadedRef.current) return;
-
-    const hasData = Boolean(
-      debouncedFormData.diagnosticoClinico?.trim() ||
-      debouncedFormData.tratamentoAmbulatorial?.trim() ||
-      debouncedFormData.observacoesGerais?.trim() ||
-      debouncedFormData.examesSolicitados?.trim() ||
-      debouncedFormData.mucosa?.trim() ||
-      debouncedFormData.temperatura?.trim() ||
-      debouncedFormData.parasitas?.trim() ||
-      debouncedFormData.vacinas?.trim() ||
-      debouncedFormData.hidratacao?.trim() ||
-      debouncedFormData.palpacaoAbdominal?.trim() ||
-      debouncedFormData.auscultaCardiaca?.trim() ||
-      debouncedFormData.auscultaPulmonar?.trim() ||
-      debouncedFormData.frequenciaCardiaca?.trim() ||
-      debouncedFormData.frequenciaRespiratoria?.trim() ||
-      (debouncedFormData.receitas && debouncedFormData.receitas.length > 0) ||
-      (debouncedFormData.encaminhamentos && debouncedFormData.encaminhamentos.length > 0) ||
-      (debouncedFormData.examesLaboratoriais && debouncedFormData.examesLaboratoriais.length > 0) ||
-      debouncedFormData.v10Aplicada ||
-      debouncedFormData.antirrabicaAplicada ||
-      debouncedFormData.vermifugoAplicado ||
-      debouncedFormData.microchipAplicado
-    );
-
-    if (!hasData) return;
-
-    let isMounted = true;
-    setDraftStatus('saving');
-
-    saveClinicalDraft(id, debouncedFormData, {
-      attendanceId: attendanceIdRef.current,
-      clientVersion: draftVersionRef.current,
-      status: 'draft',
-    }).then(res => {
-      if (!isMounted) return;
-      if (res.success) {
-        if (res.version) draftVersionRef.current = res.version;
-        if (res.draftId) draftIdRef.current = res.draftId;
-        if (res.persisted === false) {
-          setDraftStatus('saved_local');
-        } else {
-          setDraftStatus('saved');
-        }
-        setDraftLastSaved(new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
-      } else if (res.code === 'VERSION_CONFLICT') {
-        setDraftStatus('conflict');
-      } else {
-        setDraftStatus('error');
-      }
-    }).catch(() => {
-      if (isMounted) setDraftStatus('error');
-    });
-
-
-    return () => {
-      isMounted = false;
-    };
-  }, [debouncedFormData, id, editId]);
-
-  // Manipulador do botão "Salvar e sair" (Pausa de Atendimento com Lock Preservado)
-  const handleSaveAndExit = async () => {
-    if (isPausing || loading || !id || !user) return;
-    setIsPausing(true);
+    if (!id || editId) return;
     try {
-      const res = await pauseClinicalAttendance(id, currentFormData, {
-        attendanceId: attendanceIdRef.current,
-        clientVersion: draftVersionRef.current,
-      });
-
-      if (!res.success) {
-        setError(res.message || 'Não foi possível pausar o atendimento.');
-        setIsPausing(false);
-        return;
+      if (record && (record.diagnosticoClinico || record.tratamentoAmbulatorial || record.observacoesGerais || (record.receitas && record.receitas.length > 0) || (record.encaminhamentos && record.encaminhamentos.length > 0))) {
+        sessionStorage.setItem(`sisbem_attendance_draft_${id}`, JSON.stringify(record));
       }
-
-      navigate('/veterinario/fila', {
-        state: {
-          toastMessage: `Atendimento do paciente ${animal?.nome || ''} pausado com sucesso. O animal permanece reservado para você na fila.`,
-        },
-      });
-    } catch (err: any) {
-      setError(err.message || 'Erro ao pausar atendimento.');
-      setIsPausing(false);
-    }
-  };
+    } catch (_) {}
+  }, [record, id, editId]);
 
   const handleAddPrescription = () => {
     const newP: any = {
@@ -731,67 +583,13 @@ const VeterinaryForm: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-          {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
-            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl text-emerald-800 text-xs font-bold shadow-sm">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-              <span>Em Atendimento ({user?.name || 'Veterinário'})</span>
-            </div>
-          )}
-
-          {!editId && (
-            <div className="flex items-center text-xs">
-              {draftStatus === 'saving' && (
-                <span className="flex items-center gap-1.5 text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl font-bold animate-pulse shadow-sm">
-                  <RefreshCw size={12} className="animate-spin text-amber-600" />
-                  Salvando rascunho...
-                </span>
-              )}
-              {draftStatus === 'saved' && (
-                <span className="flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Rascunho persistido na base de dados oficial do Supabase">
-                  <CheckCircle2 size={13} className="text-emerald-600" />
-                  Rascunho salvo no Supabase {draftLastSaved ? `às ${draftLastSaved}` : ''}
-                </span>
-              )}
-              {draftStatus === 'saved_local' && (
-                <span className="flex items-center gap-1.5 text-amber-800 bg-amber-50 border border-amber-300 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Salvo em contingência local temporária. Sincronização central com Supabase pendente.">
-                  <AlertCircle size={13} className="text-amber-600" />
-                  Salvo localmente (sincronização central pendente) {draftLastSaved ? `às ${draftLastSaved}` : ''}
-                </span>
-              )}
-              {draftStatus === 'conflict' && (
-                <span className="flex items-center gap-1.5 text-rose-800 bg-rose-50 border border-rose-300 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Existe uma versão mais recente deste rascunho gravada por outro atendimento. Suas alterações locais foram mantidas no formulário.">
-                  <AlertCircle size={13} className="text-rose-700" />
-                  Conflito de versão (alterado externamente)
-                </span>
-              )}
-              {draftStatus === 'error' && (
-                <span className="flex items-center gap-1.5 text-rose-700 bg-rose-50 border border-rose-200 px-3 py-1.5 rounded-xl font-bold shadow-sm" title="Falha de conexão. Suas alterações foram preservadas no navegador.">
-                  <AlertCircle size={13} className="text-rose-600" />
-                  Erro de rede (preservado no navegador)
-                </span>
-              )}
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {draftNotification && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 px-4 py-3 rounded-2xl flex items-center justify-between gap-3 shadow-sm animate-in fade-in">
-          <div className="flex items-center gap-2.5 text-xs font-bold">
-            <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-            <span>{draftNotification}</span>
+        {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
+          <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl text-emerald-800 text-xs font-bold shadow-sm self-start sm:self-auto">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span>Atendimento em Andamento por Você ({user?.name || 'Veterinário'})</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setDraftNotification(null)}
-            className="text-emerald-700 hover:text-emerald-900 p-1 rounded-lg hover:bg-emerald-100/50 transition-colors"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-xl flex items-center gap-3 animate-in fade-in">
@@ -1585,30 +1383,18 @@ const VeterinaryForm: React.FC = () => {
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-end">
+          <div className="flex items-center gap-4 w-full sm:w-auto justify-end">
             <button 
               type="button" 
               onClick={() => navigate(-1)} 
-              className="px-5 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl transition-colors text-sm"
+              className="px-6 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl"
             >
               Voltar
             </button>
-            {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
-              <button
-                type="button"
-                disabled={isPausing || loading || isCancelling}
-                onClick={handleSaveAndExit}
-                className="px-6 py-3 text-amber-800 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 font-bold rounded-xl transition-all flex items-center gap-2 border border-amber-300 text-sm shadow-sm disabled:opacity-50 cursor-pointer"
-                title="Salva o rascunho e pausa o atendimento. O animal continuará reservado para você na fila."
-              >
-                <Clock size={16} className={isPausing ? 'animate-spin' : ''} />
-                {isPausing ? 'Salvando e saindo...' : 'Salvar e sair'}
-              </button>
-            )}
             <button 
               type="submit" 
-              disabled={loading || isCancelling || isPausing} 
-              className={`flex items-center justify-center gap-2 px-9 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all cursor-pointer ${
+              disabled={loading || isCancelling} 
+              className={`flex items-center justify-center gap-2 px-10 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${
                 animal.temTutor 
                   ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
                   : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
