@@ -4,12 +4,12 @@ import { db } from '../services/db';
 import { AnimalCondicao, Especie } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2, RotateCw } from 'lucide-react';
+import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2, RotateCw, CheckCircle2, X } from 'lucide-react';
 // Fix: Use import * as and cast to any to bypass named export errors
 import * as ReactRouterDOM from 'react-router-dom';
-import { startClinicalAttendance } from '../src/lib/attendanceService';
+import { startClinicalAttendance, getActiveClinicalDrafts } from '../src/lib/attendanceService';
 import { supabase } from '../src/lib/supabase';
-const { useNavigate } = ReactRouterDOM as any;
+const { useNavigate, useLocation } = ReactRouterDOM as any;
 
 interface WaitlistAnimal {
   id: string;
@@ -25,10 +25,16 @@ interface WaitlistAnimal {
     nomeCompleto: string;
   };
   emAtendimentoVetId?: string;
+  draft?: {
+    status: string;
+    updatedAt: string;
+    version: number;
+  };
 }
 
 const VetWaitlist: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const user = db.getCurrentUser();
   const [waitlist, setWaitlist] = useState<WaitlistAnimal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,6 +42,7 @@ const VetWaitlist: React.FC = () => {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [startingAnimalId, setStartingAnimalId] = useState<string | null>(null);
   const [blockingError, setBlockingError] = useState<{ animalId: string; message: string; vetName?: string } | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(location?.state?.toastMessage || null);
 
   // Consulta diretamente o Supabase como fonte oficial da fila
   const fetchWaitlist = useCallback(async (isManual = false) => {
@@ -66,6 +73,16 @@ const VetWaitlist: React.FC = () => {
         return;
       }
 
+      const activeDraftsMap = new Map<string, any>();
+      try {
+        const draftsRes = await getActiveClinicalDrafts();
+        if (draftsRes?.success && draftsRes.drafts) {
+          draftsRes.drafts.forEach((d: any) => {
+            activeDraftsMap.set(d.animalId, d);
+          });
+        }
+      } catch (_) {}
+
       const localAnimals = db.getAnimals();
       const mapped: WaitlistAnimal[] = (data || []).map((row: any) => {
         const tutorData = row.tutores 
@@ -73,6 +90,7 @@ const VetWaitlist: React.FC = () => {
           : (row.tutor_id ? db.getTutores().find(t => t.id === row.tutor_id) : undefined);
 
         const localMatch = localAnimals.find(a => a.id === row.id);
+        const draftInfo = activeDraftsMap.get(row.id);
 
         return {
           id: row.id,
@@ -84,7 +102,12 @@ const VetWaitlist: React.FC = () => {
           localResgate: row.local_resgate || 'Local não informado',
           tutorId: row.tutor_id || undefined,
           tutor: tutorData ? { id: tutorData.id, nomeCompleto: tutorData.nomeCompleto || '' } : undefined,
-          emAtendimentoVetId: (row as any).em_atendimento_vet_id || localMatch?.emAtendimentoVetId,
+          emAtendimentoVetId: row.em_atendimento_vet_id || (draftInfo ? draftInfo.vetId : localMatch?.emAtendimentoVetId),
+          draft: draftInfo ? {
+            status: draftInfo.status,
+            updatedAt: draftInfo.updatedAt,
+            version: draftInfo.version
+          } : undefined,
         };
       });
 
@@ -200,6 +223,27 @@ const VetWaitlist: React.FC = () => {
         </div>
       )}
 
+      {toastMessage && (
+        <div className="bg-emerald-50 border-2 border-emerald-300 text-emerald-950 p-4 rounded-2xl flex items-center justify-between gap-4 animate-in slide-in-from-top-2 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-emerald-100 text-emerald-700 rounded-xl shrink-0">
+              <CheckCircle2 size={22} />
+            </div>
+            <div>
+              <p className="font-black text-sm">Operação Realizada</p>
+              <p className="text-xs text-emerald-800 mt-0.5">{toastMessage}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToastMessage(null)}
+            className="p-1.5 text-emerald-700 hover:text-emerald-900 rounded-lg hover:bg-emerald-100 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
       {blockingError && (
         <div className="bg-rose-50 border-2 border-rose-300 text-rose-900 p-4 rounded-2xl flex items-center justify-between gap-4 animate-in slide-in-from-top-2 shadow-sm">
           <div className="flex items-center gap-3">
@@ -270,7 +314,14 @@ const VetWaitlist: React.FC = () => {
                         : 'bg-amber-100 text-amber-800 border border-amber-300'
                     }`}>
                       <span className="w-1.5 h-1.5 rounded-full bg-current animate-ping" />
-                      {isCurrentVet ? 'Em Atendimento por Você' : `Em Atendimento (${vetDisplayName})`}
+                      {isCurrentVet 
+                        ? (animal.draft?.status === 'paused' ? 'Atendimento Pausado por Você' : 'Em Atendimento por Você')
+                        : `Em Atendimento (${vetDisplayName})`}
+                    </span>
+                  )}
+                  {animal.draft && animal.draft.status === 'paused' && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1">
+                      <Clock size={11} className="text-amber-700" /> Rascunho Salvo
                     </span>
                   )}
                 </div>
@@ -332,7 +383,7 @@ const VetWaitlist: React.FC = () => {
                       className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-black rounded-xl shadow-lg shadow-emerald-600/20 transition-all cursor-pointer group"
                     >
                       <Stethoscope size={18} />
-                      <span>Continuar Atendimento</span>
+                      <span>{animal.draft?.status === 'paused' ? 'Retomar Atendimento' : 'Continuar Atendimento'}</span>
                       <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
                     </button>
                   ) : (

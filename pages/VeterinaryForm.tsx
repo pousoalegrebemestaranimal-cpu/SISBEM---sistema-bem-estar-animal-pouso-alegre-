@@ -3,12 +3,13 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../services/db';
 import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile, Animal } from '../types';
-import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw, History } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance } from '../src/lib/attendanceService';
 import { fetchAnimalById } from '../src/lib/supabaseQueries';
 import { safeSetLocalAnimals } from '../src/lib/safeStorage';
+import { ClinicalHistoryModal } from '../components/ClinicalHistoryModal';
 
 const DIAGNOSTIC_OPTIONS = [
   'Tumores',
@@ -52,6 +53,9 @@ const VeterinaryForm: React.FC = () => {
   const [necessitaInternacaoExterno, setNecessitaInternacaoExterno] = useState<boolean>(false);
   const [tipoAcomodacaoExterno, setTipoAcomodacaoExterno] = useState<KennelType | ''>('');
   const [justificativaInternacaoExterno, setJustificativaInternacaoExterno] = useState<string>('');
+  
+  // Histórico Clínico durante o Atendimento (Etapa 1)
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   
   const [record, setRecord] = useState<Partial<ClinicalRecord>>({
     animalId: id,
@@ -583,12 +587,24 @@ const VeterinaryForm: React.FC = () => {
           </div>
         </div>
 
-        {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
-          <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl text-emerald-800 text-xs font-bold shadow-sm self-start sm:self-auto">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-            <span>Atendimento em Andamento por Você ({user?.name || 'Veterinário'})</span>
-          </div>
-        )}
+        <div className="flex items-center gap-3 flex-wrap self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={() => setIsHistoryModalOpen(true)}
+            className="px-4 py-2 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white font-black text-xs uppercase tracking-wider rounded-xl shadow-sm hover:shadow-md transition-all flex items-center gap-2 cursor-pointer shrink-0"
+            title="Consultar atendimentos anteriores deste animal"
+          >
+            <History size={16} />
+            <span>HISTÓRICO CLÍNICO</span>
+          </button>
+
+          {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
+            <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl text-emerald-800 text-xs font-bold shadow-sm">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              <span>Atendimento em Andamento por Você ({user?.name || 'Veterinário'})</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -605,18 +621,30 @@ const VeterinaryForm: React.FC = () => {
             {animal.temTutor ? <HeartPulse size={120} /> : <Clipboard size={120} />}
           </div>
           
-          <div className="flex items-center gap-2 border-b border-white/10 pb-4">
-            {animal.temTutor ? (
-              <>
-                <HeartPulse size={18} className="text-indigo-400" />
-                <h3 className="text-xs font-black uppercase tracking-widest text-indigo-400">Queixa Principal / Motivo da Consulta</h3>
-              </>
-            ) : (
-              <>
-                <MapPin size={18} className="text-teal-400" />
-                <h3 className="text-xs font-black uppercase tracking-widest text-teal-400">Contexto e Histórico de Resgate</h3>
-              </>
-            )}
+          <div className="flex items-center justify-between border-b border-white/10 pb-4">
+            <div className="flex items-center gap-2">
+              {animal.temTutor ? (
+                <>
+                  <HeartPulse size={18} className="text-indigo-400" />
+                  <h3 className="text-xs font-black uppercase tracking-widest text-indigo-400">Queixa Principal / Motivo da Consulta</h3>
+                </>
+              ) : (
+                <>
+                  <MapPin size={18} className="text-teal-400" />
+                  <h3 className="text-xs font-black uppercase tracking-widest text-teal-400">Contexto e Histórico de Resgate</h3>
+                </>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsHistoryModalOpen(true)}
+              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 active:bg-white/30 text-white border border-white/20 font-bold text-xs uppercase tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+              title="Consultar atendimentos anteriores deste animal"
+            >
+              <History size={14} className="text-teal-300" />
+              <span>HISTÓRICO CLÍNICO</span>
+            </button>
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
@@ -1370,31 +1398,41 @@ const VeterinaryForm: React.FC = () => {
         )}
 
         <div className="flex flex-col sm:flex-row justify-between items-center gap-4 pt-4 border-t border-slate-200">
-          <div>
+          <div className="flex items-center gap-3 flex-wrap">
             {!editId && animal.condicao === AnimalCondicao.EM_ATENDIMENTO && (
               <button
                 type="button"
                 disabled={isCancelling || loading}
                 onClick={handleCancelAttendance}
-                className="px-5 py-3 text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 font-bold rounded-xl transition-all flex items-center gap-2 border border-rose-200 text-sm"
+                className="px-5 py-3 text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 font-bold rounded-xl transition-all flex items-center gap-2 border border-rose-200 text-sm cursor-pointer"
               >
                 <LogOut size={16} /> {isCancelling ? 'Liberando...' : 'Liberar / Devolver à Fila'}
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => setIsHistoryModalOpen(true)}
+              className="px-5 py-3 text-teal-700 hover:text-teal-800 bg-teal-50 hover:bg-teal-100 font-bold rounded-xl transition-all flex items-center gap-2 border border-teal-200 text-sm cursor-pointer shadow-2xs"
+              title="Consultar atendimentos anteriores deste animal"
+            >
+              <History size={16} />
+              <span>HISTÓRICO CLÍNICO</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-4 w-full sm:w-auto justify-end">
             <button 
               type="button" 
               onClick={() => navigate(-1)} 
-              className="px-6 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl"
+              className="px-6 py-3 text-slate-600 font-semibold hover:bg-slate-200 rounded-xl cursor-pointer"
             >
               Voltar
             </button>
             <button 
               type="submit" 
               disabled={loading || isCancelling} 
-              className={`flex items-center justify-center gap-2 px-10 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all ${
+              className={`flex items-center justify-center gap-2 px-10 py-3 text-white font-bold rounded-xl shadow-lg disabled:opacity-50 transition-all cursor-pointer ${
                 animal.temTutor 
                   ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/20' 
                   : 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
@@ -1405,6 +1443,16 @@ const VeterinaryForm: React.FC = () => {
           </div>
         </div>
       </form>
+
+      {/* MODAL DE HISTÓRICO CLÍNICO (READ-ONLY) */}
+      {animal && (
+        <ClinicalHistoryModal
+          isOpen={isHistoryModalOpen}
+          onClose={() => setIsHistoryModalOpen(false)}
+          animal={animal}
+          currentEditId={editId}
+        />
+      )}
     </div>
   );
 };
