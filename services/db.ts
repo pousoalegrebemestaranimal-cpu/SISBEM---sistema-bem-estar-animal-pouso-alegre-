@@ -1,5 +1,5 @@
 
-import { Animal, Solicitante, Tutor, User, AnimalJoined, AnimalCondicao, ClinicalRecord, Prescription, StatusLog, Kennel, KennelType, KennelOccupation, KennelConfig, Adotante, Especie, Porte, Sexo, AgendamentoCirurgia, CirurgiaStatus, CirurgiaPrioridade, CirurgiaJoined } from '../types';
+import { Animal, Solicitante, Tutor, User, AnimalJoined, AnimalCondicao, ClinicalRecord, ClinicalRecordAddendum, Prescription, StatusLog, Kennel, KennelType, KennelOccupation, KennelConfig, Adotante, Especie, Porte, Sexo, AgendamentoCirurgia, CirurgiaStatus, CirurgiaPrioridade, CirurgiaJoined } from '../types';
 import {
   syncAnimalToSupabase,
   deleteAnimalFromSupabase,
@@ -37,7 +37,8 @@ const KEYS = {
   KENNELS: 'sisbem_kennels',
   OCCUPATIONS: 'sisbem_occupations',
   KENNEL_CONFIGS: 'sisbem_kennel_configs',
-  CIRURGIAS: 'sisbem_cirurgias'
+  CIRURGIAS: 'sisbem_cirurgias',
+  CLINICAL_ADDENDA: 'sisbem_clinical_addenda',
 };
 
 export const resetAndSeedAllData = () => {
@@ -1186,6 +1187,27 @@ export const db = {
   },
   getTutores: (): Tutor[] => JSON.parse(localStorage.getItem(KEYS.TUTORES) || '[]'),
   getRecords: (): ClinicalRecord[] => JSON.parse(localStorage.getItem(KEYS.RECORDS) || '[]'),
+  getAddenda: (prontuarioId?: string): ClinicalRecordAddendum[] => {
+    const list: ClinicalRecordAddendum[] = JSON.parse(localStorage.getItem(KEYS.CLINICAL_ADDENDA) || '[]');
+    if (prontuarioId) {
+      return list.filter(a => a.prontuarioId === prontuarioId).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    }
+    return list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  },
+  saveAddendum: (addendum: ClinicalRecordAddendum) => {
+    const list: ClinicalRecordAddendum[] = JSON.parse(localStorage.getItem(KEYS.CLINICAL_ADDENDA) || '[]');
+    const idx = list.findIndex(a => a.id === addendum.id);
+    if (idx >= 0) {
+      list[idx] = addendum;
+    } else {
+      list.push(addendum);
+    }
+    localStorage.setItem(KEYS.CLINICAL_ADDENDA, JSON.stringify(list));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sisbem-addenda-changed', { detail: { addendum } }));
+    }
+    return addendum;
+  },
   getStatusLogs: (): StatusLog[] => JSON.parse(localStorage.getItem(KEYS.STATUS_LOGS) || '[]'),
   getKennels: (): Kennel[] => {
     const raw: Kennel[] = JSON.parse(localStorage.getItem(KEYS.KENNELS) || '[]');

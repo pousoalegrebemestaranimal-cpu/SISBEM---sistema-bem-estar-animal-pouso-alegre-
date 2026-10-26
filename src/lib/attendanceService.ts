@@ -1,5 +1,5 @@
 import { db } from '../../services/db';
-import { AnimalCondicao, ClinicalRecord, Prescription, ClinicalDraft, ClinicalDraftStatus } from '../../types';
+import { AnimalCondicao, ClinicalRecord, ClinicalRecordAddendum, Prescription, ClinicalDraft, ClinicalDraftStatus } from '../../types';
 import { safeSetLocalAnimals } from './safeStorage';
 
 export interface SaveDraftResult {
@@ -1051,4 +1051,104 @@ export async function getActiveClinicalDrafts(): Promise<{ success: boolean; dra
 
   return { success: true, drafts: [] };
 }
+
+export interface AddAddendumResult {
+  success: boolean;
+  addendum?: ClinicalRecordAddendum;
+  code?: string;
+  message?: string;
+  syncedRemote?: boolean;
+  storage?: string;
+  status?: 'SAVED_SYNCED' | 'SAVED_PENDING_SYNC' | 'FAILED';
+  isDuplicate?: boolean;
+}
+
+/**
+ * Adiciona um complemento clínico (adendo) a um prontuário veterinário finalizado.
+ * O prontuário original NÃO é modificado. O registro é append-only.
+ * Suporta chave de idempotência para retentativas seguras e sem duplicações.
+ */
+export async function addClinicalRecordAddendum(
+  prontuarioId: string,
+  texto: string,
+  motivo: string,
+  idempotencyKey?: string
+): Promise<AddAddendumResult> {
+  if (!prontuarioId) {
+    return { success: false, status: 'FAILED', code: 'INVALID_PARAM', message: 'ID do prontuário é obrigatório.' };
+  }
+  const cleanTexto = (texto || '').trim();
+  const cleanMotivo = (motivo || '').trim();
+  if (!cleanTexto || cleanTexto.length < 3) {
+    return { success: false, status: 'FAILED', code: 'INVALID_CONTENT', message: 'Texto do complemento clínico é obrigatório (mínimo 3 caracteres).' };
+  }
+  if (!cleanMotivo || cleanMotivo.length < 2) {
+    return { success: false, status: 'FAILED', code: 'INVALID_REASON', message: 'Motivo do complemento clínico é obrigatório.' };
+  }
+
+  const token = await getAuthToken();
+  if (!token) {
+    const status = getAuthStatus();
+    return {
+      success: false,
+      status: 'FAILED',
+      code: status?.code || 'UNAUTHENTICATED',
+      message: status?.message || 'Sessão expirada. Autentique-se novamente para registrar o complemento.',
+    };
+  }
+
+  // Gera ou reutiliza chave de idempotência para retentativas
+  const effectiveKey = idempotencyKey || (typeof crypto !== 'undefined' && crypto.randomUUID ? `idemp_${crypto.randomUUID()}` : `idemp_${Date.now()}`);
+
+  try {
+    const baseUrl = typeof window !== 'undefined' ? '' : 'http://localhost:3000';
+    const res = await fetch(`${baseUrl}/api/attendance/records/${encodeURIComponent(prontuarioId)}/addendum`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-Idempotency-Key': effectiveKey,
+      },
+      body: JSON.stringify({
+        texto: cleanTexto,
+        motivo: cleanMotivo,
+        idempotencyKey: effectiveKey,
+      }),
+    });
+
+    const serverRes = await res.json().catch(() => null);
+
+    if (res.ok && serverRes?.success && serverRes.addendum) {
+      // Salva no cache local para exibição offline resiliente
+      db.saveAddendum(serverRes.addendum);
+
+      const isSynced = serverRes.syncedRemote === true;
+      return {
+        success: true,
+        status: isSynced ? 'SAVED_SYNCED' : 'SAVED_PENDING_SYNC',
+        addendum: serverRes.addendum,
+        syncedRemote: isSynced,
+        storage: serverRes.storage,
+        isDuplicate: serverRes.isDuplicate,
+        message: serverRes.message,
+      };
+    }
+
+    return {
+      success: false,
+      status: 'FAILED',
+      code: serverRes?.code || 'SERVER_ERROR',
+      message: serverRes?.message || 'Falha ao registrar complemento clínico no servidor central.',
+    };
+  } catch (err: any) {
+    console.error('Erro de conexão ao registrar adendo:', err);
+    return {
+      success: false,
+      status: 'FAILED',
+      code: 'NETWORK_ERROR',
+      message: 'Falha de comunicação com o servidor central ao tentar salvar o adendo. O texto digitado foi preservado.',
+    };
+  }
+}
+
 

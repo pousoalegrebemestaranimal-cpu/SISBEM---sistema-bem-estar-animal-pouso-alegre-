@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, Prescription, Referral, ExamFile } from '../../types';
+import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, ClinicalRecordAddendum, Prescription, Referral, ExamFile } from '../../types';
 import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante, mapSupabaseToRecord } from './supabaseSync';
 import { safeSetLocalAnimals } from './safeStorage';
 import { db } from '../../services/db';
@@ -598,7 +598,62 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
       } catch (_) {}
     }
 
-    // 4. Mapeia registros do Supabase
+    // 4. Busca complementos clínicos (adendos) do animal
+    let fetchedAddenda: ClinicalRecordAddendum[] = [];
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('sisbem_auth_token') : null;
+      if (token) {
+        const res = await fetch(`/api/attendance/animal/${animalId}/addenda`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const apiRes = await res.json();
+          if (apiRes.success && Array.isArray(apiRes.addenda)) {
+            fetchedAddenda = apiRes.addenda;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // Fallback/Complemento pelo Supabase direto caso backend não tenha retornado
+    if (fetchedAddenda.length === 0) {
+      try {
+        const { data: sbAddenda } = await supabase
+          .from('clinical_record_addenda')
+          .select('*')
+          .eq('animal_id', animalId)
+          .order('created_at', { ascending: true });
+        if (sbAddenda && sbAddenda.length > 0) {
+          fetchedAddenda = sbAddenda.map((a: any) => ({
+            id: a.id,
+            prontuarioId: a.prontuario_id,
+            animalId: a.animal_id,
+            veterinarioId: a.veterinario_id,
+            veterinarioNome: a.veterinario_nome,
+            crmv: a.crmv,
+            texto: a.texto,
+            motivo: a.motivo,
+            createdAt: a.created_at,
+          }));
+        }
+      } catch (_) {}
+    }
+
+    // Mescla com adendos salvos localmente
+    const localAddenda = typeof window !== 'undefined' ? db.getAddenda() : [];
+    const addendaMap = new Map<string, ClinicalRecordAddendum>();
+    fetchedAddenda.forEach(a => addendaMap.set(a.id, a));
+    localAddenda.forEach(la => {
+      if (recordIds.includes(la.prontuarioId) || la.animalId === animalId) {
+        if (!addendaMap.has(la.id)) {
+          addendaMap.set(la.id, la);
+        }
+      }
+    });
+    const allAnimalAddenda = Array.from(addendaMap.values())
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    // 5. Mapeia registros do Supabase
     const remoteRecords: ClinicalRecord[] = (recordRows || []).map(row => {
       const recPrescriptions: Prescription[] = (prescRows || [])
         .filter(p => {
@@ -659,16 +714,19 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
           dataAnexo: e.data_anexo
         }));
 
+      const recAddenda = allAnimalAddenda.filter(a => a.prontuarioId === row.id);
+
       const base = mapSupabaseToRecord(row);
       return {
         ...base,
         receitas: recPrescriptions,
         encaminhamentos: recReferrals,
-        examesLaboratoriais: recExams
+        examesLaboratoriais: recExams,
+        adendos: recAddenda
       };
     });
 
-    // 5. Mescla de forma segura com o cache local (sem apagar nem substituir registros existentes)
+    // 6. Mescla de forma segura com o cache local (sem apagar nem substituir registros existentes)
     const localRecords = typeof window !== 'undefined' ? db.getRecords().filter(r => r.animalId === animalId) : [];
     const recordsMap = new Map<string, ClinicalRecord>();
 
@@ -679,17 +737,23 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
     localRecords.forEach(lr => {
       const existing = recordsMap.get(lr.id);
       if (!existing) {
-        recordsMap.set(lr.id, lr);
+        const localRecAddenda = allAnimalAddenda.filter(a => a.prontuarioId === lr.id);
+        recordsMap.set(lr.id, {
+          ...lr,
+          adendos: localRecAddenda
+        });
       } else {
         const mergedReceitas = (existing.receitas && existing.receitas.length > 0) ? existing.receitas : (lr.receitas || []);
         const mergedEnc = (existing.encaminhamentos && existing.encaminhamentos.length > 0) ? existing.encaminhamentos : (lr.encaminhamentos || []);
         const mergedExams = (existing.examesLaboratoriais && existing.examesLaboratoriais.length > 0) ? existing.examesLaboratoriais : (lr.examesLaboratoriais || []);
+        const mergedAddenda = (existing.adendos && existing.adendos.length > 0) ? existing.adendos : (lr.adendos || []);
         recordsMap.set(lr.id, {
           ...lr,
           ...existing,
           receitas: mergedReceitas,
           encaminhamentos: mergedEnc,
-          examesLaboratoriais: mergedExams
+          examesLaboratoriais: mergedExams,
+          adendos: mergedAddenda
         });
       }
     });

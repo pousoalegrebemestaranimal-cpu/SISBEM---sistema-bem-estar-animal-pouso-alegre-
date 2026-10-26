@@ -175,6 +175,23 @@ export interface ClinicalRecord {
   vermifugoData?: string;
   microchipAplicado?: boolean;
   numeroMicrochipAplicado?: string;
+  adendos?: ClinicalRecordAddendum[];
+}
+
+export interface ClinicalRecordAddendum {
+  id: string;
+  prontuarioId: string;
+  animalId: string;
+  veterinarioId: string;
+  veterinarioNome?: string;
+  crmv?: string;
+  texto: string;
+  motivo: string;
+  createdAt: string;
+  idempotencyKey?: string;
+  syncStatus?: 'PENDING' | 'SYNCED' | 'FAILED';
+  syncedAt?: string;
+  syncLastError?: string;
 }
 
 export type ClinicalDraftStatus = 'draft' | 'paused' | 'finished' | 'cancelled';

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   ClinicalRecord, 
+  ClinicalRecordAddendum,
   AnimalJoined, 
   User, 
   AnimalCondicao, 
@@ -10,6 +11,7 @@ import {
 } from '../types';
 import { db } from '../services/db';
 import { fetchClinicalRecordsByAnimalId } from '../src/lib/supabaseQueries';
+import { addClinicalRecordAddendum } from '../src/lib/attendanceService';
 import { generatePrintHTML } from '../utils/printPrescription';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -78,7 +80,106 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
   const [expandedRecordIds, setExpandedRecordIds] = useState<Record<string, boolean>>({});
   const [viewingAttachment, setViewingAttachment] = useState<{ url: string; title: string } | null>(null);
 
+  // Estados para inclusão de notas complementares (adendos)
+  const [activeAddendumRecordId, setActiveAddendumRecordId] = useState<string | null>(null);
+  const [addendumTexto, setAddendumTexto] = useState('');
+  const [addendumMotivo, setAddendumMotivo] = useState('Evolução / Observação Clínica Posterior');
+  const [addendumIdempotencyKey, setAddendumIdempotencyKey] = useState<string>('');
+  const [submittingAddendum, setSubmittingAddendum] = useState(false);
+  const [addendumError, setAddendumError] = useState<string | null>(null);
+  const [addendumSuccess, setAddendumSuccess] = useState<string | null>(null);
+  const [addendumStatusType, setAddendumStatusType] = useState<'SYNCED' | 'PENDING_SYNC' | null>(null);
+
+  const currentUser: User | null = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem('sisbem_current_user') || 'null');
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const canAddAddendum = currentUser?.role === 'VETERINARIO' || currentUser?.role === 'ADMIN';
+
   const users = useMemo(() => db.getUsers(), []);
+
+  const openAddendumForm = (recordId: string) => {
+    setActiveAddendumRecordId(recordId);
+    setAddendumTexto('');
+    setAddendumMotivo('Evolução / Observação Clínica Posterior');
+    const newKey = typeof crypto !== 'undefined' && crypto.randomUUID ? `idemp_${crypto.randomUUID()}` : `idemp_${Date.now()}`;
+    setAddendumIdempotencyKey(newKey);
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+  };
+
+  const cancelAddendumForm = () => {
+    setActiveAddendumRecordId(null);
+    setAddendumTexto('');
+    setAddendumIdempotencyKey('');
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+  };
+
+  const handleSaveAddendum = async (recordId: string) => {
+    const clean = addendumTexto.trim();
+    if (!clean || clean.length < 3) {
+      setAddendumError('O texto do complemento é obrigatório e deve ter no mínimo 3 caracteres.');
+      return;
+    }
+    setSubmittingAddendum(true);
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+
+    try {
+      const res = await addClinicalRecordAddendum(recordId, clean, addendumMotivo, addendumIdempotencyKey);
+      if (res.success && res.addendum) {
+        setRecords(prev => prev.map(r => {
+          if (r.id === recordId) {
+            const currentAdendos = r.adendos || [];
+            // Evita duplicatas na lista local caso a mesma chave tenha retornado o registro existente
+            const exists = currentAdendos.some(a => a.id === res.addendum!.id);
+            if (exists) {
+              return {
+                ...r,
+                adendos: currentAdendos.map(a => a.id === res.addendum!.id ? res.addendum! : a)
+              };
+            }
+            return {
+              ...r,
+              adendos: [...currentAdendos, res.addendum!]
+            };
+          }
+          return r;
+        }));
+
+        if (res.syncedRemote) {
+          setAddendumStatusType('SYNCED');
+          setAddendumSuccess('Nota complementar registrada e sincronizada com sucesso!');
+        } else {
+          setAddendumStatusType('PENDING_SYNC');
+          setAddendumSuccess('Salvo no banco primário! Sincronização remota pendente (registrada de forma persistente).');
+        }
+
+        setTimeout(() => {
+          setActiveAddendumRecordId(null);
+          setAddendumSuccess(null);
+          setAddendumStatusType(null);
+          setAddendumTexto('');
+          setAddendumIdempotencyKey('');
+        }, 1800);
+      } else {
+        // Preserva o texto digitado e a chave de idempotência para retentativa
+        setAddendumError(res.message || 'Falha ao salvar no banco primário. O texto digitado foi preservado.');
+      }
+    } catch (err: any) {
+      setAddendumError('Erro de conexão ao salvar o complemento. O texto digitado foi preservado para nova tentativa.');
+    } finally {
+      setSubmittingAddendum(false);
+    }
+  };
 
   // Carrega o histórico clínico do animal APENAS quando o modal é aberto (Lazy Loading)
   const loadHistory = useCallback(async () => {
@@ -708,6 +809,193 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                             </div>
                           </div>
                         )}
+
+                        {/* 8. COMPLEMENTOS CLÍNICOS E ADENDOS (REGISTRO POSTERIOR APPEND-ONLY) */}
+                        <div className="pt-4 border-t border-slate-200 space-y-3">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="p-1.5 bg-teal-500/10 text-teal-700 rounded-lg">
+                                <MessageSquare size={14} />
+                              </span>
+                              <div>
+                                <h5 className="text-[11px] font-black uppercase tracking-wider text-slate-800">
+                                  Notas Complementares e Adendos ({rec.adendos?.length || 0})
+                                </h5>
+                                <p className="text-[10px] text-slate-400">
+                                  Informações posteriores registradas mantendo o prontuário original integralmente preservado
+                                </p>
+                              </div>
+                            </div>
+
+                            {canAddAddendum && activeAddendumRecordId !== rec.id && (
+                              <button
+                                type="button"
+                                onClick={() => openAddendumForm(rec.id)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 hover:bg-teal-100 text-teal-700 border border-teal-200 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors shadow-2xs cursor-pointer"
+                              >
+                                <Sparkles size={12} /> Adicionar Nota Complementar
+                              </button>
+                            )}
+                          </div>
+
+                          {/* FORMULÁRIO DE ADIÇÃO DE ADENDO */}
+                          {activeAddendumRecordId === rec.id && (
+                            <div className="p-4 bg-teal-50/40 border border-teal-200 rounded-2xl space-y-3 animate-in fade-in duration-150">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
+                                  <Sparkles size={13} className="text-teal-600" /> Nova Nota Complementar ao Prontuário
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  Autor: <strong className="text-slate-700">{currentUser?.name}</strong> {currentUser?.crmv ? `• CRMV: ${currentUser.crmv}` : ''}
+                                </span>
+                              </div>
+
+                              {addendumError && (
+                                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs flex items-start gap-2 shadow-2xs">
+                                  <AlertCircle size={15} className="shrink-0 text-rose-600 mt-0.5" />
+                                  <div className="space-y-0.5">
+                                    <strong className="font-bold text-rose-900 block">Falha ao persistir complemento</strong>
+                                    <span className="text-[11px] leading-relaxed block text-rose-700">{addendumError}</span>
+                                  </div>
+                                </div>
+                              )}
+
+                              {addendumSuccess && (
+                                <div className={`p-3 rounded-xl text-xs flex items-start gap-2 shadow-2xs ${
+                                  addendumStatusType === 'SYNCED'
+                                    ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                                    : 'bg-amber-50 border border-amber-200 text-amber-800'
+                                }`}>
+                                  {addendumStatusType === 'SYNCED' ? (
+                                    <CheckCircle2 size={15} className="shrink-0 text-emerald-600 mt-0.5" />
+                                  ) : (
+                                    <Clock size={15} className="shrink-0 text-amber-600 mt-0.5" />
+                                  )}
+                                  <div className="space-y-0.5">
+                                    <strong className={`font-bold block ${addendumStatusType === 'SYNCED' ? 'text-emerald-900' : 'text-amber-900'}`}>
+                                      {addendumStatusType === 'SYNCED' ? 'Salvo e Sincronizado' : 'Salvo no Banco Central (Sincronização Pendente)'}
+                                    </strong>
+                                    <span className="text-[11px] leading-relaxed block">{addendumSuccess}</span>
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                                  Motivo / Justificativa do Adendo *
+                                </label>
+                                <select
+                                  value={addendumMotivo}
+                                  onChange={e => setAddendumMotivo(e.target.value)}
+                                  disabled={submittingAddendum}
+                                  className="w-full text-xs font-medium bg-white border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                                >
+                                  <option value="Evolução / Observação Clínica Posterior">Evolução / Observação Clínica Posterior</option>
+                                  <option value="Resultado de Exame Laboratorial / Imagem">Resultado de Exame Laboratorial / Imagem</option>
+                                  <option value="Retorno para Curativo / Avaliação de Ferida">Retorno para Curativo / Avaliação de Ferida</option>
+                                  <option value="Ajuste / Retificação de Prescrição Anterior">Ajuste / Retificação de Prescrição Anterior</option>
+                                  <option value="Reação Adversa a Medicamento">Reação Adversa a Medicamento</option>
+                                  <option value="Outro Motivo Clínico">Outro Motivo Clínico</option>
+                                </select>
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                                  Texto do Complemento Clínico *
+                                </label>
+                                <textarea
+                                  rows={3}
+                                  value={addendumTexto}
+                                  onChange={e => setAddendumTexto(e.target.value)}
+                                  disabled={submittingAddendum}
+                                  placeholder="Digite as observações clínicas posteriores, esclarecimentos ou atualizações do quadro do paciente..."
+                                  className="w-full text-xs bg-white border border-slate-300 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-y"
+                                />
+                              </div>
+
+                              <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={cancelAddendumForm}
+                                  disabled={submittingAddendum}
+                                  className="px-3.5 py-1.5 text-xs font-bold text-slate-600 hover:text-slate-800 rounded-xl hover:bg-slate-200/60 transition cursor-pointer"
+                                >
+                                  Cancelar
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveAddendum(rec.id)}
+                                  disabled={submittingAddendum || !addendumTexto.trim()}
+                                  className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition disabled:opacity-50 cursor-pointer"
+                                >
+                                  {submittingAddendum ? (
+                                    <>
+                                      <RefreshCw size={13} className="animate-spin" /> Salvando...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ClipboardCheck size={13} /> Confirmar e Gravar Adendo
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* LISTA DE ADENDOS EXISTENTES EM ORDEM CRONOLÓGICA */}
+                          {rec.adendos && rec.adendos.length > 0 ? (
+                            <div className="space-y-2 pt-1">
+                              {rec.adendos.map((ad, adIdx) => {
+                                const adVet = users.find(u => u.id === ad.veterinarioId);
+                                const displayName = ad.veterinarioNome || adVet?.name || 'Médico Veterinário';
+                                const displayCrmv = ad.crmv || adVet?.crmv;
+
+                                return (
+                                  <div
+                                    key={ad.id || `ad-${adIdx}`}
+                                    className="p-3.5 bg-slate-50 border-l-4 border-l-teal-600 border border-slate-200 rounded-xl space-y-1.5 shadow-2xs"
+                                  >
+                                    <div className="flex items-center justify-between flex-wrap gap-2 text-[10px]">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="font-black uppercase px-2 py-0.5 bg-teal-100 text-teal-800 rounded-md tracking-wider">
+                                          Adendo #{adIdx + 1} • {ad.motivo}
+                                        </span>
+                                        <span className="font-bold text-slate-600 flex items-center gap-1">
+                                          <UserIcon size={11} className="text-slate-400" />
+                                          {displayName} {displayCrmv ? `(CRMV: ${displayCrmv})` : ''}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        {ad.syncStatus === 'PENDING' ? (
+                                          <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 border border-amber-300" title="Salvo no banco central, sincronização remota com Supabase pendente">
+                                            <Clock size={10} className="text-amber-600" /> Remoto Pendente
+                                          </span>
+                                        ) : (
+                                          <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-300" title="Sincronizado no banco central e no Supabase">
+                                            <CheckCircle2 size={10} className="text-emerald-600" /> Sincronizado
+                                          </span>
+                                        )}
+                                        <span className="text-slate-400 flex items-center gap-1">
+                                          <Clock size={11} />
+                                          {safeFormatDate(ad.createdAt, "dd/MM/yyyy 'às' HH:mm")}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <p className="text-xs text-slate-800 font-medium whitespace-pre-wrap leading-relaxed pl-0.5">
+                                      {ad.texto}
+                                    </p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            activeAddendumRecordId !== rec.id && (
+                              <p className="text-[10px] text-slate-400 italic">
+                                Nenhuma nota complementar ou adendo registrado para este atendimento.
+                              </p>
+                            )
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

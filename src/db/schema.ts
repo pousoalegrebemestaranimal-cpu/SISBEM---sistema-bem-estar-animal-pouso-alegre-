@@ -252,6 +252,30 @@ export const clinicalDrafts = pgTable('clinical_drafts', {
   index('idx_clinical_drafts_status').on(table.status),
 ]);
 
+// 14. Complementos Clínicos em Prontuários (Adendos Imutáveis)
+export const clinicalRecordAddenda = pgTable('clinical_record_addenda', {
+  id: text('id').primaryKey(),
+  prontuarioId: text('prontuario_id').references(() => clinicalRecords.id, { onDelete: 'restrict' }).notNull(),
+  animalId: text('animal_id').references(() => animals.id, { onDelete: 'restrict' }).notNull(),
+  veterinarioId: text('veterinario_id').references(() => users.id, { onDelete: 'restrict' }).notNull(),
+  veterinarioNome: text('veterinario_nome'),
+  crmv: text('crmv'),
+  texto: text('texto').notNull(),
+  motivo: text('motivo').notNull(),
+  idempotencyKey: text('idempotency_key').unique(),
+  syncStatus: text('sync_status').default('PENDING').notNull(), // 'PENDING' | 'SYNCED' | 'FAILED'
+  syncAttempts: integer('sync_attempts').default(0).notNull(),
+  syncLastError: text('sync_last_error'),
+  syncedAt: timestamp('synced_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index('idx_clinical_addenda_prontuario').on(table.prontuarioId),
+  index('idx_clinical_addenda_animal').on(table.animalId),
+  index('idx_clinical_addenda_created').on(table.createdAt),
+  uniqueIndex('idx_clinical_addenda_idempotency').on(table.idempotencyKey),
+  index('idx_clinical_addenda_sync_status').on(table.syncStatus),
+]);
+
 // Relacionamentos Drizzle
 export const usersRelations = relations(users, ({ many }) => ({
   animals: many(animals),
@@ -260,6 +284,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   referrals: many(referrals),
   surgeries: many(surgeries),
   clinicalDrafts: many(clinicalDrafts),
+  clinicalRecordAddenda: many(clinicalRecordAddenda),
 }));
 
 export const animalsRelations = relations(animals, ({ one, many }) => ({
@@ -282,6 +307,7 @@ export const animalsRelations = relations(animals, ({ one, many }) => ({
   occupations: many(kennelOccupations),
   statusLogs: many(statusLogs),
   clinicalDrafts: many(clinicalDrafts),
+  clinicalRecordAddenda: many(clinicalRecordAddenda),
 }));
 
 export const clinicalDraftsRelations = relations(clinicalDrafts, ({ one }) => ({
@@ -291,6 +317,21 @@ export const clinicalDraftsRelations = relations(clinicalDrafts, ({ one }) => ({
   }),
   vet: one(users, {
     fields: [clinicalDrafts.vetId],
+    references: [users.id],
+  }),
+}));
+
+export const clinicalRecordAddendaRelations = relations(clinicalRecordAddenda, ({ one }) => ({
+  prontuario: one(clinicalRecords, {
+    fields: [clinicalRecordAddenda.prontuarioId],
+    references: [clinicalRecords.id],
+  }),
+  animal: one(animals, {
+    fields: [clinicalRecordAddenda.animalId],
+    references: [animals.id],
+  }),
+  veterinario: one(users, {
+    fields: [clinicalRecordAddenda.veterinarioId],
     references: [users.id],
   }),
 }));
@@ -306,9 +347,11 @@ export const clinicalRecordsRelations = relations(clinicalRecords, ({ one, many 
   }),
   prescriptions: many(prescriptions),
   examFiles: many(examFiles),
+  addenda: many(clinicalRecordAddenda),
 }));
 
 export const kennelsRelations = relations(kennels, ({ many }) => ({
   occupations: many(kennelOccupations),
 }));
+
 

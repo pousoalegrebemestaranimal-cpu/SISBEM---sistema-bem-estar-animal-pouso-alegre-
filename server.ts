@@ -2,10 +2,11 @@ import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { db, createPool } from './src/db/index.ts';
-import { animals, kennels, clinicalRecords, surgeries, users } from './src/db/schema.ts';
+import { animals, kennels, clinicalRecords, surgeries, users, clinicalRecordAddenda } from './src/db/schema.ts';
 import { createAuthToken, requireAuth, requireRoles, AuthenticatedRequest } from './src/lib/serverAuth.ts';
 import { verifyPassword, hashPassword } from './src/lib/authCrypto.ts';
 import { supabase } from './src/lib/supabase.ts';
+import { getServerSupabaseAdminClient } from './src/lib/serverSupabase.ts';
 import { syncRecordToSupabase } from './src/lib/supabaseSync.ts';
 
 export const app = express();
@@ -767,6 +768,8 @@ app.get('/api/health', (req, res) => {
 
   // Armazenamento em memória de rascunhos para fallback rápido
   const serverClinicalDrafts = new Map<string, any>();
+  // Armazenamento em memória de notas complementares para contingência
+  const serverClinicalAddenda = new Map<string, any[]>();
 
   app.post(
     '/api/attendance/cancel',
@@ -964,6 +967,674 @@ app.get('/api/health', (req, res) => {
           message: 'Falha interna ao processar finalização transacional do atendimento.',
         });
       }
+    }
+  );
+
+  // ==============================================================================
+  // COMPLEMENTOS CLÍNICOS EM PRONTUÁRIOS (ADENDOS IMUTÁVEIS)
+  // Permite adicionar anotações clínicas posteriores a prontuários finalizados
+  // sem jamais modificar ou atualizar o prontuário original.
+  // ==============================================================================
+
+  // Armazenamento em memória exclusivo para testes de unidade isolados com header x-sisbem-mock-storage
+  const serverMockTestAddenda = new Map<string, any[]>();
+
+  app.post(
+    '/api/attendance/records/:id/addendum',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const user = req.user!;
+      const prontuarioId = String(req.params.id || '').trim();
+      const { texto, motivo, idempotencyKey: rawIdempKey } = req.body || {};
+
+      if (!prontuarioId) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_PARAM',
+          message: 'Identificador do prontuário é obrigatório.',
+        });
+      }
+
+      const cleanTexto = typeof texto === 'string' ? texto.trim() : '';
+      const cleanMotivo = typeof motivo === 'string' ? motivo.trim() : '';
+
+      if (!cleanTexto || cleanTexto.length < 3) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_CONTENT',
+          message: 'O texto do complemento clínico é obrigatório e deve conter no mínimo 3 caracteres.',
+        });
+      }
+
+      if (!cleanMotivo || cleanMotivo.length < 2) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_REASON',
+          message: 'O motivo ou justificativa do complemento é obrigatório.',
+        });
+      }
+
+      // 1. Resolução e validação da Chave de Idempotência
+      const headerKey = req.headers['x-idempotency-key'];
+      const effectiveIdempotencyKey = String(rawIdempKey || headerKey || '').trim() || null;
+
+      const pool = createPool();
+
+      try {
+        // 2. Valida a existência do prontuário original e obtém o animal_id
+        let recordQuery: any = null;
+        try {
+          recordQuery = await pool.query(
+            'SELECT id, animal_id, veterinario_id, data_atendimento, inativo FROM public.clinical_records WHERE id = $1 LIMIT 1;',
+            [prontuarioId]
+          );
+        } catch (_) {}
+
+        let targetRecord = recordQuery?.rows?.[0];
+
+        // Se o prontuário não estiver no Cloud SQL local, busca no Supabase
+        if (!targetRecord) {
+          try {
+            const { data: sbRecord } = await supabase
+              .from('clinical_records')
+              .select('id, animal_id, veterinario_id, data_atendimento, inativo')
+              .eq('id', prontuarioId)
+              .maybeSingle();
+
+            if (sbRecord) {
+              targetRecord = sbRecord;
+            }
+          } catch (sbErr) {
+            console.warn('[addendum] Aviso ao consultar prontuário no Supabase:', sbErr);
+          }
+        }
+
+        if (!targetRecord) {
+          return res.status(404).json({
+            success: false,
+            code: 'RECORD_NOT_FOUND',
+            message: 'Prontuário veterinário original não localizado.',
+          });
+        }
+
+        if (targetRecord.inativo) {
+          return res.status(400).json({
+            success: false,
+            code: 'RECORD_INACTIVE',
+            message: 'Não é permitido registrar adendos em prontuários inativos ou cancelados.',
+          });
+        }
+
+        // 3. Verificação de Idempotência Preexistente no Banco Primário
+        if (effectiveIdempotencyKey) {
+          try {
+            const existingRes = await pool.query(
+              `SELECT id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
+                      texto, motivo, idempotency_key, sync_status, created_at
+               FROM public.clinical_record_addenda
+               WHERE idempotency_key = $1 LIMIT 1;`,
+              [effectiveIdempotencyKey]
+            );
+
+            if (existingRes.rows && existingRes.rows.length > 0) {
+              const existing = existingRes.rows[0];
+              // Verifica se o conteúdo coincide exatamente
+              if (
+                existing.prontuario_id === targetRecord.id &&
+                existing.texto === cleanTexto &&
+                existing.motivo === cleanMotivo
+              ) {
+                return res.status(200).json({
+                  success: true,
+                  isDuplicate: true,
+                  message: 'Operação idempotente: complemento já existente retornado sem duplicação.',
+                  storage: 'cloud_sql_primary',
+                  syncedRemote: existing.sync_status === 'SYNCED',
+                  addendum: {
+                    id: existing.id,
+                    prontuarioId: existing.prontuario_id,
+                    animalId: existing.animal_id,
+                    veterinarioId: existing.veterinario_id,
+                    veterinarioNome: existing.veterinario_nome || user.name,
+                    crmv: existing.crmv || (user as any).crmv,
+                    texto: existing.texto,
+                    motivo: existing.motivo,
+                    idempotencyKey: existing.idempotency_key,
+                    syncStatus: existing.sync_status,
+                    createdAt: existing.created_at,
+                  },
+                });
+              } else {
+                return res.status(409).json({
+                  success: false,
+                  code: 'IDEMPOTENCY_CONFLICT',
+                  message: 'A chave de idempotência informada já foi utilizada para outra operação com conteúdo diferente.',
+                });
+              }
+            }
+          } catch (_) {}
+
+          // Verificação no armazenamento mock de testes (se ativo)
+          if (req.headers['x-sisbem-mock-storage'] === 'true') {
+            const list = serverMockTestAddenda.get(targetRecord.id) || [];
+            const existingMock = list.find(m => m.idempotency_key === effectiveIdempotencyKey);
+            if (existingMock) {
+              if (existingMock.texto === cleanTexto && existingMock.motivo === cleanMotivo) {
+                return res.status(200).json({
+                  success: true,
+                  isDuplicate: true,
+                  message: 'Operação idempotente (mock): complemento já existente retornado.',
+                  storage: 'mock_test',
+                  syncedRemote: false,
+                  addendum: {
+                    id: existingMock.id,
+                    prontuarioId: existingMock.prontuario_id,
+                    animalId: existingMock.animal_id,
+                    veterinarioId: existingMock.veterinario_id,
+                    veterinarioNome: existingMock.veterinario_nome,
+                    crmv: existingMock.crmv,
+                    texto: existingMock.texto,
+                    motivo: existingMock.motivo,
+                    idempotencyKey: existingMock.idempotency_key,
+                    syncStatus: 'PENDING',
+                    createdAt: existingMock.created_at,
+                  },
+                });
+              } else {
+                return res.status(409).json({
+                  success: false,
+                  code: 'IDEMPOTENCY_CONFLICT',
+                  message: 'A chave de idempotência informada já foi utilizada para outra operação com conteúdo diferente.',
+                });
+              }
+            }
+          }
+        }
+
+        // 4. Autoria estrita: o veterinário autenticado é SEMPRE o autor (impossível falsificar autoria)
+        const authorVetId = user.id;
+        const addendumId = crypto.randomUUID();
+        const nowIso = new Date().toISOString();
+
+        // Busca dados do profissional autenticado
+        let vetName = user.name;
+        let vetCrmv = (user as any).crmv;
+        try {
+          const vetRes = await pool.query(
+            'SELECT name, crmv FROM public.users WHERE id = $1 LIMIT 1;',
+            [authorVetId]
+          );
+          if (vetRes.rows && vetRes.rows.length > 0) {
+            vetName = vetRes.rows[0].name || vetName;
+            vetCrmv = vetRes.rows[0].crmv || vetCrmv;
+          }
+        } catch (_) {}
+
+        // 5. Inserção append-only no banco primário oficial (Cloud SQL)
+        let createdRow: any = null;
+        let storageUsed: 'cloud_sql_primary' | 'mock_test' = 'cloud_sql_primary';
+
+        try {
+          const insertRes = await pool.query(
+            `INSERT INTO public.clinical_record_addenda (
+              id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
+              texto, motivo, idempotency_key, sync_status, sync_attempts, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', 0, NOW())
+            RETURNING id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
+                      texto, motivo, idempotency_key, sync_status, sync_attempts, created_at;`,
+            [
+              addendumId,
+              targetRecord.id,
+              targetRecord.animal_id,
+              authorVetId,
+              vetName,
+              vetCrmv || null,
+              cleanTexto,
+              cleanMotivo,
+              effectiveIdempotencyKey,
+            ]
+          );
+          if (insertRes.rows && insertRes.rows.length > 0) {
+            createdRow = insertRes.rows[0];
+          }
+        } catch (dbInsertErr: any) {
+          // Trata violação de unicidade de idempotency_key em condições de corrida concorrente
+          if (dbInsertErr.code === '23505' && effectiveIdempotencyKey) {
+            try {
+              const raceRes = await pool.query(
+                `SELECT * FROM public.clinical_record_addenda WHERE idempotency_key = $1 LIMIT 1;`,
+                [effectiveIdempotencyKey]
+              );
+              if (raceRes.rows && raceRes.rows.length > 0) {
+                const raceRow = raceRes.rows[0];
+                if (raceRow.texto === cleanTexto && raceRow.motivo === cleanMotivo) {
+                  return res.status(200).json({
+                    success: true,
+                    isDuplicate: true,
+                    message: 'Operação idempotente concorrente resolvida com sucesso.',
+                    storage: 'cloud_sql_primary',
+                    syncedRemote: raceRow.sync_status === 'SYNCED',
+                    addendum: {
+                      id: raceRow.id,
+                      prontuarioId: raceRow.prontuario_id,
+                      animalId: raceRow.animal_id,
+                      veterinarioId: raceRow.veterinario_id,
+                      veterinarioNome: raceRow.veterinario_nome || vetName,
+                      crmv: raceRow.crmv || vetCrmv,
+                      texto: raceRow.texto,
+                      motivo: raceRow.motivo,
+                      idempotencyKey: raceRow.idempotency_key,
+                      syncStatus: raceRow.sync_status,
+                      createdAt: raceRow.created_at,
+                    },
+                  });
+                } else {
+                  return res.status(409).json({
+                    success: false,
+                    code: 'IDEMPOTENCY_CONFLICT',
+                    message: 'A chave de idempotência informada já foi utilizada para outra operação com conteúdo diferente.',
+                  });
+                }
+              }
+            } catch (_) {}
+          }
+
+          // Se for modo explícito de teste simulado (header x-sisbem-mock-storage)
+          if (req.headers['x-sisbem-mock-storage'] === 'true') {
+            const list = serverMockTestAddenda.get(targetRecord.id) || [];
+            if (effectiveIdempotencyKey) {
+              const raceMock = list.find(m => m.idempotency_key === effectiveIdempotencyKey);
+              if (raceMock) {
+                if (raceMock.texto === cleanTexto && raceMock.motivo === cleanMotivo) {
+                  return res.status(200).json({
+                    success: true,
+                    isDuplicate: true,
+                    message: 'Operação idempotente concorrente resolvida com sucesso (mock).',
+                    storage: 'mock_test',
+                    syncedRemote: false,
+                    addendum: {
+                      id: raceMock.id,
+                      prontuarioId: raceMock.prontuario_id,
+                      animalId: raceMock.animal_id,
+                      veterinarioId: raceMock.veterinario_id,
+                      veterinarioNome: raceMock.veterinario_nome,
+                      crmv: raceMock.crmv,
+                      texto: raceMock.texto,
+                      motivo: raceMock.motivo,
+                      idempotencyKey: raceMock.idempotency_key,
+                      syncStatus: 'PENDING',
+                      createdAt: raceMock.created_at,
+                    },
+                  });
+                } else {
+                  return res.status(409).json({
+                    success: false,
+                    code: 'IDEMPOTENCY_CONFLICT',
+                    message: 'A chave de idempotência informada já foi utilizada para outra operação com conteúdo diferente.',
+                  });
+                }
+              }
+            }
+
+            storageUsed = 'mock_test';
+            createdRow = {
+              id: addendumId,
+              prontuario_id: targetRecord.id,
+              animal_id: targetRecord.animal_id,
+              veterinario_id: authorVetId,
+              veterinario_nome: vetName,
+              crmv: vetCrmv,
+              texto: cleanTexto,
+              motivo: cleanMotivo,
+              idempotency_key: effectiveIdempotencyKey,
+              sync_status: 'PENDING',
+              sync_attempts: 0,
+              created_at: nowIso,
+            };
+            if (!serverMockTestAddenda.has(targetRecord.id)) {
+              serverMockTestAddenda.set(targetRecord.id, []);
+            }
+            serverMockTestAddenda.get(targetRecord.id)!.push(createdRow);
+          } else {
+            // Em produção/fluxo real: Falha no banco primário NÃO pode fingir sucesso!
+            console.error('[addendum] Falha de persistência primária no Cloud SQL:', dbInsertErr.message);
+            return res.status(503).json({
+              success: false,
+              code: 'PRIMARY_STORAGE_UNAVAILABLE',
+              message: 'Banco de dados central indisponível para gravação definitiva (tabela clinical_record_addenda pendente de migração ou falha no Cloud SQL). O complemento NÃO foi salvo. O texto e o motivo foram preservados para nova tentativa.',
+              persisted: false,
+            });
+          }
+        }
+
+        // 6. Sincronização Durável com o Supabase (Upsert com ID canônico via Service Role)
+        let syncedRemote = false;
+        let syncError: string | null = null;
+
+        const serverSupabaseAdmin = getServerSupabaseAdminClient();
+        if (!serverSupabaseAdmin) {
+          syncError = 'SUPABASE_SERVICE_ROLE_KEY não configurada no servidor. Sincronização remota pendente de configuração de ambiente.';
+          console.warn('[addendum] Aviso:', syncError);
+        } else {
+          try {
+            const { error: sbErr } = await serverSupabaseAdmin
+              .from('clinical_record_addenda')
+              .upsert(
+                [
+                  {
+                    id: createdRow.id,
+                    prontuario_id: createdRow.prontuario_id,
+                    animal_id: createdRow.animal_id,
+                    veterinario_id: createdRow.veterinario_id,
+                    veterinario_nome: createdRow.veterinario_nome || vetName,
+                    crmv: createdRow.crmv || vetCrmv || null,
+                    texto: createdRow.texto,
+                    motivo: createdRow.motivo,
+                    idempotency_key: createdRow.idempotency_key,
+                    created_at: createdRow.created_at,
+                  },
+                ],
+                { onConflict: 'id' }
+              );
+
+            if (!sbErr) {
+              syncedRemote = true;
+            } else {
+              syncError = sbErr.message || 'Erro ao sincronizar com Supabase';
+            }
+          } catch (sbInsertErr: any) {
+            syncError = sbInsertErr?.message || 'Falha de comunicação com Supabase';
+          }
+        }
+
+        // 7. Atualização do estado de sincronização no Cloud SQL
+        if (storageUsed === 'cloud_sql_primary') {
+          try {
+            if (syncedRemote) {
+              await pool.query(
+                `UPDATE public.clinical_record_addenda
+                 SET sync_status = 'SYNCED', synced_at = NOW(), sync_last_error = NULL
+                 WHERE id = $1;`,
+                [createdRow.id]
+              );
+              createdRow.sync_status = 'SYNCED';
+            } else {
+              await pool.query(
+                `UPDATE public.clinical_record_addenda
+                 SET sync_status = 'PENDING', sync_attempts = sync_attempts + 1, sync_last_error = $2
+                 WHERE id = $1;`,
+                [createdRow.id, syncError]
+              );
+              createdRow.sync_status = 'PENDING';
+            }
+          } catch (_) {}
+        }
+
+        return res.status(201).json({
+          success: true,
+          message: syncedRemote
+            ? 'Nota complementar registrada e sincronizada com sucesso.'
+            : 'Nota complementar registrada no banco primário. Sincronização remota pendente.',
+          storage: storageUsed,
+          syncedRemote,
+          addendum: {
+            id: createdRow.id,
+            prontuarioId: createdRow.prontuario_id,
+            animalId: createdRow.animal_id,
+            veterinarioId: createdRow.veterinario_id,
+            veterinarioNome: createdRow.veterinario_nome || vetName,
+            crmv: createdRow.crmv || vetCrmv || undefined,
+            texto: createdRow.texto,
+            motivo: createdRow.motivo,
+            idempotencyKey: createdRow.idempotency_key || undefined,
+            syncStatus: createdRow.sync_status,
+            createdAt: createdRow.created_at,
+          },
+        });
+      } catch (err: any) {
+        console.error('Erro na rota /api/attendance/records/:id/addendum:', err);
+        return res.status(500).json({
+          success: false,
+          code: 'INTERNAL_ERROR',
+          message: 'Falha interna ao processar nota complementar.',
+        });
+      }
+    }
+  );
+
+  // Endpoint de Reprocessamento de Sincronizações Pendentes com o Supabase
+  app.post(
+    '/api/attendance/addenda/reprocess-sync',
+    requireAuth,
+    requireRoles(['VETERINARIO', 'ADMIN']),
+    async (req: AuthenticatedRequest, res) => {
+      const pool = createPool();
+      let pendingRows: any[] = [];
+
+      try {
+        const queryRes = await pool.query(
+          `SELECT id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
+                  texto, motivo, idempotency_key, sync_attempts, created_at
+           FROM public.clinical_record_addenda
+           WHERE sync_status IN ('PENDING', 'FAILED')
+           ORDER BY created_at ASC
+           LIMIT 50;`
+        );
+        pendingRows = queryRes.rows || [];
+      } catch (dbErr: any) {
+        return res.status(503).json({
+          success: false,
+          code: 'DB_UNAVAILABLE',
+          message: 'Tabela central de adendos inacessível para reprocessamento.',
+        });
+      }
+
+      const serverSupabaseAdmin = getServerSupabaseAdminClient();
+      if (!serverSupabaseAdmin) {
+        return res.status(503).json({
+          success: false,
+          code: 'SERVICE_ROLE_KEY_MISSING',
+          message: 'SUPABASE_SERVICE_ROLE_KEY não configurada no servidor. Reprocessamento de sincronização indisponível.',
+        });
+      }
+
+      let syncedCount = 0;
+      let errorCount = 0;
+
+      for (const row of pendingRows) {
+        try {
+          const { error: sbErr } = await serverSupabaseAdmin
+            .from('clinical_record_addenda')
+            .upsert(
+              [
+                {
+                  id: row.id,
+                  prontuario_id: row.prontuario_id,
+                  animal_id: row.animal_id,
+                  veterinario_id: row.veterinario_id,
+                  veterinario_nome: row.veterinario_nome,
+                  crmv: row.crmv,
+                  texto: row.texto,
+                  motivo: row.motivo,
+                  idempotency_key: row.idempotency_key,
+                  created_at: row.created_at,
+                },
+              ],
+              { onConflict: 'id' }
+            );
+
+          if (!sbErr) {
+            await pool.query(
+              `UPDATE public.clinical_record_addenda
+               SET sync_status = 'SYNCED', synced_at = NOW(), sync_last_error = NULL
+               WHERE id = $1;`,
+              [row.id]
+            );
+            syncedCount++;
+          } else {
+            await pool.query(
+              `UPDATE public.clinical_record_addenda
+               SET sync_attempts = sync_attempts + 1, sync_last_error = $2
+               WHERE id = $1;`,
+              [row.id, sbErr.message]
+            );
+            errorCount++;
+          }
+        } catch (ex: any) {
+          errorCount++;
+        }
+      }
+
+      return res.json({
+        success: true,
+        totalChecked: pendingRows.length,
+        syncedCount,
+        errorCount,
+      });
+    }
+  );
+
+  app.get(
+    '/api/attendance/records/:id/addenda',
+    requireAuth,
+    async (req: AuthenticatedRequest, res) => {
+      const prontuarioId = String(req.params.id || '').trim();
+      if (!prontuarioId) {
+        return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'prontuarioId obrigatório.' });
+      }
+
+      const pool = createPool();
+      let addenda: any[] = [];
+
+      try {
+        const queryRes = await pool.query(
+          `SELECT a.id, a.prontuario_id, a.animal_id, a.veterinario_id, a.texto, a.motivo,
+                  a.idempotency_key, a.sync_status, a.synced_at, a.created_at,
+                  COALESCE(a.veterinario_nome, u.name) as veterinario_nome,
+                  COALESCE(a.crmv, u.crmv) as crmv
+           FROM public.clinical_record_addenda a
+           LEFT JOIN public.users u ON u.id = a.veterinario_id
+           WHERE a.prontuario_id = $1
+           ORDER BY a.created_at ASC;`,
+          [prontuarioId]
+        );
+
+        if (queryRes.rows && queryRes.rows.length > 0) {
+          addenda = queryRes.rows.map(r => ({
+            id: r.id,
+            prontuarioId: r.prontuario_id,
+            animalId: r.animal_id,
+            veterinarioId: r.veterinario_id,
+            veterinarioNome: r.veterinario_nome,
+            crmv: r.crmv || undefined,
+            texto: r.texto,
+            motivo: r.motivo,
+            idempotencyKey: r.idempotency_key || undefined,
+            syncStatus: r.sync_status || 'SYNCED',
+            syncedAt: r.synced_at || undefined,
+            createdAt: r.created_at,
+          }));
+        }
+      } catch (_) {}
+
+      // Mescla com registros em mock de teste (se houver)
+      const mockList = serverMockTestAddenda.get(prontuarioId) || [];
+      const idSet = new Set(addenda.map(a => a.id));
+      for (const m of mockList) {
+        if (!idSet.has(m.id)) {
+          addenda.push({
+            id: m.id,
+            prontuarioId: m.prontuario_id,
+            animalId: m.animal_id,
+            veterinarioId: m.veterinario_id,
+            veterinarioNome: m.veterinario_nome,
+            crmv: m.crmv || undefined,
+            texto: m.texto,
+            motivo: m.motivo,
+            idempotencyKey: m.idempotency_key || undefined,
+            syncStatus: m.sync_status || 'PENDING',
+            createdAt: m.created_at,
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        addenda: addenda.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
+      });
+    }
+  );
+
+  app.get(
+    '/api/attendance/animal/:animalId/addenda',
+    requireAuth,
+    async (req: AuthenticatedRequest, res) => {
+      const animalId = String(req.params.animalId || '').trim();
+      if (!animalId) {
+        return res.status(400).json({ success: false, code: 'INVALID_PARAM', message: 'animalId obrigatório.' });
+      }
+
+      const pool = createPool();
+      let addenda: any[] = [];
+
+      try {
+        const queryRes = await pool.query(
+          `SELECT a.id, a.prontuario_id, a.animal_id, a.veterinario_id, a.texto, a.motivo,
+                  a.idempotency_key, a.sync_status, a.synced_at, a.created_at,
+                  COALESCE(a.veterinario_nome, u.name) as veterinario_nome,
+                  COALESCE(a.crmv, u.crmv) as crmv
+           FROM public.clinical_record_addenda a
+           LEFT JOIN public.users u ON u.id = a.veterinario_id
+           WHERE a.animal_id = $1
+           ORDER BY a.created_at ASC;`,
+          [animalId]
+        );
+
+        if (queryRes.rows && queryRes.rows.length > 0) {
+          addenda = queryRes.rows.map(r => ({
+            id: r.id,
+            prontuarioId: r.prontuario_id,
+            animalId: r.animal_id,
+            veterinarioId: r.veterinario_id,
+            veterinarioNome: r.veterinario_nome,
+            crmv: r.crmv || undefined,
+            texto: r.texto,
+            motivo: r.motivo,
+            idempotencyKey: r.idempotency_key || undefined,
+            syncStatus: r.sync_status || 'SYNCED',
+            syncedAt: r.synced_at || undefined,
+            createdAt: r.created_at,
+          }));
+        }
+      } catch (_) {}
+
+      // Mescla com registros em mock de teste
+      const idSet = new Set(addenda.map(a => a.id));
+      serverMockTestAddenda.forEach(list => {
+        list.forEach(m => {
+          if (m.animal_id === animalId && !idSet.has(m.id)) {
+            addenda.push({
+              id: m.id,
+              prontuarioId: m.prontuario_id,
+              animalId: m.animal_id,
+              veterinarioId: m.veterinario_id,
+              veterinarioNome: m.veterinario_nome,
+              crmv: m.crmv || undefined,
+              texto: m.texto,
+              motivo: m.motivo,
+              idempotencyKey: m.idempotency_key || undefined,
+              syncStatus: m.sync_status || 'PENDING',
+              createdAt: m.created_at,
+            });
+          }
+        });
+      });
+
+      return res.json({
+        success: true,
+        addenda: addenda.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
+      });
     }
   );
 
