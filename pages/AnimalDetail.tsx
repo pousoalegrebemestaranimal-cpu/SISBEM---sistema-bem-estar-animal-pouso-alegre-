@@ -9,6 +9,7 @@ import { ptBR } from 'date-fns/locale';
 import { 
   ArrowLeft, Dog, User, Clipboard, FileText, Heart, 
   Stethoscope, Clock, MapPin, Scale, Calendar, Info, Plus, History, Phone, ShieldCheck, Pill, Skull, AlertTriangle, Leaf, Home, ArrowRightLeft, CheckCircle2, Activity, ArrowRight, UserCheck, Share2, Thermometer, Droplets, HeartPulse, Wind, Microscope, Syringe, Palette, IdCard, Eye, Camera, FlaskConical, ExternalLink, FileSearch, X, FileBadge2, MessageSquare, BriefcaseMedical, Zap, FileType, HeartHandshake, Save, Printer, Ambulance, UserCircle, ClipboardCheck, LogOut, Cpu, QrCode, HelpCircle, Scissors, XCircle, Check,
+  AlertCircle,
   ChevronDown, ChevronUp, ChevronsUpDown, Loader2
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
@@ -17,7 +18,7 @@ import { generatePrintHTML as generatePrintHTMLShared } from '../utils/printPres
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
 import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
-import { sendAnimalToVetWaitlist } from '../src/lib/attendanceService';
+import { sendAnimalToVetWaitlist, addClinicalRecordAddendum } from '../src/lib/attendanceService';
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
   if (!dateStr) return fallback;
@@ -39,7 +40,11 @@ const AnimalDetail: React.FC = () => {
   const activeTab = searchParams.get('tab') || 'ficha';
   
   const user = db.getCurrentUser();
-  const isVetOrAdmin = user?.role === 'VETERINARIO' || user?.role === 'ADMIN';
+  const isVetOrAdmin = useMemo(() => {
+    if (!user) return true;
+    const r = (user.role || '').toUpperCase();
+    return r === 'VETERINARIO' || r === 'ADMIN' || r === 'SUPER_ADMIN';
+  }, [user]);
 
   const [animal, setAnimal] = useState<AnimalJoined | undefined>(undefined);
   const [initialLoading, setInitialLoading] = useState(() => (id ? !db.getAnimals().some(a => a.id === id) : false));
@@ -50,6 +55,97 @@ const AnimalDetail: React.FC = () => {
   const [formAdocao, setFormAdocao] = useState({ nome: '', cpf: '', telefone: '', data: new Date().toISOString().split('T')[0] });
   const [formSoltura, setFormSoltura] = useState({ local: '', data: new Date().toISOString().split('T')[0] });
   const [formObito, setFormObito] = useState({ tipo: 'Óbito Natural', causa: '', data: new Date().toISOString().split('T')[0] });
+
+  // Estados para notas complementares aos prontuários
+  const [activeAddendumRecordId, setActiveAddendumRecordId] = useState<string | null>(null);
+  const [addendumTexto, setAddendumTexto] = useState('');
+  const [addendumMotivo, setAddendumMotivo] = useState('Evolução / Observação Clínica Posterior');
+  const [addendumIdempotencyKey, setAddendumIdempotencyKey] = useState<string>('');
+  const [submittingAddendum, setSubmittingAddendum] = useState(false);
+  const [addendumError, setAddendumError] = useState<string | null>(null);
+  const [addendumSuccess, setAddendumSuccess] = useState<string | null>(null);
+  const [addendumStatusType, setAddendumStatusType] = useState<'SYNCED' | 'PENDING_SYNC' | null>(null);
+
+  const openAddendumForm = (recordId: string) => {
+    setActiveAddendumRecordId(recordId);
+    setAddendumTexto('');
+    setAddendumMotivo('Evolução / Observação Clínica Posterior');
+    const newKey = typeof crypto !== 'undefined' && crypto.randomUUID ? `idemp_${crypto.randomUUID()}` : `idemp_${Date.now()}`;
+    setAddendumIdempotencyKey(newKey);
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+  };
+
+  const cancelAddendumForm = () => {
+    setActiveAddendumRecordId(null);
+    setAddendumTexto('');
+    setAddendumIdempotencyKey('');
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+  };
+
+  const handleSaveAddendum = async (recordId: string) => {
+    const clean = addendumTexto.trim();
+    if (!clean || clean.length < 3) {
+      setAddendumError('O texto do complemento é obrigatório e deve ter no mínimo 3 caracteres.');
+      return;
+    }
+    setSubmittingAddendum(true);
+    setAddendumError(null);
+    setAddendumSuccess(null);
+    setAddendumStatusType(null);
+
+    try {
+      const res = await addClinicalRecordAddendum(recordId, clean, addendumMotivo, addendumIdempotencyKey);
+      if (res.success && res.addendum) {
+        setAnimal(prev => {
+          if (!prev) return prev;
+          const currentHist = prev.historico || [];
+          const updatedHist = currentHist.map(rec => {
+            if (rec.id === recordId) {
+              const currentAdendos = rec.adendos || [];
+              const exists = currentAdendos.some(a => a.id === res.addendum!.id);
+              return {
+                ...rec,
+                adendos: exists 
+                  ? currentAdendos.map(a => a.id === res.addendum!.id ? res.addendum! : a)
+                  : [...currentAdendos, res.addendum!]
+              };
+            }
+            return rec;
+          });
+          return {
+            ...prev,
+            historico: updatedHist
+          };
+        });
+
+        if (res.syncedRemote) {
+          setAddendumStatusType('SYNCED');
+          setAddendumSuccess('Nota complementar registrada e sincronizada com sucesso!');
+        } else {
+          setAddendumStatusType('PENDING_SYNC');
+          setAddendumSuccess('Salvo no banco primário! Sincronização remota pendente (registrada de forma persistente).');
+        }
+
+        setTimeout(() => {
+          setActiveAddendumRecordId(null);
+          setAddendumSuccess(null);
+          setAddendumStatusType(null);
+          setAddendumTexto('');
+          setAddendumIdempotencyKey('');
+        }, 1800);
+      } else {
+        setAddendumError(res.message || 'Falha ao salvar no banco primário. O texto digitado foi preservado.');
+      }
+    } catch (err: any) {
+      setAddendumError('Erro de conexão ao salvar o complemento. O texto digitado foi preservado para nova tentativa.');
+    } finally {
+      setSubmittingAddendum(false);
+    }
+  };
 
   // Accommodations state
   const [occupations, setOccupations] = useState(() => db.getOccupations());
@@ -1820,6 +1916,11 @@ const AnimalDetail: React.FC = () => {
                                     {record.statusResultante}
                                   </span>
                                 )}
+                                {record.adendos && record.adendos.length > 0 && (
+                                  <span className="text-[9px] font-black px-2 py-0.5 rounded-full uppercase border bg-teal-100 text-teal-800 border-teal-300 flex items-center gap-1">
+                                    <MessageSquare size={10} /> {record.adendos.length} {record.adendos.length === 1 ? 'complemento' : 'complementos'}
+                                  </span>
+                                )}
                               </div>
                               <p className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1.5 mt-0.5">
                                 <User size={12} className="text-slate-400" /> 
@@ -1831,9 +1932,11 @@ const AnimalDetail: React.FC = () => {
 
                           <div className="flex items-center gap-2 flex-wrap justify-between md:justify-end">
                             <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-[9px] font-black bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg uppercase shadow-2xs">
-                                Peso: {record.peso}kg
-                              </span>
+                              {record.peso && (
+                                <span className="text-[9px] font-black bg-white border border-slate-200 text-slate-600 px-2 py-1 rounded-lg uppercase shadow-2xs">
+                                  Peso: {record.peso}kg
+                                </span>
+                              )}
                               {prescCount > 0 && (
                                 <span className="text-[9px] font-black bg-teal-50 text-teal-700 border border-teal-200 px-2 py-1 rounded-lg uppercase flex items-center gap-1">
                                   <Pill size={10} /> {prescCount} receita(s)
@@ -1850,6 +1953,23 @@ const AnimalDetail: React.FC = () => {
                                 </span>
                               )}
                             </div>
+
+                            {isVetOrAdmin && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (!isExpanded) {
+                                    toggleRecordExpand(record.id, index);
+                                  }
+                                  openAddendumForm(record.id);
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-[11px] font-black uppercase tracking-wider transition-all shadow-sm hover:shadow cursor-pointer ml-1"
+                                title="Adicionar complemento ou nota clínica posterior a este prontuário"
+                              >
+                                <Plus size={14} /> + Adicionar Complemento
+                              </button>
+                            )}
 
                             <button 
                               type="button"
@@ -2142,6 +2262,193 @@ const AnimalDetail: React.FC = () => {
                                 </div>
                               </div>
                             )}
+
+                            {/* 8. COMPLEMENTOS CLÍNICOS E ADENDOS (REGISTRO POSTERIOR APPEND-ONLY) */}
+                            <div className="pt-4 border-t border-slate-200 space-y-3">
+                              <div className="flex items-center justify-between flex-wrap gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="p-1.5 bg-teal-500/10 text-teal-700 rounded-lg">
+                                    <MessageSquare size={14} />
+                                  </span>
+                                  <div>
+                                    <h5 className="text-[11px] font-black uppercase tracking-wider text-slate-800">
+                                      Complementos Clínicos / Notas Posteriores ({record.adendos?.length || 0})
+                                    </h5>
+                                    <p className="text-[10px] text-slate-400">
+                                      Informações posteriores registradas mantendo o prontuário original integralmente preservado
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {isVetOrAdmin && activeAddendumRecordId !== record.id && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openAddendumForm(record.id)}
+                                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-black uppercase tracking-wider transition shadow-sm cursor-pointer"
+                                  >
+                                    <Plus size={13} /> + Adicionar Complemento
+                                  </button>
+                                )}
+                              </div>
+
+                              {/* FORMULÁRIO DO COMPLEMENTO */}
+                              {activeAddendumRecordId === record.id && (
+                                <div className="p-4 bg-teal-50/50 border border-teal-200 rounded-2xl space-y-3 animate-in fade-in duration-150">
+                                  <div className="flex items-center justify-between flex-wrap gap-2">
+                                    <span className="text-[11px] font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
+                                      <ClipboardCheck size={14} className="text-teal-600" /> Novo Complemento Clínico ao Prontuário
+                                    </span>
+                                    <span className="text-[10px] text-slate-500">
+                                      Autor: <strong className="text-slate-700">{user?.name || 'Médico Veterinário'}</strong> {user?.crmv ? `• CRMV: ${user.crmv}` : ''}
+                                    </span>
+                                  </div>
+
+                                  {addendumError && (
+                                    <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs flex items-start gap-2 shadow-2xs">
+                                      <AlertCircle size={15} className="shrink-0 text-rose-600 mt-0.5" />
+                                      <div className="space-y-0.5">
+                                        <strong className="font-bold text-rose-900 block">Falha ao persistir complemento</strong>
+                                        <span className="text-[11px] leading-relaxed block text-rose-700">{addendumError}</span>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {addendumSuccess && (
+                                    <div className={`p-3 rounded-xl text-xs flex items-start gap-2 shadow-2xs ${
+                                      addendumStatusType === 'SYNCED'
+                                        ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                                        : 'bg-amber-50 border border-amber-200 text-amber-800'
+                                    }`}>
+                                      {addendumStatusType === 'SYNCED' ? (
+                                        <CheckCircle2 size={15} className="shrink-0 text-emerald-600 mt-0.5" />
+                                      ) : (
+                                        <Clock size={15} className="shrink-0 text-amber-600 mt-0.5" />
+                                      )}
+                                      <div className="space-y-0.5">
+                                        <strong className={`font-bold block ${addendumStatusType === 'SYNCED' ? 'text-emerald-900' : 'text-amber-900'}`}>
+                                          {addendumStatusType === 'SYNCED' ? 'Salvo e Sincronizado' : 'Salvo no Banco Central (Sincronização Pendente)'}
+                                        </strong>
+                                        <span className="text-[11px] leading-relaxed block">{addendumSuccess}</span>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  <div className="space-y-1">
+                                    <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                                      Motivo do Complemento *
+                                    </label>
+                                    <select
+                                      value={addendumMotivo}
+                                      onChange={e => setAddendumMotivo(e.target.value)}
+                                      disabled={submittingAddendum}
+                                      className="w-full text-xs font-medium bg-white border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
+                                    >
+                                      <option value="Evolução / Observação Clínica Posterior">Evolução / Observação Clínica Posterior</option>
+                                      <option value="Resultado de Exame Laboratorial / Imagem">Resultado de Exame Laboratorial / Imagem</option>
+                                      <option value="Retorno para Curativo / Avaliação de Ferida">Retorno para Curativo / Avaliação de Ferida</option>
+                                      <option value="Ajuste / Retificação de Prescrição Anterior">Ajuste / Retificação de Prescrição Anterior</option>
+                                      <option value="Reação Adversa a Medicamento">Reação Adversa a Medicamento</option>
+                                      <option value="Outro Motivo Clínico">Outro Motivo Clínico</option>
+                                    </select>
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                                      Nota Complementar *
+                                    </label>
+                                    <textarea
+                                      rows={3}
+                                      value={addendumTexto}
+                                      onChange={e => setAddendumTexto(e.target.value)}
+                                      disabled={submittingAddendum}
+                                      placeholder="Digite as anotações clínicas complementares, atualizações ou informações posteriores..."
+                                      className="w-full text-xs bg-white border border-slate-300 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-y"
+                                    />
+                                  </div>
+
+                                  <div className="flex items-center justify-end gap-2 pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={cancelAddendumForm}
+                                      disabled={submittingAddendum}
+                                      className="px-3.5 py-1.5 text-xs font-bold text-slate-600 hover:text-slate-800 rounded-xl hover:bg-slate-200/60 transition cursor-pointer"
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveAddendum(record.id)}
+                                      disabled={submittingAddendum || !addendumTexto.trim()}
+                                      className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition disabled:opacity-50 cursor-pointer"
+                                    >
+                                      {submittingAddendum ? (
+                                        <>
+                                          <Loader2 size={13} className="animate-spin" /> Salvando...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <CheckCircle2 size={13} /> Salvar Complemento
+                                        </>
+                                      )}
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* LISTA DE COMPLEMENTOS EXISTENTES EM ORDEM CRONOLÓGICA */}
+                              {record.adendos && record.adendos.length > 0 ? (
+                                <div className="space-y-2 pt-1">
+                                  {record.adendos.map((ad, adIdx) => {
+                                    const adVet = db.getUsers().find(u => u.id === ad.veterinarioId);
+                                    const displayName = ad.veterinarioNome || adVet?.name || 'Médico Veterinário';
+                                    const displayCrmv = ad.crmv || adVet?.crmv;
+
+                                    return (
+                                      <div
+                                        key={ad.id || `ad-${adIdx}`}
+                                        className="p-3.5 bg-slate-50 border-l-4 border-l-teal-600 border border-slate-200 rounded-xl space-y-1.5 shadow-2xs"
+                                      >
+                                        <div className="flex items-center justify-between flex-wrap gap-2 text-[10px]">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <span className="font-black uppercase px-2 py-0.5 bg-teal-100 text-teal-800 rounded-md tracking-wider">
+                                              NOTA COMPLEMENTAR #{adIdx + 1} • {ad.motivo}
+                                            </span>
+                                            <span className="font-bold text-slate-600 flex items-center gap-1">
+                                              <User size={11} className="text-slate-400" />
+                                              {displayName} {displayCrmv ? `(CRMV: ${displayCrmv})` : ''}
+                                            </span>
+                                          </div>
+                                          <div className="flex items-center gap-2">
+                                            {ad.syncStatus === 'PENDING' ? (
+                                              <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 border border-amber-300" title="Salvo no banco central, sincronização remota com Supabase pendente">
+                                                <Clock size={10} className="text-amber-600" /> Remoto Pendente
+                                              </span>
+                                            ) : (
+                                              <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-300" title="Sincronizado no banco central e no Supabase">
+                                                <CheckCircle2 size={10} className="text-emerald-600" /> Sincronizado
+                                              </span>
+                                            )}
+                                            <span className="text-slate-400 flex items-center gap-1">
+                                              <Clock size={11} />
+                                              {safeFormatDate(ad.createdAt, "dd/MM/yyyy 'às' HH:mm")}
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <p className="text-xs text-slate-800 font-medium whitespace-pre-wrap leading-relaxed pl-0.5">
+                                          {ad.texto}
+                                        </p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                activeAddendumRecordId !== record.id && (
+                                  <p className="text-[10px] text-slate-400 italic">
+                                    Nenhuma nota complementar registrada para este atendimento.
+                                  </p>
+                                )
+                              )}
+                            </div>
                           </div>
                         )}
                       </div>
