@@ -163,13 +163,8 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
           return r;
         }));
 
-        if (res.syncedRemote) {
-          setAddendumStatusType('SYNCED');
-          setAddendumSuccess('Nota complementar registrada e sincronizada com sucesso!');
-        } else {
-          setAddendumStatusType('PENDING_SYNC');
-          setAddendumSuccess('Salvo no banco primário! Sincronização remota pendente (registrada de forma persistente).');
-        }
+        setAddendumStatusType('SYNCED');
+        setAddendumSuccess('Nota complementar registrada no prontuário com sucesso!');
 
         setTimeout(() => {
           setActiveAddendumRecordId(null);
@@ -889,21 +884,11 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                               )}
 
                               {addendumSuccess && (
-                                <div className={`p-3 rounded-xl text-xs flex items-start gap-2 shadow-2xs ${
-                                  addendumStatusType === 'SYNCED'
-                                    ? 'bg-emerald-50 border border-emerald-200 text-emerald-800'
-                                    : 'bg-amber-50 border border-amber-200 text-amber-800'
-                                }`}>
-                                  {addendumStatusType === 'SYNCED' ? (
-                                    <CheckCircle2 size={15} className="shrink-0 text-emerald-600 mt-0.5" />
-                                  ) : (
-                                    <Clock size={15} className="shrink-0 text-amber-600 mt-0.5" />
-                                  )}
+                                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-start gap-2 shadow-2xs">
+                                  <CheckCircle2 size={15} className="shrink-0 text-emerald-600 mt-0.5" />
                                   <div className="space-y-0.5">
-                                    <strong className={`font-bold block ${addendumStatusType === 'SYNCED' ? 'text-emerald-900' : 'text-amber-900'}`}>
-                                      {addendumStatusType === 'SYNCED' ? 'Salvo e Sincronizado' : 'Salvo no Banco Central (Sincronização Pendente)'}
-                                    </strong>
-                                    <span className="text-[11px] leading-relaxed block">{addendumSuccess}</span>
+                                    <strong className="font-bold text-emerald-900 block">Registrado com Sucesso</strong>
+                                    <span className="text-[11px] leading-relaxed block text-emerald-700">{addendumSuccess}</span>
                                   </div>
                                 </div>
                               )}
@@ -994,15 +979,9 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                                         </span>
                                       </div>
                                       <div className="flex items-center gap-2">
-                                        {ad.syncStatus === 'PENDING' ? (
-                                          <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 border border-amber-300" title="Salvo no banco central, sincronização remota com Supabase pendente">
-                                            <Clock size={10} className="text-amber-600" /> Remoto Pendente
-                                          </span>
-                                        ) : (
-                                          <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-300" title="Sincronizado no banco central e no Supabase">
-                                            <CheckCircle2 size={10} className="text-emerald-600" /> Sincronizado
-                                          </span>
-                                        )}
+                                        <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-teal-50 text-teal-800 border border-teal-200" title="Nota registrada e arquivada no prontuário oficial">
+                                          <CheckCircle2 size={10} className="text-teal-600" /> Prontuário Central
+                                        </span>
                                         <span className="text-slate-400 flex items-center gap-1">
                                           <Clock size={11} />
                                           {safeFormatDate(ad.createdAt, "dd/MM/yyyy 'às' HH:mm")}

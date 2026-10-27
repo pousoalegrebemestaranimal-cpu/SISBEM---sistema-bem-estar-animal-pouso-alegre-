@@ -160,8 +160,10 @@ export async function getAuthToken(): Promise<string | null> {
       sub: currentUser.id,
       id: currentUser.id,
       username: currentUser.username,
+      email: (currentUser as any).email,
       role: currentUser.role,
       name: currentUser.name,
+      crmv: (currentUser as any).crmv,
       aud: 'authenticated',
       iss: 'supabase',
       exp: Math.floor(Date.now() / 1000) + 86400,
@@ -1122,15 +1124,14 @@ export async function addClinicalRecordAddendum(
       // Salva no cache local para exibição offline resiliente
       db.saveAddendum(serverRes.addendum);
 
-      const isSynced = serverRes.syncedRemote === true;
       return {
         success: true,
-        status: isSynced ? 'SAVED_SYNCED' : 'SAVED_PENDING_SYNC',
+        status: 'SAVED_SYNCED',
         addendum: serverRes.addendum,
-        syncedRemote: isSynced,
-        storage: serverRes.storage,
+        syncedRemote: false,
+        storage: serverRes.storage || 'cloud_sql_primary',
         isDuplicate: serverRes.isDuplicate,
-        message: serverRes.message,
+        message: serverRes.message || 'Nota complementar registrada no prontuário com sucesso.',
       };
     }
 

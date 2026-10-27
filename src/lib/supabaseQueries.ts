@@ -601,7 +601,13 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
     // 4. Busca complementos clínicos (adendos) do animal
     let fetchedAddenda: ClinicalRecordAddendum[] = [];
     try {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('sisbem_auth_token') : null;
+      let token = typeof localStorage !== 'undefined' ? localStorage.getItem('sisbem_auth_token') : null;
+      if (!token && typeof localStorage !== 'undefined') {
+        try {
+          const { getAuthToken } = await import('./attendanceService');
+          token = await getAuthToken();
+        } catch (_) {}
+      }
       if (token) {
         const res = await fetch(`/api/attendance/animal/${animalId}/addenda`, {
           headers: { Authorization: `Bearer ${token}` }
@@ -614,30 +620,6 @@ export async function fetchClinicalRecordsByAnimalId(animalId: string): Promise<
         }
       }
     } catch (_) {}
-
-    // Fallback/Complemento pelo Supabase direto caso backend não tenha retornado
-    if (fetchedAddenda.length === 0) {
-      try {
-        const { data: sbAddenda } = await supabase
-          .from('clinical_record_addenda')
-          .select('*')
-          .eq('animal_id', animalId)
-          .order('created_at', { ascending: true });
-        if (sbAddenda && sbAddenda.length > 0) {
-          fetchedAddenda = sbAddenda.map((a: any) => ({
-            id: a.id,
-            prontuarioId: a.prontuario_id,
-            animalId: a.animal_id,
-            veterinarioId: a.veterinario_id,
-            veterinarioNome: a.veterinario_nome,
-            crmv: a.crmv,
-            texto: a.texto,
-            motivo: a.motivo,
-            createdAt: a.created_at,
-          }));
-        }
-      } catch (_) {}
-    }
 
     // Mescla com adendos salvos localmente
     const localAddenda = typeof window !== 'undefined' ? db.getAddenda() : [];

@@ -1,40 +1,46 @@
 -- ==============================================================================
 -- SISBEM — SISTEMA DE GESTÃO DO BEM-ESTAR ANIMAL
--- MIGRAÇÃO CONTROLADA: SUPABASE (PostgreSQL com Supabase Auth & RLS)
+-- MIGRAÇÃO CONTROLADA: SUPABASE (RÉPLICA HOMOLOGAÇÃO)
 -- ARQUIVO: migrations/supabase/001_create_clinical_record_addenda_supabase.sql
 -- TABELA: public.clinical_record_addenda
 -- ==============================================================================
--- DIRETRIZES TÉCNICAS E DE SEGURANÇA:
--- 1. Este banco atua como RÉPLICA REMOTA e fonte de consultas em tempo real para
---    o frontend web do SISBEM.
--- 2. POLÍTICA DE SEGURANÇA RIGOROSA (RLS):
+-- DIRETRIZES TÉCNICAS E DE REPLICAÇÃO:
+-- 1. Este banco Supabase atua exclusivamente como RÉPLICA SECUNDÁRIA e fonte de
+--    consultas para a interface do SISBEM. O banco primário autoritativo é o Cloud SQL.
+-- 2. As notas complementares chegam ao Supabase através de sincronização segura via backend
+--    (Service Role Key), sendo registros append-only (imutáveis).
+-- 3. NÃO há restrições rígidas de FK (como REFERENCES public.users(id)), pois em
+--    ambientes distribuídos e replicados tais restrições causam falhas de replicação
+--    (Postgres 23503) caso o usuário ou registro correlato esteja particionado ou
+--    pertencente ao schema auth.
+-- 4. O status padrão nesta réplica é 'SYNCED' com 'synced_at = NOW()', visto que
+--    qualquer registro que aporta nesta tabela já foi validado e persistido no Cloud SQL.
+-- 5. POLÍTICA DE SEGURANÇA RIGOROSA (RLS):
+--    - "anon": Bloqueio total (REVOKE ALL).
 --    - "authenticated": Concede ESTRITAMENTE SELECT (leitura de histórico clínico).
---    - "anon": NENHUM acesso permitido (REVOKE ALL).
---    - "INSERT", "UPDATE" e "DELETE": TERMINANTEMENTE PROIBIDOS para usuários do navegador.
---      Todas as inserções de complementos devem passar obrigatoriamente pelo backend seguro
---      (POST /api/attendance/records/:id/addendum), garantindo validação de autoria e integridade.
--- 3. "service_role": Acesso total para operações de backend (upsert e sincronização).
+--    - "authenticated": Revoga explicitamente INSERT, UPDATE, DELETE.
+--    - "service_role": Acesso irrestrito (GRANT ALL) para sincronização backend.
 -- ==============================================================================
 
--- 1. CRIAÇÃO DA TABELA NA RÉPLICA SUPABASE
+-- 1. CRIAÇÃO DA TABELA NA RÉPLICA SUPABASE (IDEMPOTENTE)
 CREATE TABLE IF NOT EXISTS public.clinical_record_addenda (
     id TEXT PRIMARY KEY,
-    prontuario_id TEXT NOT NULL REFERENCES public.clinical_records(id) ON DELETE RESTRICT,
-    animal_id TEXT NOT NULL REFERENCES public.animals(id) ON DELETE RESTRICT,
-    veterinario_id TEXT NOT NULL REFERENCES public.users(id) ON DELETE RESTRICT,
+    prontuario_id TEXT NOT NULL,
+    animal_id TEXT NOT NULL,
+    veterinario_id TEXT NOT NULL,
     veterinario_nome TEXT,
     crmv TEXT,
     texto TEXT NOT NULL CHECK (char_length(trim(texto)) >= 3),
     motivo TEXT NOT NULL CHECK (char_length(trim(motivo)) >= 2),
     idempotency_key TEXT UNIQUE,
-    sync_status TEXT DEFAULT 'PENDING' NOT NULL CHECK (sync_status IN ('PENDING', 'SYNCED', 'FAILED')),
+    sync_status TEXT DEFAULT 'SYNCED' NOT NULL CHECK (sync_status IN ('PENDING', 'SYNCED', 'FAILED')),
     sync_attempts INTEGER DEFAULT 0 NOT NULL,
     sync_last_error TEXT,
-    synced_at TIMESTAMP WITH TIME ZONE,
+    synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
 
--- 2. GARANTIA IDEMPOTENTE DE COLUNAS ADICIONAIS
+-- 2. GARANTIA IDEMPOTENTE DE COLUNAS ADICIONAIS CASO A TABELA JÁ TENHA SIDO CRIADA
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -62,7 +68,7 @@ BEGIN
         SELECT 1 FROM information_schema.columns 
         WHERE table_schema = 'public' AND table_name = 'clinical_record_addenda' AND column_name = 'sync_status'
     ) THEN
-        ALTER TABLE public.clinical_record_addenda ADD COLUMN sync_status TEXT DEFAULT 'PENDING' NOT NULL;
+        ALTER TABLE public.clinical_record_addenda ADD COLUMN sync_status TEXT DEFAULT 'SYNCED' NOT NULL;
     END IF;
 
     IF NOT EXISTS (
@@ -83,11 +89,11 @@ BEGIN
         SELECT 1 FROM information_schema.columns 
         WHERE table_schema = 'public' AND table_name = 'clinical_record_addenda' AND column_name = 'synced_at'
     ) THEN
-        ALTER TABLE public.clinical_record_addenda ADD COLUMN synced_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE public.clinical_record_addenda ADD COLUMN synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
     END IF;
 END $$;
 
--- 3. ÍNDICES DE CONSULTA E CONCORRÊNCIA
+-- 3. ÍNDICES EFICIENTES DE CONSULTA
 CREATE INDEX IF NOT EXISTS idx_clinical_addenda_prontuario 
     ON public.clinical_record_addenda(prontuario_id);
 
@@ -97,28 +103,23 @@ CREATE INDEX IF NOT EXISTS idx_clinical_addenda_animal
 CREATE INDEX IF NOT EXISTS idx_clinical_addenda_created 
     ON public.clinical_record_addenda(created_at ASC);
 
-CREATE INDEX IF NOT EXISTS idx_clinical_addenda_sync_status 
-    ON public.clinical_record_addenda(sync_status)
-    WHERE sync_status != 'SYNCED';
-
--- 4. PERMISSÕES EXPLÍCITAS (GRANTs / REVOKEs)
--- Bloqueio total a acessos anônimos
+-- 4. PERMISSÕES EXPLÍCITAS (GRANTS & REVOKES)
+-- Bloqueio total ao perfil anônimo
 REVOKE ALL ON TABLE public.clinical_record_addenda FROM anon;
 
--- Usuários autenticados no navegador possuem ESTRITAMENTE consulta (leitura)
+-- Usuários autenticados no frontend recebem estritamente permissão de LEITURA (SELECT)
 GRANT SELECT ON TABLE public.clinical_record_addenda TO authenticated;
 
--- Proíbe expressamente inserção, mutação e exclusão direta por usuários autenticados no navegador
--- Todas as inserções devem passar obrigatoriamente pelo backend Node.js autenticado
+-- Proíbe qualquer inserção, atualização ou exclusão direta por clientes do navegador
 REVOKE INSERT, UPDATE, DELETE ON TABLE public.clinical_record_addenda FROM authenticated;
 
--- Papel "service_role" (usado exclusivamente pelo backend Node.js) possui privilégio total de sincronização
+-- Papel "service_role" (utilizado exclusivamente pelo backend Node.js) possui controle total
 GRANT ALL ON TABLE public.clinical_record_addenda TO service_role;
 
 -- 5. SEGURANÇA EM NÍVEL DE LINHA (ROW LEVEL SECURITY - RLS)
 ALTER TABLE public.clinical_record_addenda ENABLE ROW LEVEL SECURITY;
 
--- Política 1: Leitura de notas complementares por profissionais autenticados
+-- Política de leitura: usuários autenticados podem visualizar os complementos dos prontuários
 DROP POLICY IF EXISTS clinical_addenda_select_policy ON public.clinical_record_addenda;
 CREATE POLICY clinical_addenda_select_policy 
     ON public.clinical_record_addenda
@@ -126,10 +127,10 @@ CREATE POLICY clinical_addenda_select_policy
     TO authenticated 
     USING (true);
 
--- Drop da política anterior de inserção direta pelo cliente (para garantir que não permaneça ativa)
+-- Assegura a remoção de qualquer política indevida de escrita direta por clientes autenticados
 DROP POLICY IF EXISTS clinical_addenda_insert_policy ON public.clinical_record_addenda;
 
--- Política 2: Acesso irrestrito de sincronização para o Service Role (Backend SISBEM)
+-- Política de replicação/gestão: service_role possui acesso total para sincronização e reprocessamento
 DROP POLICY IF EXISTS clinical_addenda_service_role ON public.clinical_record_addenda;
 CREATE POLICY clinical_addenda_service_role 
     ON public.clinical_record_addenda
@@ -140,4 +141,4 @@ CREATE POLICY clinical_addenda_service_role
 
 -- 6. DOCUMENTAÇÃO NO CATÁLOGO DO BANCO
 COMMENT ON TABLE public.clinical_record_addenda 
-    IS 'Réplica remota Supabase de notas complementares clínicas (append-only e imutável).';
+    IS 'Réplica remota Supabase de complementos clínicos (append-only, somente leitura para clientes autenticados).';

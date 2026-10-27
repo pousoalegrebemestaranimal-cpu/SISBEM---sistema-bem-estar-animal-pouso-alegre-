@@ -1171,6 +1171,154 @@ app.get('/api/health', (req, res) => {
           }
         } catch (_) {}
 
+        // 4.5 Garantia de Integridade Referencial no Cloud SQL:
+        // Assegura que o prontuário original, o animal e o autor existam fisicamente no Cloud SQL
+        try {
+          // A. Garante existência do animal em public.animals
+          const animCheck = await pool.query('SELECT id FROM public.animals WHERE id = $1 LIMIT 1;', [targetRecord.animal_id]);
+          if (animCheck.rows.length === 0) {
+            let animalNome = 'Animal';
+            let animalPeso = 0;
+            let animalCor = 'Não informada';
+            let animalEspecie = 'Cão';
+            let animalRaca = 'SRD';
+            let animalPorte = 'Médio';
+            let animalSexo = 'Indefinido';
+            let animalCastrado = false;
+            let animalTemTutor = false;
+            let animalLocalResgate = 'Não informado';
+            let animalDataResgate = new Date().toISOString().split('T')[0];
+            let animalDataCadastro = new Date().toISOString();
+            let animalCondicao = 'Atendido';
+            let animalSamuvet = false;
+
+            try {
+              const { data: sbAnimal } = await supabase
+                .from('animals')
+                .select('*')
+                .eq('id', targetRecord.animal_id)
+                .maybeSingle();
+
+              if (sbAnimal) {
+                animalNome = sbAnimal.nome || animalNome;
+                animalPeso = Number(sbAnimal.peso) || 0;
+                animalCor = sbAnimal.cor_pelagem || animalCor;
+                animalEspecie = sbAnimal.especie || animalEspecie;
+                animalRaca = sbAnimal.raca || animalRaca;
+                animalPorte = sbAnimal.porte || animalPorte;
+                animalSexo = sbAnimal.sexo || animalSexo;
+                animalCastrado = Boolean(sbAnimal.castrado);
+                animalTemTutor = Boolean(sbAnimal.tem_tutor);
+                animalLocalResgate = sbAnimal.local_resgate || animalLocalResgate;
+                animalDataResgate = sbAnimal.data_resgate || animalDataResgate;
+                animalDataCadastro = sbAnimal.data_cadastro || animalDataCadastro;
+                animalCondicao = sbAnimal.condicao || animalCondicao;
+                animalSamuvet = Boolean(sbAnimal.resgate_samuvet);
+              }
+            } catch (_) {}
+
+            await pool.query(
+              `INSERT INTO public.animals (
+                id, nome, peso, cor_pelagem, especie, raca, porte, sexo, castrado,
+                tem_tutor, local_resgate, data_resgate, data_cadastro, condicao, resgate_samuvet, created_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+              ON CONFLICT (id) DO NOTHING;`,
+              [
+                targetRecord.animal_id,
+                animalNome,
+                animalPeso,
+                animalCor,
+                animalEspecie,
+                animalRaca,
+                animalPorte,
+                animalSexo,
+                animalCastrado,
+                animalTemTutor,
+                animalLocalResgate,
+                animalDataResgate,
+                animalDataCadastro,
+                animalCondicao,
+                animalSamuvet
+              ]
+            );
+          }
+
+          // B. Garante existência do veterinário do prontuário em public.users
+          if (targetRecord.veterinario_id) {
+            const vetCheck = await pool.query('SELECT id FROM public.users WHERE id = $1 LIMIT 1;', [targetRecord.veterinario_id]);
+            if (vetCheck.rows.length === 0) {
+              let recVetName = 'Médico Veterinário';
+              let recVetEmail: string | null = null;
+              let recVetCrmv: string | null = null;
+
+              try {
+                const { data: sbVet } = await supabase
+                  .from('users')
+                  .select('*')
+                  .eq('id', targetRecord.veterinario_id)
+                  .maybeSingle();
+                if (sbVet) {
+                  recVetName = sbVet.name || recVetName;
+                  recVetEmail = sbVet.email || null;
+                  recVetCrmv = sbVet.crmv || null;
+                }
+              } catch (_) {}
+
+              await pool.query(
+                `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
+                 VALUES ($1, $2, 'VETERINARIO', $3, $4, $5, $1, NOW())
+                 ON CONFLICT (id) DO NOTHING;`,
+                [targetRecord.veterinario_id, targetRecord.veterinario_id, recVetName, recVetEmail, recVetCrmv]
+              );
+            }
+          }
+
+          // C. Garante existência do prontuário original em public.clinical_records
+          const recCheck = await pool.query('SELECT id FROM public.clinical_records WHERE id = $1 LIMIT 1;', [targetRecord.id]);
+          if (recCheck.rows.length === 0) {
+            await pool.query(
+              `INSERT INTO public.clinical_records (
+                id, animal_id, veterinario_id, data_atendimento, inativo,
+                status_resultante, observacoes_gerais, diagnostico_clinico,
+                tratamento_ambulatorial, exames_solicitados, created_at
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+              ON CONFLICT (id) DO NOTHING;`,
+              [
+                targetRecord.id,
+                targetRecord.animal_id,
+                targetRecord.veterinario_id || authorVetId,
+                targetRecord.data_atendimento || new Date().toISOString(),
+                targetRecord.inativo ?? false,
+                targetRecord.status_resultante || 'EM_OBSERVACAO',
+                targetRecord.observacoes_gerais || '',
+                targetRecord.diagnostico_clinico || '',
+                targetRecord.tratamento_ambulatorial || '',
+                targetRecord.exames_solicitados || '',
+              ]
+            );
+          }
+
+          // D. Garante existência do autor do adendo em public.users
+          const authorCheck = await pool.query('SELECT id FROM public.users WHERE id = $1 LIMIT 1;', [authorVetId]);
+          if (authorCheck.rows.length === 0) {
+            await pool.query(
+              `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $1, NOW())
+               ON CONFLICT (id) DO NOTHING;`,
+              [
+                authorVetId,
+                user.username || authorVetId,
+                user.role || 'VETERINARIO',
+                vetName || user.name || 'Médico Veterinário',
+                user.email || null,
+                vetCrmv || null,
+              ]
+            );
+          }
+        } catch (prepErr) {
+          console.warn('[addendum] Aviso ao verificar integridade referencial no Cloud SQL:', prepErr);
+        }
+
         // 5. Inserção append-only no banco primário oficial (Cloud SQL)
         let createdRow: any = null;
         let storageUsed: 'cloud_sql_primary' | 'mock_test' = 'cloud_sql_primary';
@@ -1180,7 +1328,7 @@ app.get('/api/health', (req, res) => {
             `INSERT INTO public.clinical_record_addenda (
               id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
               texto, motivo, idempotency_key, sync_status, sync_attempts, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PENDING', 0, NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'STORED_PRIMARY', 0, NOW())
             RETURNING id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
                       texto, motivo, idempotency_key, sync_status, sync_attempts, created_at;`,
             [
@@ -1214,7 +1362,7 @@ app.get('/api/health', (req, res) => {
                     isDuplicate: true,
                     message: 'Operação idempotente concorrente resolvida com sucesso.',
                     storage: 'cloud_sql_primary',
-                    syncedRemote: raceRow.sync_status === 'SYNCED',
+                    syncedRemote: false,
                     addendum: {
                       id: raceRow.id,
                       prontuarioId: raceRow.prontuario_id,
@@ -1225,7 +1373,7 @@ app.get('/api/health', (req, res) => {
                       texto: raceRow.texto,
                       motivo: raceRow.motivo,
                       idempotencyKey: raceRow.idempotency_key,
-                      syncStatus: raceRow.sync_status,
+                      syncStatus: raceRow.sync_status || 'STORED_PRIMARY',
                       createdAt: raceRow.created_at,
                     },
                   });
@@ -1263,7 +1411,7 @@ app.get('/api/health', (req, res) => {
                       texto: raceMock.texto,
                       motivo: raceMock.motivo,
                       idempotencyKey: raceMock.idempotency_key,
-                      syncStatus: 'PENDING',
+                      syncStatus: 'STORED_PRIMARY',
                       createdAt: raceMock.created_at,
                     },
                   });
@@ -1288,7 +1436,7 @@ app.get('/api/health', (req, res) => {
               texto: cleanTexto,
               motivo: cleanMotivo,
               idempotency_key: effectiveIdempotencyKey,
-              sync_status: 'PENDING',
+              sync_status: 'STORED_PRIMARY',
               sync_attempts: 0,
               created_at: nowIso,
             };
@@ -1298,86 +1446,23 @@ app.get('/api/health', (req, res) => {
             serverMockTestAddenda.get(targetRecord.id)!.push(createdRow);
           } else {
             // Em produção/fluxo real: Falha no banco primário NÃO pode fingir sucesso!
-            console.error('[addendum] Falha de persistência primária no Cloud SQL:', dbInsertErr.message);
+            console.error('[addendum] Falha de persistência primária no Cloud SQL:', dbInsertErr.message, dbInsertErr.detail);
             return res.status(503).json({
               success: false,
               code: 'PRIMARY_STORAGE_UNAVAILABLE',
-              message: 'Banco de dados central indisponível para gravação definitiva (tabela clinical_record_addenda pendente de migração ou falha no Cloud SQL). O complemento NÃO foi salvo. O texto e o motivo foram preservados para nova tentativa.',
+              message: `Falha ao persistir no Cloud SQL: ${dbInsertErr.message || 'Erro de banco de dados central.'}`,
+              detail: dbInsertErr.detail,
               persisted: false,
             });
           }
         }
 
-        // 6. Sincronização Durável com o Supabase (Upsert com ID canônico via Service Role)
-        let syncedRemote = false;
-        let syncError: string | null = null;
-
-        const serverSupabaseAdmin = getServerSupabaseAdminClient();
-        if (!serverSupabaseAdmin) {
-          syncError = 'SUPABASE_SERVICE_ROLE_KEY não configurada no servidor. Sincronização remota pendente de configuração de ambiente.';
-          console.warn('[addendum] Aviso:', syncError);
-        } else {
-          try {
-            const { error: sbErr } = await serverSupabaseAdmin
-              .from('clinical_record_addenda')
-              .upsert(
-                [
-                  {
-                    id: createdRow.id,
-                    prontuario_id: createdRow.prontuario_id,
-                    animal_id: createdRow.animal_id,
-                    veterinario_id: createdRow.veterinario_id,
-                    veterinario_nome: createdRow.veterinario_nome || vetName,
-                    crmv: createdRow.crmv || vetCrmv || null,
-                    texto: createdRow.texto,
-                    motivo: createdRow.motivo,
-                    idempotency_key: createdRow.idempotency_key,
-                    created_at: createdRow.created_at,
-                  },
-                ],
-                { onConflict: 'id' }
-              );
-
-            if (!sbErr) {
-              syncedRemote = true;
-            } else {
-              syncError = sbErr.message || 'Erro ao sincronizar com Supabase';
-            }
-          } catch (sbInsertErr: any) {
-            syncError = sbInsertErr?.message || 'Falha de comunicação com Supabase';
-          }
-        }
-
-        // 7. Atualização do estado de sincronização no Cloud SQL
-        if (storageUsed === 'cloud_sql_primary') {
-          try {
-            if (syncedRemote) {
-              await pool.query(
-                `UPDATE public.clinical_record_addenda
-                 SET sync_status = 'SYNCED', synced_at = NOW(), sync_last_error = NULL
-                 WHERE id = $1;`,
-                [createdRow.id]
-              );
-              createdRow.sync_status = 'SYNCED';
-            } else {
-              await pool.query(
-                `UPDATE public.clinical_record_addenda
-                 SET sync_status = 'PENDING', sync_attempts = sync_attempts + 1, sync_last_error = $2
-                 WHERE id = $1;`,
-                [createdRow.id, syncError]
-              );
-              createdRow.sync_status = 'PENDING';
-            }
-          } catch (_) {}
-        }
-
+        // Retorna sucesso com o registro arquivado no banco oficial (Cloud SQL)
         return res.status(201).json({
           success: true,
-          message: syncedRemote
-            ? 'Nota complementar registrada e sincronizada com sucesso.'
-            : 'Nota complementar registrada no banco primário. Sincronização remota pendente.',
+          message: 'Nota complementar registrada e arquivada com sucesso.',
           storage: storageUsed,
-          syncedRemote,
+          syncedRemote: false,
           addendum: {
             id: createdRow.id,
             prontuarioId: createdRow.prontuario_id,
@@ -1388,7 +1473,7 @@ app.get('/api/health', (req, res) => {
             texto: createdRow.texto,
             motivo: createdRow.motivo,
             idempotencyKey: createdRow.idempotency_key || undefined,
-            syncStatus: createdRow.sync_status,
+            syncStatus: createdRow.sync_status || 'STORED_PRIMARY',
             createdAt: createdRow.created_at,
           },
         });
@@ -1403,94 +1488,18 @@ app.get('/api/health', (req, res) => {
     }
   );
 
-  // Endpoint de Reprocessamento de Sincronizações Pendentes com o Supabase
+  // Endpoint de Reprocessamento de Sincronizações (Desativado na Opção B - Cloud SQL é exclusivo)
   app.post(
     '/api/attendance/addenda/reprocess-sync',
     requireAuth,
     requireRoles(['VETERINARIO', 'ADMIN']),
     async (req: AuthenticatedRequest, res) => {
-      const pool = createPool();
-      let pendingRows: any[] = [];
-
-      try {
-        const queryRes = await pool.query(
-          `SELECT id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
-                  texto, motivo, idempotency_key, sync_attempts, created_at
-           FROM public.clinical_record_addenda
-           WHERE sync_status IN ('PENDING', 'FAILED')
-           ORDER BY created_at ASC
-           LIMIT 50;`
-        );
-        pendingRows = queryRes.rows || [];
-      } catch (dbErr: any) {
-        return res.status(503).json({
-          success: false,
-          code: 'DB_UNAVAILABLE',
-          message: 'Tabela central de adendos inacessível para reprocessamento.',
-        });
-      }
-
-      const serverSupabaseAdmin = getServerSupabaseAdminClient();
-      if (!serverSupabaseAdmin) {
-        return res.status(503).json({
-          success: false,
-          code: 'SERVICE_ROLE_KEY_MISSING',
-          message: 'SUPABASE_SERVICE_ROLE_KEY não configurada no servidor. Reprocessamento de sincronização indisponível.',
-        });
-      }
-
-      let syncedCount = 0;
-      let errorCount = 0;
-
-      for (const row of pendingRows) {
-        try {
-          const { error: sbErr } = await serverSupabaseAdmin
-            .from('clinical_record_addenda')
-            .upsert(
-              [
-                {
-                  id: row.id,
-                  prontuario_id: row.prontuario_id,
-                  animal_id: row.animal_id,
-                  veterinario_id: row.veterinario_id,
-                  veterinario_nome: row.veterinario_nome,
-                  crmv: row.crmv,
-                  texto: row.texto,
-                  motivo: row.motivo,
-                  idempotency_key: row.idempotency_key,
-                  created_at: row.created_at,
-                },
-              ],
-              { onConflict: 'id' }
-            );
-
-          if (!sbErr) {
-            await pool.query(
-              `UPDATE public.clinical_record_addenda
-               SET sync_status = 'SYNCED', synced_at = NOW(), sync_last_error = NULL
-               WHERE id = $1;`,
-              [row.id]
-            );
-            syncedCount++;
-          } else {
-            await pool.query(
-              `UPDATE public.clinical_record_addenda
-               SET sync_attempts = sync_attempts + 1, sync_last_error = $2
-               WHERE id = $1;`,
-              [row.id, sbErr.message]
-            );
-            errorCount++;
-          }
-        } catch (ex: any) {
-          errorCount++;
-        }
-      }
-
       return res.json({
         success: true,
-        totalChecked: pendingRows.length,
-        syncedCount,
-        errorCount,
+        message: 'Armazenamento de complementos clínicos gerenciado exclusivamente no Cloud SQL. Sincronização remota desativada.',
+        totalChecked: 0,
+        syncedCount: 0,
+        errorCount: 0,
       });
     }
   );

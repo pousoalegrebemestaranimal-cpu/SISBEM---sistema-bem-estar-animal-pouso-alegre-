@@ -9,6 +9,8 @@ export interface TokenPayload {
   username: string;
   role: string;
   name?: string;
+  email?: string;
+  crmv?: string;
   iat: number;
   exp: number;
 }
@@ -20,19 +22,22 @@ export interface AuthenticatedRequest extends Request {
     role: string;
     name: string;
     email?: string;
+    crmv?: string;
   };
 }
 
 /**
  * Cria token assinado com HMAC-SHA256 (Padrão JWT compacto)
  */
-export function createAuthToken(user: { id: string; username: string; role: string; name?: string }): string {
+export function createAuthToken(user: { id: string; username: string; role: string; name?: string; email?: string; crmv?: string }): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const payload: TokenPayload = {
     id: user.id,
     username: user.username,
     role: user.role,
     name: user.name,
+    email: user.email,
+    crmv: user.crmv,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60, // 7 dias
   };
@@ -89,12 +94,21 @@ export function verifyAuthToken(token: string): TokenPayload | null {
       let role = 'ADMIN';
       if (meta.role === 'VETERINARIO' || meta.role === 'OPERATOR' || meta.role === 'ADMIN') {
         role = meta.role;
+      } else if (rawPayload.role === 'VETERINARIO' || rawPayload.role === 'OPERATOR' || rawPayload.role === 'ADMIN') {
+        role = rawPayload.role;
       }
+      const email = rawPayload.email || meta.email || undefined;
+      const username = meta.username || rawPayload.username || (email ? email.split('@')[0] : rawPayload.sub);
+      const name = meta.name || meta.full_name || rawPayload.name || (email ? email.split('@')[0] : 'Usuário SISBEM');
+      const crmv = meta.crmv || rawPayload.crmv || undefined;
+
       return {
         id: rawPayload.sub,
-        username: meta.username || rawPayload.email || rawPayload.sub,
+        username,
         role,
-        name: meta.name || meta.full_name || rawPayload.email || 'Usuário Supabase',
+        name,
+        email,
+        crmv,
         iat: rawPayload.iat || now,
         exp: rawPayload.exp,
       };
@@ -136,14 +150,22 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     username: payload.username,
     role: payload.role,
     name: payload.name || payload.username,
+    email: payload.email,
+    crmv: payload.crmv,
   };
 
-  // Se o Cloud SQL estiver disponível, enriquece com dados institucionais da tabela users
+  // Se o Cloud SQL estiver disponível, enriquece ou sincroniza com a tabela users
   try {
     const pool = createPool();
     const userRes = await pool.query(
-      'SELECT id, username, role, name, email FROM public.users WHERE id = $1 OR uid = $1 OR LOWER(email) = LOWER($2) LIMIT 1;',
-      [payload.id, payload.username]
+      `SELECT id, username, role, name, email, crmv 
+       FROM public.users 
+       WHERE id = $1 
+          OR uid = $1 
+          OR (LOWER(email) = LOWER($2) AND $2 IS NOT NULL AND $2 != '')
+          OR (LOWER(username) = LOWER($3) AND $3 IS NOT NULL AND $3 != '')
+       LIMIT 1;`,
+      [payload.id, payload.email || '', payload.username || '']
     );
 
     if (userRes.rows.length > 0) {
@@ -153,8 +175,32 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
         username: dbUser.username,
         role: dbUser.role,
         name: dbUser.name,
-        email: dbUser.email || undefined,
+        email: dbUser.email || payload.email || undefined,
+        crmv: dbUser.crmv || payload.crmv || undefined,
       };
+    } else {
+      // Garante que o usuário autenticado exista fisicamente em public.users no Cloud SQL
+      // evitando violações de chave estrangeira nas tabelas dependentes
+      try {
+        await pool.query(
+          `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $1, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             role = EXCLUDED.role,
+             email = COALESCE(EXCLUDED.email, public.users.email);`,
+          [
+            payload.id,
+            payload.username || payload.id,
+            payload.role || 'VETERINARIO',
+            payload.name || 'Médico Veterinário',
+            payload.email || null,
+            payload.crmv || null,
+          ]
+        );
+      } catch (insertErr) {
+        console.warn('[serverAuth] Aviso ao provisionar usuário no Cloud SQL:', insertErr);
+      }
     }
   } catch (err: any) {
     // Se Cloud SQL não estiver acessível, não derruba a requisição: mantém os dados do token autenticado
