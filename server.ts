@@ -977,7 +977,222 @@ app.get('/api/health', (req, res) => {
   // ==============================================================================
 
   // Armazenamento em memória exclusivo para testes de unidade isolados com header x-sisbem-mock-storage
+  // Armazenamento em memória exclusivo para testes de unidade isolados com header x-sisbem-mock-storage
   const serverMockTestAddenda = new Map<string, any[]>();
+
+  /**
+   * Garante que um usuário exista fisicamente em public.users no Cloud SQL.
+   * Trata colisões de id, username e uid sem violar constraints e sem suprimir erros.
+   */
+  async function ensureUserExistsInCloudSql(
+    pgClient: any,
+    userId: string,
+    fallback?: { name?: string; username?: string; role?: string; email?: string | null; crmv?: string | null }
+  ): Promise<void> {
+    if (!userId || typeof userId !== 'string' || !userId.trim()) {
+      throw new Error('IDENTIFIER_MISSING: Identificador de usuário ausente para referência.');
+    }
+
+    const cleanId = userId.trim();
+
+    // 1. Verifica se já existe por ID
+    const checkId = await pgClient.query(
+      'SELECT id, username, role, name, crmv FROM public.users WHERE id = $1 LIMIT 1;',
+      [cleanId]
+    );
+    if (checkId.rows.length > 0) {
+      return;
+    }
+
+    // 2. Obtém dados do usuário no Supabase se não fornecidos
+    let name = fallback?.name || 'Médico Veterinário';
+    let role = fallback?.role || 'VETERINARIO';
+    let email = fallback?.email || null;
+    let crmv = fallback?.crmv || null;
+    let rawUsername = fallback?.username || `user_${cleanId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 16)}`;
+
+    try {
+      const { data: sbUser } = await supabase
+        .from('users')
+        .select('id, name, username, role, email, crmv')
+        .eq('id', cleanId)
+        .maybeSingle();
+
+      if (sbUser) {
+        if (sbUser.name) name = sbUser.name;
+        if (sbUser.role) role = sbUser.role;
+        if (sbUser.email) email = sbUser.email;
+        if (sbUser.crmv) crmv = sbUser.crmv;
+        if (sbUser.username) rawUsername = sbUser.username;
+      }
+    } catch (sbErr: any) {
+      console.warn('[addendum:user_prep] Aviso ao buscar usuário no Supabase:', sbErr?.message || 'Erro Supabase');
+    }
+
+    // 3. Resolução segura de username para evitar colisão com users_username_unique
+    let cleanUsername = rawUsername.toLowerCase().trim().replace(/\s+/g, '');
+    if (!cleanUsername || cleanUsername.length < 3) {
+      cleanUsername = `usr_${cleanId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 12)}`;
+    }
+
+    const checkUsername = await pgClient.query(
+      'SELECT id FROM public.users WHERE LOWER(username) = LOWER($1) AND id != $2 LIMIT 1;',
+      [cleanUsername, cleanId]
+    );
+    if (checkUsername.rows.length > 0) {
+      const suffix = cleanId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 6);
+      cleanUsername = `${cleanUsername.substring(0, 20)}_${suffix}`;
+    }
+
+    // 4. Inserção com uid = NULL para garantir que nunca colida com users_uid_unique
+    await pgClient.query(
+      `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         role = EXCLUDED.role,
+         crmv = COALESCE(EXCLUDED.crmv, public.users.crmv);`,
+      [cleanId, cleanUsername, role, name, email, crmv]
+    );
+  }
+
+  /**
+   * Garante que um animal exista fisicamente em public.animals no Cloud SQL.
+   * Trata valores nulos ou ausentes da origem com fallbacks canônicos seguros.
+   */
+  async function ensureAnimalExistsInCloudSql(pgClient: any, animalId: string): Promise<void> {
+    if (!animalId || typeof animalId !== 'string' || !animalId.trim()) {
+      throw new Error('IDENTIFIER_MISSING: Identificador de animal ausente para referência.');
+    }
+
+    const cleanAnimalId = animalId.trim();
+
+    const checkAnim = await pgClient.query(
+      'SELECT id FROM public.animals WHERE id = $1 LIMIT 1;',
+      [cleanAnimalId]
+    );
+    if (checkAnim.rows.length > 0) {
+      return;
+    }
+
+    // Valores padrão seguros para atender às restrições NOT NULL do Cloud SQL
+    let animalNome = 'Animal';
+    let animalPeso = 0;
+    let animalCor = 'Não informada';
+    let animalEspecie = 'Cão';
+    let animalRaca = 'SRD';
+    let animalPorte = 'Médio';
+    let animalSexo = 'Indefinido';
+    let animalCastrado = false;
+    let animalTemTutor = false;
+    let animalLocalResgate = 'Pouso Alegre / MG';
+    let animalDataResgate = new Date().toISOString().split('T')[0];
+    let animalDataCadastro = new Date().toISOString();
+    let animalCondicao = 'Atendido';
+    let animalSamuvet = false;
+
+    try {
+      const { data: sbAnimal } = await supabase
+        .from('animals')
+        .select('*')
+        .eq('id', cleanAnimalId)
+        .maybeSingle();
+
+      if (sbAnimal) {
+        if (sbAnimal.nome && typeof sbAnimal.nome === 'string' && sbAnimal.nome.trim()) {
+          animalNome = sbAnimal.nome.trim();
+        }
+        const numPeso = Number(sbAnimal.peso);
+        if (!isNaN(numPeso) && numPeso >= 0) animalPeso = numPeso;
+        if (sbAnimal.cor_pelagem) animalCor = sbAnimal.cor_pelagem;
+        else if (sbAnimal.cor) animalCor = sbAnimal.cor;
+        if (sbAnimal.especie) animalEspecie = sbAnimal.especie;
+        if (sbAnimal.raca) animalRaca = sbAnimal.raca;
+        if (sbAnimal.porte) animalPorte = sbAnimal.porte;
+        if (sbAnimal.sexo) animalSexo = sbAnimal.sexo;
+        if (typeof sbAnimal.castrado === 'boolean') animalCastrado = sbAnimal.castrado;
+        if (typeof sbAnimal.tem_tutor === 'boolean') animalTemTutor = sbAnimal.tem_tutor;
+        if (sbAnimal.local_resgate) animalLocalResgate = sbAnimal.local_resgate;
+        if (sbAnimal.data_resgate) animalDataResgate = sbAnimal.data_resgate;
+        if (sbAnimal.data_cadastro) animalDataCadastro = sbAnimal.data_cadastro;
+        if (sbAnimal.condicao) animalCondicao = sbAnimal.condicao;
+        if (typeof sbAnimal.resgate_samuvet === 'boolean') animalSamuvet = sbAnimal.resgate_samuvet;
+      }
+    } catch (sbErr: any) {
+      console.warn('[addendum:animal_prep] Aviso ao buscar animal no Supabase:', sbErr?.message || 'Erro Supabase');
+    }
+
+    await pgClient.query(
+      `INSERT INTO public.animals (
+        id, nome, peso, cor_pelagem, especie, raca, porte, sexo, castrado,
+        tem_tutor, local_resgate, data_resgate, data_cadastro, condicao, resgate_samuvet, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+      ON CONFLICT (id) DO NOTHING;`,
+      [
+        cleanAnimalId,
+        animalNome,
+        animalPeso,
+        animalCor,
+        animalEspecie,
+        animalRaca,
+        animalPorte,
+        animalSexo,
+        animalCastrado,
+        animalTemTutor,
+        animalLocalResgate,
+        animalDataResgate,
+        animalDataCadastro,
+        animalCondicao,
+        animalSamuvet,
+      ]
+    );
+  }
+
+  /**
+   * Garante que o prontuário clínico original exista fisicamente em public.clinical_records no Cloud SQL.
+   */
+  async function ensureClinicalRecordExistsInCloudSql(
+    pgClient: any,
+    targetRecord: any,
+    fallbackVetId: string
+  ): Promise<void> {
+    const checkRec = await pgClient.query(
+      'SELECT id FROM public.clinical_records WHERE id = $1 LIMIT 1;',
+      [targetRecord.id]
+    );
+    if (checkRec.rows.length > 0) {
+      return;
+    }
+
+    // 1. Garante veterinário do prontuário em public.users
+    const recVetId = targetRecord.veterinario_id || fallbackVetId;
+    await ensureUserExistsInCloudSql(pgClient, recVetId);
+
+    // 2. Garante animal do prontuário em public.animals
+    await ensureAnimalExistsInCloudSql(pgClient, targetRecord.animal_id);
+
+    // 3. Insere prontuário espelho
+    await pgClient.query(
+      `INSERT INTO public.clinical_records (
+        id, animal_id, veterinario_id, data_atendimento, inativo,
+        status_resultante, observacoes_gerais, diagnostico_clinico,
+        tratamento_ambulatorial, exames_solicitados, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+      ON CONFLICT (id) DO NOTHING;`,
+      [
+        targetRecord.id,
+        targetRecord.animal_id,
+        recVetId,
+        targetRecord.data_atendimento || new Date().toISOString(),
+        targetRecord.inativo ?? false,
+        targetRecord.status_resultante || 'EM_OBSERVACAO',
+        targetRecord.observacoes_gerais || '',
+        targetRecord.diagnostico_clinico || '',
+        targetRecord.tratamento_ambulatorial || '',
+        targetRecord.exames_solicitados || '',
+      ]
+    );
+  }
 
   app.post(
     '/api/attendance/records/:id/addendum',
@@ -1022,14 +1237,19 @@ app.get('/api/health', (req, res) => {
       const pool = createPool();
 
       try {
-        // 2. Valida a existência do prontuário original e obtém o animal_id
+        // 2. Valida a existência do prontuário original e obtém os dados clínicos
         let recordQuery: any = null;
         try {
           recordQuery = await pool.query(
-            'SELECT id, animal_id, veterinario_id, data_atendimento, inativo FROM public.clinical_records WHERE id = $1 LIMIT 1;',
+            `SELECT id, animal_id, veterinario_id, data_atendimento, inativo,
+                    status_resultante, observacoes_gerais, diagnostico_clinico,
+                    tratamento_ambulatorial, exames_solicitados
+             FROM public.clinical_records WHERE id = $1 LIMIT 1;`,
             [prontuarioId]
           );
-        } catch (_) {}
+        } catch (dbReadErr: any) {
+          console.warn('[addendum] Aviso ao consultar prontuário no Cloud SQL:', dbReadErr?.message);
+        }
 
         let targetRecord = recordQuery?.rows?.[0];
 
@@ -1038,15 +1258,15 @@ app.get('/api/health', (req, res) => {
           try {
             const { data: sbRecord } = await supabase
               .from('clinical_records')
-              .select('id, animal_id, veterinario_id, data_atendimento, inativo')
+              .select('id, animal_id, veterinario_id, data_atendimento, inativo, status_resultante, observacoes_gerais, diagnostico_clinico, tratamento_ambulatorial, exames_solicitados')
               .eq('id', prontuarioId)
               .maybeSingle();
 
             if (sbRecord) {
               targetRecord = sbRecord;
             }
-          } catch (sbErr) {
-            console.warn('[addendum] Aviso ao consultar prontuário no Supabase:', sbErr);
+          } catch (sbErr: any) {
+            console.warn('[addendum] Aviso ao consultar prontuário no Supabase:', sbErr?.message);
           }
         }
 
@@ -1066,7 +1286,7 @@ app.get('/api/health', (req, res) => {
           });
         }
 
-        // 3. Verificação de Idempotência Preexistente no Banco Primário
+        // 3. Verificação prévia de Idempotência no Banco Primário
         if (effectiveIdempotencyKey) {
           try {
             const existingRes = await pool.query(
@@ -1079,7 +1299,6 @@ app.get('/api/health', (req, res) => {
 
             if (existingRes.rows && existingRes.rows.length > 0) {
               const existing = existingRes.rows[0];
-              // Verifica se o conteúdo coincide exatamente
               if (
                 existing.prontuario_id === targetRecord.id &&
                 existing.texto === cleanTexto &&
@@ -1137,7 +1356,7 @@ app.get('/api/health', (req, res) => {
                     texto: existingMock.texto,
                     motivo: existingMock.motivo,
                     idempotencyKey: existingMock.idempotency_key,
-                    syncStatus: 'PENDING',
+                    syncStatus: 'STORED_PRIMARY',
                     createdAt: existingMock.created_at,
                   },
                 });
@@ -1152,12 +1371,11 @@ app.get('/api/health', (req, res) => {
           }
         }
 
-        // 4. Autoria estrita: o veterinário autenticado é SEMPRE o autor (impossível falsificar autoria)
+        // 4. Autoria estrita
         const authorVetId = user.id;
         const addendumId = crypto.randomUUID();
         const nowIso = new Date().toISOString();
 
-        // Busca dados do profissional autenticado
         let vetName = user.name;
         let vetCrmv = (user as any).crmv;
         try {
@@ -1171,160 +1389,45 @@ app.get('/api/health', (req, res) => {
           }
         } catch (_) {}
 
-        // 4.5 Garantia de Integridade Referencial no Cloud SQL:
-        // Assegura que o prontuário original, o animal e o autor existam fisicamente no Cloud SQL
-        try {
-          // A. Garante existência do animal em public.animals
-          const animCheck = await pool.query('SELECT id FROM public.animals WHERE id = $1 LIMIT 1;', [targetRecord.animal_id]);
-          if (animCheck.rows.length === 0) {
-            let animalNome = 'Animal';
-            let animalPeso = 0;
-            let animalCor = 'Não informada';
-            let animalEspecie = 'Cão';
-            let animalRaca = 'SRD';
-            let animalPorte = 'Médio';
-            let animalSexo = 'Indefinido';
-            let animalCastrado = false;
-            let animalTemTutor = false;
-            let animalLocalResgate = 'Não informado';
-            let animalDataResgate = new Date().toISOString().split('T')[0];
-            let animalDataCadastro = new Date().toISOString();
-            let animalCondicao = 'Atendido';
-            let animalSamuvet = false;
-
-            try {
-              const { data: sbAnimal } = await supabase
-                .from('animals')
-                .select('*')
-                .eq('id', targetRecord.animal_id)
-                .maybeSingle();
-
-              if (sbAnimal) {
-                animalNome = sbAnimal.nome || animalNome;
-                animalPeso = Number(sbAnimal.peso) || 0;
-                animalCor = sbAnimal.cor_pelagem || animalCor;
-                animalEspecie = sbAnimal.especie || animalEspecie;
-                animalRaca = sbAnimal.raca || animalRaca;
-                animalPorte = sbAnimal.porte || animalPorte;
-                animalSexo = sbAnimal.sexo || animalSexo;
-                animalCastrado = Boolean(sbAnimal.castrado);
-                animalTemTutor = Boolean(sbAnimal.tem_tutor);
-                animalLocalResgate = sbAnimal.local_resgate || animalLocalResgate;
-                animalDataResgate = sbAnimal.data_resgate || animalDataResgate;
-                animalDataCadastro = sbAnimal.data_cadastro || animalDataCadastro;
-                animalCondicao = sbAnimal.condicao || animalCondicao;
-                animalSamuvet = Boolean(sbAnimal.resgate_samuvet);
-              }
-            } catch (_) {}
-
-            await pool.query(
-              `INSERT INTO public.animals (
-                id, nome, peso, cor_pelagem, especie, raca, porte, sexo, castrado,
-                tem_tutor, local_resgate, data_resgate, data_cadastro, condicao, resgate_samuvet, created_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
-              ON CONFLICT (id) DO NOTHING;`,
-              [
-                targetRecord.animal_id,
-                animalNome,
-                animalPeso,
-                animalCor,
-                animalEspecie,
-                animalRaca,
-                animalPorte,
-                animalSexo,
-                animalCastrado,
-                animalTemTutor,
-                animalLocalResgate,
-                animalDataResgate,
-                animalDataCadastro,
-                animalCondicao,
-                animalSamuvet
-              ]
-            );
-          }
-
-          // B. Garante existência do veterinário do prontuário em public.users
-          if (targetRecord.veterinario_id) {
-            const vetCheck = await pool.query('SELECT id FROM public.users WHERE id = $1 LIMIT 1;', [targetRecord.veterinario_id]);
-            if (vetCheck.rows.length === 0) {
-              let recVetName = 'Médico Veterinário';
-              let recVetEmail: string | null = null;
-              let recVetCrmv: string | null = null;
-
-              try {
-                const { data: sbVet } = await supabase
-                  .from('users')
-                  .select('*')
-                  .eq('id', targetRecord.veterinario_id)
-                  .maybeSingle();
-                if (sbVet) {
-                  recVetName = sbVet.name || recVetName;
-                  recVetEmail = sbVet.email || null;
-                  recVetCrmv = sbVet.crmv || null;
-                }
-              } catch (_) {}
-
-              await pool.query(
-                `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
-                 VALUES ($1, $2, 'VETERINARIO', $3, $4, $5, $1, NOW())
-                 ON CONFLICT (id) DO NOTHING;`,
-                [targetRecord.veterinario_id, targetRecord.veterinario_id, recVetName, recVetEmail, recVetCrmv]
-              );
-            }
-          }
-
-          // C. Garante existência do prontuário original em public.clinical_records
-          const recCheck = await pool.query('SELECT id FROM public.clinical_records WHERE id = $1 LIMIT 1;', [targetRecord.id]);
-          if (recCheck.rows.length === 0) {
-            await pool.query(
-              `INSERT INTO public.clinical_records (
-                id, animal_id, veterinario_id, data_atendimento, inativo,
-                status_resultante, observacoes_gerais, diagnostico_clinico,
-                tratamento_ambulatorial, exames_solicitados, created_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-              ON CONFLICT (id) DO NOTHING;`,
-              [
-                targetRecord.id,
-                targetRecord.animal_id,
-                targetRecord.veterinario_id || authorVetId,
-                targetRecord.data_atendimento || new Date().toISOString(),
-                targetRecord.inativo ?? false,
-                targetRecord.status_resultante || 'EM_OBSERVACAO',
-                targetRecord.observacoes_gerais || '',
-                targetRecord.diagnostico_clinico || '',
-                targetRecord.tratamento_ambulatorial || '',
-                targetRecord.exames_solicitados || '',
-              ]
-            );
-          }
-
-          // D. Garante existência do autor do adendo em public.users
-          const authorCheck = await pool.query('SELECT id FROM public.users WHERE id = $1 LIMIT 1;', [authorVetId]);
-          if (authorCheck.rows.length === 0) {
-            await pool.query(
-              `INSERT INTO public.users (id, username, role, name, email, crmv, uid, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $1, NOW())
-               ON CONFLICT (id) DO NOTHING;`,
-              [
-                authorVetId,
-                user.username || authorVetId,
-                user.role || 'VETERINARIO',
-                vetName || user.name || 'Médico Veterinário',
-                user.email || null,
-                vetCrmv || null,
-              ]
-            );
-          }
-        } catch (prepErr) {
-          console.warn('[addendum] Aviso ao verificar integridade referencial no Cloud SQL:', prepErr);
-        }
-
-        // 5. Inserção append-only no banco primário oficial (Cloud SQL)
+        // 5. Execução Transacional Atômica com Validação Prévia de FKs
         let createdRow: any = null;
         let storageUsed: 'cloud_sql_primary' | 'mock_test' = 'cloud_sql_primary';
 
+        const client = await pool.connect();
         try {
-          const insertRes = await pool.query(
+          await client.query('BEGIN');
+
+          // Etapa A: Garante autor do adendo em public.users
+          await ensureUserExistsInCloudSql(client, authorVetId, {
+            name: user.name,
+            username: user.username,
+            role: user.role || 'VETERINARIO',
+            email: user.email,
+            crmv: (user as any).crmv,
+          });
+
+          // Etapa B: Garante animal em public.animals
+          await ensureAnimalExistsInCloudSql(client, targetRecord.animal_id);
+
+          // Etapa C: Garante prontuário original em public.clinical_records
+          await ensureClinicalRecordExistsInCloudSql(client, targetRecord, authorVetId);
+
+          // Etapa D: Validação explícita da integridade referencial antes do INSERT
+          const chkRec = await client.query('SELECT id FROM public.clinical_records WHERE id = $1 LIMIT 1;', [targetRecord.id]);
+          if (chkRec.rows.length === 0) {
+            throw new Error(`REFERENTIAL_INTEGRITY_PRONTUARIO: Prontuário original ${targetRecord.id} não pôde ser referenciado.`);
+          }
+          const chkAnim = await client.query('SELECT id FROM public.animals WHERE id = $1 LIMIT 1;', [targetRecord.animal_id]);
+          if (chkAnim.rows.length === 0) {
+            throw new Error(`REFERENTIAL_INTEGRITY_ANIMAL: Animal ${targetRecord.animal_id} não pôde ser referenciado.`);
+          }
+          const chkVet = await client.query('SELECT id FROM public.users WHERE id = $1 LIMIT 1;', [authorVetId]);
+          if (chkVet.rows.length === 0) {
+            throw new Error(`REFERENTIAL_INTEGRITY_USER: Veterinário autor ${authorVetId} não pôde ser referenciado.`);
+          }
+
+          // Etapa E: Inserção append-only no banco primário oficial
+          const insertRes = await client.query(
             `INSERT INTO public.clinical_record_addenda (
               id, prontuario_id, animal_id, veterinario_id, veterinario_nome, crmv,
               texto, motivo, idempotency_key, sync_status, sync_attempts, created_at
@@ -1343,12 +1446,17 @@ app.get('/api/health', (req, res) => {
               effectiveIdempotencyKey,
             ]
           );
+
           if (insertRes.rows && insertRes.rows.length > 0) {
             createdRow = insertRes.rows[0];
           }
-        } catch (dbInsertErr: any) {
-          // Trata violação de unicidade de idempotency_key em condições de corrida concorrente
-          if (dbInsertErr.code === '23505' && effectiveIdempotencyKey) {
+
+          await client.query('COMMIT');
+        } catch (dbErr: any) {
+          await client.query('ROLLBACK').catch(() => {});
+
+          // Trata concorrência na chave de idempotência
+          if (dbErr.code === '23505' && effectiveIdempotencyKey) {
             try {
               const raceRes = await pool.query(
                 `SELECT * FROM public.clinical_record_addenda WHERE idempotency_key = $1 LIMIT 1;`,
@@ -1445,16 +1553,17 @@ app.get('/api/health', (req, res) => {
             }
             serverMockTestAddenda.get(targetRecord.id)!.push(createdRow);
           } else {
-            // Em produção/fluxo real: Falha no banco primário NÃO pode fingir sucesso!
-            console.error('[addendum] Falha de persistência primária no Cloud SQL:', dbInsertErr.message, dbInsertErr.detail);
+            console.error('[addendum] Falha na persistência transacional Cloud SQL:', dbErr.code || 'NO_CODE', dbErr.message);
             return res.status(503).json({
               success: false,
               code: 'PRIMARY_STORAGE_UNAVAILABLE',
-              message: `Falha ao persistir no Cloud SQL: ${dbInsertErr.message || 'Erro de banco de dados central.'}`,
-              detail: dbInsertErr.detail,
+              message: `Falha ao persistir no Cloud SQL: ${dbErr.message || 'Erro de banco de dados central.'}`,
+              detail: dbErr.detail || undefined,
               persisted: false,
             });
           }
+        } finally {
+          client.release();
         }
 
         // Retorna sucesso com o registro arquivado no banco oficial (Cloud SQL)

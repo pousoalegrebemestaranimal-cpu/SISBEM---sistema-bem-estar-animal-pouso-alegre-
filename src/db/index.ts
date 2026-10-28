@@ -1,3 +1,4 @@
+import fs from 'fs';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool, type QueryResult, type QueryResultRow } from 'pg';
 import { Connector, IpAddressTypes } from '@google-cloud/cloud-sql-connector';
@@ -9,6 +10,54 @@ declare global {
   var _postgresPool: Pool | undefined;
   var _postgresPoolPromise: Promise<Pool> | undefined;
   var _cloudSqlConnector: Connector | undefined;
+}
+
+/**
+ * Resolve o host do banco de dados, detectando automaticamente o socket Unix
+ * montado pelo Cloud Run (/cloudsql/...) ou pelo container de desenvolvimento (/app/cloudsql/...).
+ */
+export function resolveSqlHost(): string | undefined {
+  const configuredHost = process.env.SQL_HOST?.trim();
+
+  // Se for caminho de socket Unix (começa com /)
+  if (configuredHost && configuredHost.startsWith('/')) {
+    try {
+      if (fs.existsSync(configuredHost)) {
+        return configuredHost;
+      }
+      // Se o caminho configurado tiver /app/cloudsql/..., tenta /cloudsql/... (padrão Cloud Run)
+      if (configuredHost.startsWith('/app/cloudsql/')) {
+        const altHost = configuredHost.replace('/app/cloudsql/', '/cloudsql/');
+        if (fs.existsSync(altHost)) {
+          return altHost;
+        }
+      }
+      // Se o caminho configurado tiver /cloudsql/..., tenta /app/cloudsql/... (padrão container dev)
+      if (configuredHost.startsWith('/cloudsql/')) {
+        const altHost = configuredHost.replace('/cloudsql/', '/app/cloudsql/');
+        if (fs.existsSync(altHost)) {
+          return altHost;
+        }
+      }
+    } catch (_) {}
+    return configuredHost;
+  }
+
+  // Se SQL_HOST não foi explicitamente fornecido, busca socket padrão do Cloud Run ou Dev
+  if (!configuredHost) {
+    const defaultCloudRunSocket = '/cloudsql/static-passage-qggh3:us-west2:ai-studio-e3402d0e';
+    const defaultDevSocket = '/app/cloudsql/static-passage-qggh3:us-west2:ai-studio-e3402d0e';
+    try {
+      if (fs.existsSync(defaultCloudRunSocket)) {
+        return defaultCloudRunSocket;
+      }
+      if (fs.existsSync(defaultDevSocket)) {
+        return defaultDevSocket;
+      }
+    } catch (_) {}
+  }
+
+  return configuredHost;
 }
 
 /**
@@ -111,9 +160,10 @@ export async function getPool(): Promise<Pool> {
       // MODALIDADE 2: Conexão Direta TCP / Unix Domain Socket (ambiente AI Studio / local)
       const port = process.env.SQL_PORT ? parseInt(process.env.SQL_PORT, 10) : 5432;
       const useSsl = process.env.SQL_SSL === 'true' || process.env.SQL_SSL === 'require';
+      const effectiveHost = resolveSqlHost();
 
       const directPool = new Pool({
-        host: process.env.SQL_HOST,
+        host: effectiveHost,
         port,
         user: process.env.SQL_USER,
         password: process.env.SQL_PASSWORD,
@@ -214,7 +264,8 @@ export const createPool = (): Pool => {
   }
 
   // Em ambiente local sem Connector (AI Studio), instancia de forma síncrona imediatamente
-  if (!process.env.CLOUD_SQL_CONNECTION_NAME && process.env.SQL_HOST) {
+  const resolvedHost = resolveSqlHost();
+  if (!process.env.CLOUD_SQL_CONNECTION_NAME && resolvedHost) {
     const isServerless = process.env.VERCEL === '1' || process.env.VERCEL_ENV !== undefined;
     const maxConnections = process.env.SQL_MAX_CONNECTIONS
       ? parseInt(process.env.SQL_MAX_CONNECTIONS, 10)
@@ -223,7 +274,7 @@ export const createPool = (): Pool => {
     const useSsl = process.env.SQL_SSL === 'true' || process.env.SQL_SSL === 'require';
 
     const pool = new Pool({
-      host: process.env.SQL_HOST,
+      host: resolvedHost,
       port,
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
