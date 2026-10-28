@@ -3,13 +3,14 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { db } from '../services/db';
 import { ClinicalRecord, Prescription, Referral, AnimalCondicao, KennelType, AnimalJoined, ExamFile, Animal } from '../types';
-import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw, History } from 'lucide-react';
+import { ArrowLeft, Save, Plus, Trash2, Clipboard, FileText, Activity, AlertCircle, CheckCircle2, Pill, PlusCircle, Skull, MapPin, FlaskConical, ClipboardCheck, Home, Calendar, MessageSquare, User, Info, Upload, X, FileSearch, HeartPulse, UserCircle, Phone, ArrowRightLeft, ExternalLink, Cpu, QrCode, ShieldAlert, LogOut, Check, RefreshCw, History, Scissors, Printer } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { startClinicalAttendance, cancelClinicalAttendance, finishClinicalAttendance } from '../src/lib/attendanceService';
 import { fetchAnimalById } from '../src/lib/supabaseQueries';
 import { safeSetLocalAnimals } from '../src/lib/safeStorage';
 import { ClinicalHistoryModal } from '../components/ClinicalHistoryModal';
+import { printClinicalRecord } from '../utils/printClinicalRecord';
 
 const DIAGNOSTIC_OPTIONS = [
   'Tumores',
@@ -588,6 +589,56 @@ const VeterinaryForm: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap self-start sm:self-auto">
+          {editId && (
+            <button
+              type="button"
+              onClick={() => {
+                const recToPrint: ClinicalRecord = {
+                  id: editId,
+                  animalId: animal.id,
+                  veterinarioId: user?.id || '1',
+                  dataAtendimento: new Date().toISOString(),
+                  inativo: false,
+                  vacinas: record.vacinas || '',
+                  parasitas: record.parasitas || '',
+                  temperatura: record.temperatura || '',
+                  peso: record.peso || '',
+                  mucosa: record.mucosa || '',
+                  palpacaoAbdominal: record.palpacaoAbdominal || '',
+                  hidratacao: record.hidratacao || '',
+                  auscultaCardiaca: record.auscultaCardiaca || '',
+                  auscultaPulmonar: record.auscultaPulmonar || '',
+                  frequenciaCardiaca: record.frequenciaCardiaca || '',
+                  frequenciaRespiratoria: record.frequenciaRespiratoria || '',
+                  observacoesGerais: record.observacoesGerais || '',
+                  examesSolicitados: record.examesSolicitados || '',
+                  tratamentoAmbulatorial: record.tratamentoAmbulatorial || '',
+                  diagnosticoClinico: record.diagnosticoClinico || '',
+                  statusResultante: record.statusResultante,
+                  receitas: (record.receitas || []) as any,
+                  encaminhamentos: (record.encaminhamentos || []) as any,
+                  examesLaboratoriais: (record.examesLaboratoriais || []) as any,
+                  recommendedKennelType: record.recommendedKennelType,
+                  accommodationJustification: record.accommodationJustification,
+                  v10Aplicada: record.v10Aplicada,
+                  v10Data: record.v10Data,
+                  antirrabicaAplicada: record.antirrabicaAplicada,
+                  antirrabicaData: record.antirrabicaData,
+                  vermifugoAplicado: record.vermifugoAplicado,
+                  vermifugoData: record.vermifugoData,
+                  microchipAplicado: record.microchipAplicado,
+                  numeroMicrochipAplicado: record.numeroMicrochipAplicado
+                };
+                printClinicalRecord(recToPrint, animal);
+              }}
+              className="px-4 py-2 bg-white text-slate-800 hover:bg-slate-50 border border-slate-300 font-bold text-xs uppercase tracking-wider rounded-xl shadow-sm transition-all flex items-center gap-2 cursor-pointer shrink-0"
+              title="Imprimir Prontuário Clínico deste atendimento"
+            >
+              <Printer size={16} className="text-teal-600" />
+              <span>IMPRIMIR PRONTUÁRIO</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setIsHistoryModalOpen(true)}
@@ -615,23 +666,30 @@ const VeterinaryForm: React.FC = () => {
 
       <form onSubmit={handleSubmit} className="space-y-8">
         
-        {/* Painel de Contexto */}
-        <section className={`p-8 rounded-2xl shadow-xl space-y-6 relative overflow-hidden transition-all duration-500 ${animal.temTutor ? 'bg-indigo-900' : 'bg-slate-900'} text-white`}>
-          <div className="absolute top-0 right-0 p-8 opacity-10">
-            {animal.temTutor ? <HeartPulse size={120} /> : <Clipboard size={120} />}
+        {/* Painel de Contexto com Dados Enriquecidos do Paciente e do Tutor */}
+        <section className={`p-6 sm:p-8 rounded-2xl shadow-xl space-y-6 relative overflow-hidden transition-all duration-500 ${animal.temTutor ? 'bg-indigo-950 border border-indigo-800/60' : 'bg-slate-900 border border-slate-800'} text-white`}>
+          <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+            {animal.temTutor ? <HeartPulse size={140} /> : <Clipboard size={140} />}
           </div>
           
-          <div className="flex items-center justify-between border-b border-white/10 pb-4">
+          {/* Cabeçalho do Painel */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-4">
             <div className="flex items-center gap-2">
               {animal.temTutor ? (
                 <>
-                  <HeartPulse size={18} className="text-indigo-400" />
-                  <h3 className="text-xs font-black uppercase tracking-widest text-indigo-400">Queixa Principal / Motivo da Consulta</h3>
+                  <HeartPulse size={20} className="text-indigo-400 shrink-0" />
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-indigo-300">Ficha de Atendimento Clínico • Paciente com Tutor</h3>
+                    <p className="text-[11px] text-indigo-200/70 font-medium">Dados cadastrais e histórico para orientação da conduta médica</p>
+                  </div>
                 </>
               ) : (
                 <>
-                  <MapPin size={18} className="text-teal-400" />
-                  <h3 className="text-xs font-black uppercase tracking-widest text-teal-400">Contexto e Histórico de Resgate</h3>
+                  <MapPin size={20} className="text-teal-400 shrink-0" />
+                  <div>
+                    <h3 className="text-xs font-black uppercase tracking-widest text-teal-300">Ficha de Atendimento Clínico • Animal Acolhido / Resgatado</h3>
+                    <p className="text-[11px] text-teal-200/70 font-medium">Dados de ocorrência e triagem inicial do paciente sob custódia</p>
+                  </div>
                 </>
               )}
             </div>
@@ -639,74 +697,182 @@ const VeterinaryForm: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsHistoryModalOpen(true)}
-              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 active:bg-white/30 text-white border border-white/20 font-bold text-xs uppercase tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer"
+              className="px-3.5 py-2 bg-white/10 hover:bg-white/20 active:bg-white/30 text-white border border-white/20 font-bold text-xs uppercase tracking-wider rounded-xl transition-all flex items-center gap-2 cursor-pointer shadow-sm self-start sm:self-auto shrink-0"
               title="Consultar atendimentos anteriores deste animal"
             >
-              <History size={14} className="text-teal-300" />
-              <span>HISTÓRICO CLÍNICO</span>
+              <History size={15} className="text-teal-300" />
+              <span>Histórico Clínico</span>
             </button>
           </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+
+          {/* Destaques Clínicos e Sociais Principais (Castração e CadÚnico em Evidência) */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Badge Castração */}
+            <div className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl font-black text-xs uppercase tracking-wide border shadow-sm ${
+              animal.castrado 
+                ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200' 
+                : 'bg-amber-500/25 border-amber-400/60 text-amber-200'
+            }`}>
+              <Scissors size={15} className={animal.castrado ? 'text-emerald-400' : 'text-amber-400'} />
+              <span>Castrado: <strong className={animal.castrado ? 'text-emerald-300 underline underline-offset-2' : 'text-amber-200 underline underline-offset-2'}>{animal.castrado ? 'SIM' : 'NÃO (Intacto)'}</strong></span>
+            </div>
+
+            {/* Badge CadÚnico (Tutor ou Resgate) */}
             {animal.temTutor ? (
-              <>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-tight flex items-center gap-1.5">
-                    <UserCircle size={10} /> Tutor Responsável
-                  </p>
-                  <p className="text-sm font-bold uppercase">{animal.tutor?.nomeCompleto || animal.solicitante?.nomeCompleto || 'Não Informado'}</p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-tight flex items-center gap-1.5">
-                    <Phone size={10} /> Contato do Tutor
-                  </p>
-                  <p className="text-sm font-bold">{animal.tutor?.telefone || animal.solicitante?.telefone || 'N/A'}</p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-indigo-300 uppercase tracking-tight flex items-center gap-1.5">
-                    <Calendar size={10} /> Data Entrada
-                  </p>
-                  <p className="text-sm font-bold">
-                    {format(new Date(animal.dataCadastro), "dd/MM/yyyy", { locale: ptBR })}
-                  </p>
-                </div>
-              </>
+              <div className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl font-black text-xs uppercase tracking-wide border shadow-sm ${
+                animal.tutor?.temCadUnico 
+                  ? 'bg-teal-500/25 border-teal-400/60 text-teal-100' 
+                  : 'bg-slate-800/80 border-slate-600/70 text-slate-300'
+              }`}>
+                <CheckCircle2 size={15} className={animal.tutor?.temCadUnico ? 'text-teal-300' : 'text-slate-400'} />
+                <span>CadÚnico do Tutor: <strong className={animal.tutor?.temCadUnico ? 'text-teal-200 underline underline-offset-2' : 'text-slate-300'}>{animal.tutor?.temCadUnico ? 'SIM (Beneficiário)' : 'NÃO POSSUI'}</strong></span>
+                {animal.tutor?.documentoCadUnico && (
+                  <span className="text-[10px] font-normal opacity-80 normal-case">({animal.tutor.documentoCadUnico})</span>
+                )}
+              </div>
             ) : (
-              <>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tight flex items-center gap-1.5">
-                    <MapPin size={10} /> Local da Ocorrência
-                  </p>
-                  <p className="text-sm font-bold">{animal.localResgate}</p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tight flex items-center gap-1.5">
-                    <Calendar size={10} /> Data do Resgate
-                  </p>
-                  <p className="text-sm font-bold">
-                    {format(new Date(animal.dataResgate), "dd/MM/yyyy", { locale: ptBR })}
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tight flex items-center gap-1.5">
-                    <User size={10} /> Solicitante
-                  </p>
-                  <p className="text-sm font-bold truncate">{animal.solicitante?.nomeCompleto || 'Desconhecido'}</p>
-                </div>
-              </>
+              <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-800/70 border border-slate-700 text-slate-300 font-bold text-xs uppercase tracking-wide">
+                <Info size={15} className="text-teal-400" />
+                <span>CadÚnico: Não se aplica (Animal de Resgate)</span>
+              </div>
             )}
-            <div className="space-y-1">
-              <p className={`text-[10px] font-bold uppercase tracking-tight ${animal.temTutor ? 'text-indigo-300' : 'text-slate-400'}`}>Espécie / Sexo / Porte</p>
-              <p className="text-sm font-bold">{animal.especie} • {animal.sexo} • {animal.porte}{animal.idade ? ` • ${animal.idade}` : ''}</p>
+
+            {/* Microchip */}
+            <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/15 text-slate-200 text-xs font-semibold">
+              <Cpu size={14} className="text-indigo-300" />
+              <span>{animal.microchipado ? (animal.numeroMicrochip ? `Microchip: ${animal.numeroMicrochip}` : 'Microchipado: Sim') : 'Sem Microchip'}</span>
+            </div>
+
+            {/* Chegada */}
+            <div className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/15 text-slate-200 text-xs font-semibold">
+              <Calendar size={14} className="text-slate-300" />
+              <span>Entrada: {format(new Date(animal.dataCadastro), "dd/MM/yyyy", { locale: ptBR })}</span>
             </div>
           </div>
 
-          <div className={`${animal.temTutor ? 'bg-indigo-800/40 border-indigo-700/50' : 'bg-slate-800/50 border-slate-700/50'} p-5 rounded-xl border`}>
-            <p className={`text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-1.5 ${animal.temTutor ? 'text-indigo-400' : 'text-teal-400'}`}>
-              <MessageSquare size={12} /> {animal.temTutor ? 'Relato do Tutor (Anamnese Inicial)' : 'Motivo / Relato do Resgate'}
+          {/* Grid de Informações Detalhadas: Paciente (Animal) e Tutor / Origem */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Bloco 1: Dados do Animal */}
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-4 backdrop-blur-xs">
+              <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+                <p className="text-[11px] font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <Activity size={13} className="text-teal-400" /> Dados do Paciente (Animal)
+                </p>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-white/10 text-slate-300">
+                  ID: {animal.id.substring(0, 8).toUpperCase()}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Nome</span>
+                  <p className="font-black text-sm text-white uppercase">{animal.nome}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Espécie e Sexo</span>
+                  <p className="font-bold text-white">{animal.especie} • {animal.sexo}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Raça e Pelagem</span>
+                  <p className="font-medium text-white truncate" title={`${animal.raca || 'SRD'} - ${animal.corPelagem || 'Não informada'}`}>
+                    {animal.raca || 'SRD'} {animal.corPelagem ? `(${animal.corPelagem})` : ''}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Porte e Idade</span>
+                  <p className="font-medium text-white">
+                    {animal.porte}{animal.idade ? ` • ${animal.idade}` : ''}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Peso na Entrada</span>
+                  <p className="font-bold text-teal-300">{animal.peso ? `${animal.peso} kg` : 'Não registrado'}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Status Castração</span>
+                  <p className={`font-black uppercase text-xs flex items-center gap-1 ${animal.castrado ? 'text-emerald-300' : 'text-amber-300'}`}>
+                    <Scissors size={12} /> {animal.castrado ? 'Castrado' : 'Não Castrado'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Bloco 2: Dados do Tutor / Solicitante */}
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-4 backdrop-blur-xs">
+              <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+                <p className="text-[11px] font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                  <UserCircle size={13} className="text-indigo-400" />
+                  {animal.temTutor ? 'Dados do Tutor Responsável' : 'Dados do Solicitante / Resgate'}
+                </p>
+                {animal.temTutor && (
+                  <span className={`text-[10px] font-black px-2 py-0.5 rounded border ${
+                    animal.tutor?.temCadUnico 
+                      ? 'bg-teal-500/20 border-teal-400/40 text-teal-200' 
+                      : 'bg-slate-700/60 border-slate-600 text-slate-300'
+                  }`}>
+                    {animal.tutor?.temCadUnico ? 'CadÚnico Ativo' : 'Sem CadÚnico'}
+                  </span>
+                )}
+              </div>
+
+              {animal.temTutor ? (
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="col-span-2">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Nome do Tutor</span>
+                    <p className="font-black text-sm text-white uppercase">{animal.tutor?.nomeCompleto || animal.solicitante?.nomeCompleto || 'Não informado'}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">CPF do Tutor</span>
+                    <p className="font-bold text-white">{animal.tutor?.cpf || 'Não informado'}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Telefone / Contato</span>
+                    <p className="font-bold text-white">{animal.tutor?.telefone || animal.solicitante?.telefone || 'Não informado'}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Situação CadÚnico</span>
+                    <p className={`font-black uppercase text-xs flex items-center gap-1 ${animal.tutor?.temCadUnico ? 'text-teal-300' : 'text-slate-300'}`}>
+                      {animal.tutor?.temCadUnico ? <CheckCircle2 size={12} /> : <Info size={12} />}
+                      {animal.tutor?.temCadUnico ? 'Possui CadÚnico' : 'Não Possui'}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Endereço Residencial</span>
+                    <p className="font-medium text-white truncate" title={animal.tutor?.endereco || animal.localResgate}>
+                      {animal.tutor?.endereco || animal.localResgate || 'Não informado'}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="col-span-2">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Solicitante do Resgate</span>
+                    <p className="font-black text-sm text-white uppercase">{animal.solicitante?.nomeCompleto || 'Desconhecido'}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Tipo / Vínculo</span>
+                    <p className="font-bold text-white">{animal.solicitante?.tipo || 'Cidadão'}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Contato</span>
+                    <p className="font-bold text-white">{animal.solicitante?.telefone || 'Não informado'}</p>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Local da Ocorrência</span>
+                    <p className="font-medium text-white">{animal.localResgate || 'Não informado'}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Relato / Queixa Principal */}
+          <div className={`${animal.temTutor ? 'bg-indigo-900/60 border-indigo-700/60' : 'bg-slate-800/60 border-slate-700/60'} p-5 rounded-xl border`}>
+            <p className={`text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-1.5 ${animal.temTutor ? 'text-indigo-300' : 'text-teal-300'}`}>
+              <MessageSquare size={13} /> {animal.temTutor ? 'Relato do Tutor (Anamnese Inicial)' : 'Motivo / Relato da Ocorrência de Resgate'}
             </p>
             <p className="text-sm text-white leading-relaxed italic font-medium">
-              "{animal.motivo}"
+              "{animal.motivo || 'Nenhum relato inicial registrado.'}"
             </p>
           </div>
         </section>

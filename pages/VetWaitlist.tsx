@@ -4,7 +4,7 @@ import { db } from '../services/db';
 import { AnimalCondicao, Especie } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2, RotateCw, CheckCircle2, X } from 'lucide-react';
+import { Stethoscope, Clock, MapPin, ArrowRight, UserCircle, AlertCircle, Info, ShieldAlert, Loader2, RotateCw, CheckCircle2, X, Scissors } from 'lucide-react';
 // Fix: Use import * as and cast to any to bypass named export errors
 import * as ReactRouterDOM from 'react-router-dom';
 import { startClinicalAttendance, getActiveClinicalDrafts } from '../src/lib/attendanceService';
@@ -19,10 +19,16 @@ interface WaitlistAnimal {
   dataCadastro: string;
   temTutor: boolean;
   localResgate: string;
+  castrado?: boolean;
+  raca?: string;
+  corPelagem?: string;
   tutorId?: string;
   tutor?: {
     id?: string;
     nomeCompleto: string;
+    temCadUnico?: boolean;
+    cpf?: string;
+    telefone?: string;
   };
   emAtendimentoVetId?: string;
   draft?: {
@@ -54,7 +60,7 @@ const VetWaitlist: React.FC = () => {
     try {
       const { data, error } = await supabase
         .from('animals')
-        .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, tutor_id, tutores(id, nome_completo)')
+        .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, castrado, raca, cor_pelagem, tutor_id, tutores(id, nome_completo, cpf, telefone, tem_cad_unico)')
         .in('condicao', ['Acolhido', 'Aguardando Atendimento', 'Em Atendimento'])
         .order('data_cadastro', { ascending: true });
 
@@ -69,7 +75,7 @@ const VetWaitlist: React.FC = () => {
             a.condicao === AnimalCondicao.EM_ATENDIMENTO
           )
           .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
-        setWaitlist(localAnimals);
+        setWaitlist(localAnimals as any);
         return;
       }
 
@@ -86,7 +92,7 @@ const VetWaitlist: React.FC = () => {
       const localAnimals = db.getAnimals();
       const mapped: WaitlistAnimal[] = (data || []).map((row: any) => {
         const tutorData = row.tutores 
-          ? { id: row.tutores.id, nomeCompleto: row.tutores.nome_completo }
+          ? { id: row.tutores.id, nomeCompleto: row.tutores.nome_completo, temCadUnico: !!row.tutores.tem_cad_unico }
           : (row.tutor_id ? db.getTutores().find(t => t.id === row.tutor_id) : undefined);
 
         const localMatch = localAnimals.find(a => a.id === row.id);
@@ -100,8 +106,15 @@ const VetWaitlist: React.FC = () => {
           dataCadastro: row.data_cadastro,
           temTutor: !!row.tem_tutor,
           localResgate: row.local_resgate || 'Local não informado',
+          castrado: row.castrado !== undefined ? !!row.castrado : !!localMatch?.castrado,
+          raca: row.raca || localMatch?.raca,
+          corPelagem: row.cor_pelagem || localMatch?.corPelagem,
           tutorId: row.tutor_id || undefined,
-          tutor: tutorData ? { id: tutorData.id, nomeCompleto: tutorData.nomeCompleto || '' } : undefined,
+          tutor: tutorData ? { 
+            id: tutorData.id, 
+            nomeCompleto: tutorData.nomeCompleto || '', 
+            temCadUnico: !!(tutorData as any).temCadUnico 
+          } : undefined,
           emAtendimentoVetId: row.em_atendimento_vet_id || (draftInfo ? draftInfo.vetId : localMatch?.emAtendimentoVetId),
           draft: draftInfo ? {
             status: draftInfo.status,
@@ -338,17 +351,41 @@ const VetWaitlist: React.FC = () => {
                     <Stethoscope size={28} />
                   </div>
                   <div className="space-y-1.5 flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center flex-wrap gap-2">
                       <h3 className="text-xl font-black text-slate-900 truncate uppercase tracking-tight">{animal.nome}</h3>
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${animal.especie === Especie.CAO ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'}`}>
                         {animal.especie}
                       </span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase flex items-center gap-1 border ${
+                        animal.castrado 
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300' 
+                          : 'bg-amber-50 text-amber-900 border-amber-300'
+                      }`}>
+                        <Scissors size={10} className={animal.castrado ? 'text-emerald-600' : 'text-amber-600'} />
+                        {animal.castrado ? 'Castrado: Sim' : 'Castrado: Não'}
+                      </span>
+                      {animal.raca && animal.raca !== 'SRD' && (
+                        <span className="text-xs text-slate-500 font-medium">({animal.raca})</span>
+                      )}
                     </div>
                     
                     {animal.temTutor && animal.tutor && (
-                      <div className="flex items-center gap-1.5 text-indigo-700">
-                        <UserCircle size={14} />
-                        <p className="text-sm font-bold">Tutor: <span className="uppercase">{animal.tutor.nomeCompleto}</span></p>
+                      <div className="flex items-center flex-wrap gap-2 text-indigo-700">
+                        <div className="flex items-center gap-1.5">
+                          <UserCircle size={14} />
+                          <p className="text-sm font-bold">Tutor: <span className="uppercase">{animal.tutor.nomeCompleto}</span></p>
+                        </div>
+                        <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wide flex items-center gap-1 border ${
+                          animal.tutor.temCadUnico
+                            ? 'bg-teal-50 text-teal-800 border-teal-300'
+                            : 'bg-slate-100 text-slate-600 border-slate-300'
+                        }`}>
+                          {animal.tutor.temCadUnico ? (
+                            <><CheckCircle2 size={11} className="text-teal-600" /> CadÚnico: Sim</>
+                          ) : (
+                            <><Info size={11} className="text-slate-400" /> CadÚnico: Não</>
+                          )}
+                        </span>
                       </div>
                     )}
 

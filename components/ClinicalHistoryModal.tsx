@@ -13,6 +13,8 @@ import { db } from '../services/db';
 import { fetchClinicalRecordsByAnimalId } from '../src/lib/supabaseQueries';
 import { addClinicalRecordAddendum } from '../src/lib/attendanceService';
 import { generatePrintHTML } from '../utils/printPrescription';
+import { printClinicalRecord } from '../utils/printClinicalRecord';
+import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
@@ -394,6 +396,14 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                 >
                   <ChevronUp size={13} /> Recolher
                 </button>
+                <button
+                  type="button"
+                  onClick={() => printAnimalSheet(animal)}
+                  className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-teal-300 text-[10px] font-bold uppercase rounded-lg border border-slate-700 transition flex items-center gap-1 cursor-pointer"
+                  title="Imprimir Ficha Completa com Todo o Histórico"
+                >
+                  <Printer size={13} /> Imprimir Ficha Completa
+                </button>
               </div>
             )}
             <button
@@ -562,6 +572,18 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                             <Plus size={14} /> + Adicionar Complemento
                           </button>
                         )}
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            printClinicalRecord(rec, animal);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-slate-700 hover:text-teal-700 hover:bg-slate-50 border border-slate-300 hover:border-teal-300 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all shadow-2xs hover:shadow-xs cursor-pointer ml-1"
+                          title="Imprimir Prontuário Clínico deste atendimento"
+                        >
+                          <Printer size={13} className="text-teal-600" /> Imprimir Prontuário
+                        </button>
 
                         <button 
                           type="button"
@@ -1002,6 +1024,20 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                               </p>
                             )
                           )}
+                        </div>
+
+                        {/* AÇÕES DE IMPRESSÃO DO PRONTUÁRIO */}
+                        <div className="pt-3 border-t border-slate-100 flex flex-wrap justify-between items-center gap-2">
+                          <span className="text-[10px] text-slate-400 font-medium">
+                            Prontuário Registrado • ID: {rec.id.substring(0, 8).toUpperCase()}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => printClinicalRecord(rec, animal)}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                          >
+                            <Printer size={14} className="text-teal-400" /> Imprimir Prontuário Clínico
+                          </button>
                         </div>
                       </div>
                     )}

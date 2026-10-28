@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
+import { printClinicalRecord } from '../utils/printClinicalRecord';
 import { generatePrintHTML as generatePrintHTMLShared } from '../utils/printPrescription';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
 import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
@@ -1971,6 +1972,18 @@ const AnimalDetail: React.FC = () => {
                               </button>
                             )}
 
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                printClinicalRecord(record, animal);
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-slate-700 hover:text-teal-700 hover:bg-slate-50 border border-slate-300 hover:border-teal-300 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all shadow-2xs hover:shadow-xs cursor-pointer ml-1"
+                              title="Imprimir Prontuário Clínico deste atendimento"
+                            >
+                              <Printer size={13} className="text-teal-600" /> Imprimir Prontuário
+                            </button>
+
                             <button 
                               type="button"
                               className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-200 transition-colors ml-2"
@@ -2448,6 +2461,20 @@ const AnimalDetail: React.FC = () => {
                                   </p>
                                 )
                               )}
+                            </div>
+
+                            {/* AÇÃO DE IMPRESSÃO DO PRONTUÁRIO */}
+                            <div className="pt-3 border-t border-slate-100 flex flex-wrap justify-between items-center gap-2">
+                              <span className="text-[10px] text-slate-400 font-medium">
+                                Prontuário Registrado • ID: {record.id.substring(0, 8).toUpperCase()}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => printClinicalRecord(record, animal)}
+                                className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                              >
+                                <Printer size={14} className="text-teal-400" /> Imprimir Prontuário Clínico
+                              </button>
                             </div>
                           </div>
                         )}
