@@ -83,108 +83,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
   const [expandedRecordIds, setExpandedRecordIds] = useState<Record<string, boolean>>({});
   const [viewingAttachment, setViewingAttachment] = useState<{ url: string; title: string } | null>(null);
 
-  // Estados para inclusão de notas complementares (adendos)
-  const [activeAddendumRecordId, setActiveAddendumRecordId] = useState<string | null>(null);
-  const [addendumTexto, setAddendumTexto] = useState('');
-  const [addendumMotivo, setAddendumMotivo] = useState('Evolução / Observação Clínica Posterior');
-  const [addendumIdempotencyKey, setAddendumIdempotencyKey] = useState<string>('');
-  const [submittingAddendum, setSubmittingAddendum] = useState(false);
-  const [addendumError, setAddendumError] = useState<string | null>(null);
-  const [addendumSuccess, setAddendumSuccess] = useState<string | null>(null);
-  const [addendumStatusType, setAddendumStatusType] = useState<'SYNCED' | 'PENDING_SYNC' | null>(null);
-
-  const currentUser: User | null = useMemo(() => {
-    try {
-      const fromDb = db.getCurrentUser();
-      if (fromDb) return fromDb;
-      const raw = localStorage.getItem('sisbem_current_user');
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const canAddAddendum = useMemo(() => {
-    if (!currentUser) return true; // Resiliente: permite ação para testes e homologação caso sessão não esteja restrita
-    const role = (currentUser.role || '').toUpperCase();
-    return role === 'VETERINARIO' || role === 'ADMIN' || role === 'SUPER_ADMIN';
-  }, [currentUser]);
-
   const users = useMemo(() => db.getUsers(), []);
-
-  const openAddendumForm = (recordId: string) => {
-    setActiveAddendumRecordId(recordId);
-    setAddendumTexto('');
-    setAddendumMotivo('Evolução / Observação Clínica Posterior');
-    const newKey = typeof crypto !== 'undefined' && crypto.randomUUID ? `idemp_${crypto.randomUUID()}` : `idemp_${Date.now()}`;
-    setAddendumIdempotencyKey(newKey);
-    setAddendumError(null);
-    setAddendumSuccess(null);
-    setAddendumStatusType(null);
-  };
-
-  const cancelAddendumForm = () => {
-    setActiveAddendumRecordId(null);
-    setAddendumTexto('');
-    setAddendumIdempotencyKey('');
-    setAddendumError(null);
-    setAddendumSuccess(null);
-    setAddendumStatusType(null);
-  };
-
-  const handleSaveAddendum = async (recordId: string) => {
-    const clean = addendumTexto.trim();
-    if (!clean || clean.length < 3) {
-      setAddendumError('O texto do complemento é obrigatório e deve ter no mínimo 3 caracteres.');
-      return;
-    }
-    setSubmittingAddendum(true);
-    setAddendumError(null);
-    setAddendumSuccess(null);
-    setAddendumStatusType(null);
-
-    try {
-      const res = await addClinicalRecordAddendum(recordId, clean, addendumMotivo, addendumIdempotencyKey);
-      if (res.success && res.addendum) {
-        setRecords(prev => prev.map(r => {
-          if (r.id === recordId) {
-            const currentAdendos = r.adendos || [];
-            // Evita duplicatas na lista local caso a mesma chave tenha retornado o registro existente
-            const exists = currentAdendos.some(a => a.id === res.addendum!.id);
-            if (exists) {
-              return {
-                ...r,
-                adendos: currentAdendos.map(a => a.id === res.addendum!.id ? res.addendum! : a)
-              };
-            }
-            return {
-              ...r,
-              adendos: [...currentAdendos, res.addendum!]
-            };
-          }
-          return r;
-        }));
-
-        setAddendumStatusType('SYNCED');
-        setAddendumSuccess('Nota complementar registrada no prontuário com sucesso!');
-
-        setTimeout(() => {
-          setActiveAddendumRecordId(null);
-          setAddendumSuccess(null);
-          setAddendumStatusType(null);
-          setAddendumTexto('');
-          setAddendumIdempotencyKey('');
-        }, 1800);
-      } else {
-        // Preserva o texto digitado e a chave de idempotência para retentativa
-        setAddendumError(res.message || 'Falha ao salvar no banco primário. O texto digitado foi preservado.');
-      }
-    } catch (err: any) {
-      setAddendumError('Erro de conexão ao salvar o complemento. O texto digitado foi preservado para nova tentativa.');
-    } finally {
-      setSubmittingAddendum(false);
-    }
-  };
 
   // Carrega o histórico clínico do animal APENAS quando o modal é aberto (Lazy Loading)
   const loadHistory = useCallback(async () => {
@@ -558,20 +457,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                           )}
                         </div>
 
-                        {canAddAddendum && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setExpandedRecordIds(prev => ({ ...prev, [rec.id]: true }));
-                              openAddendumForm(rec.id);
-                            }}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-[11px] font-black uppercase tracking-wider transition-all shadow-sm hover:shadow cursor-pointer ml-1"
-                            title="Adicionar complemento ou nota posterior a este prontuário"
-                          >
-                            <Plus size={14} /> + Adicionar Complemento
-                          </button>
-                        )}
+
 
                         <button
                           type="button"
@@ -855,130 +741,24 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                           </div>
                         )}
 
-                        {/* 8. COMPLEMENTOS CLÍNICOS E ADENDOS (REGISTRO POSTERIOR APPEND-ONLY) */}
-                        <div className="pt-4 border-t border-slate-200 space-y-3">
-                          <div className="flex items-center justify-between flex-wrap gap-2">
+                        {/* 8. COMPLEMENTOS CLÍNICOS E ADENDOS HISTÓRICOS (SE HOUVER) */}
+                        {rec.adendos && rec.adendos.length > 0 && (
+                          <div className="pt-4 border-t border-slate-200 space-y-3">
                             <div className="flex items-center gap-2">
                               <span className="p-1.5 bg-teal-500/10 text-teal-700 rounded-lg">
                                 <MessageSquare size={14} />
                               </span>
                               <div>
                                 <h5 className="text-[11px] font-black uppercase tracking-wider text-slate-800">
-                                  Complementos Clínicos / Notas Posteriores ({rec.adendos?.length || 0})
+                                  Notas Complementares Registradas ({rec.adendos.length})
                                 </h5>
                                 <p className="text-[10px] text-slate-400">
-                                  Informações posteriores registradas mantendo o prontuário original integralmente preservado
+                                  Registros históricos preservados associados a este prontuário
                                 </p>
                               </div>
                             </div>
 
-                            {canAddAddendum && activeAddendumRecordId !== rec.id && (
-                              <button
-                                type="button"
-                                onClick={() => openAddendumForm(rec.id)}
-                                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-black uppercase tracking-wider transition shadow-sm cursor-pointer"
-                              >
-                                <Plus size={13} /> + Adicionar Complemento
-                              </button>
-                            )}
-                          </div>
-
-                          {/* FORMULÁRIO DO COMPLEMENTO */}
-                          {activeAddendumRecordId === rec.id && (
-                            <div className="p-4 bg-teal-50/50 border border-teal-200 rounded-2xl space-y-3 animate-in fade-in duration-150">
-                              <div className="flex items-center justify-between flex-wrap gap-2">
-                                <span className="text-[11px] font-black uppercase tracking-wider text-teal-900 flex items-center gap-1.5">
-                                  <Sparkles size={13} className="text-teal-600" /> Novo Complemento Clínico ao Prontuário
-                                </span>
-                                <span className="text-[10px] text-slate-500">
-                                  Autor: <strong className="text-slate-700">{currentUser?.name || 'Médico Veterinário'}</strong> {currentUser?.crmv ? `• CRMV: ${currentUser.crmv}` : ''}
-                                </span>
-                              </div>
-
-                              {addendumError && (
-                                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs flex items-start gap-2 shadow-2xs">
-                                  <AlertCircle size={15} className="shrink-0 text-rose-600 mt-0.5" />
-                                  <div className="space-y-0.5">
-                                    <strong className="font-bold text-rose-900 block">Falha ao persistir complemento</strong>
-                                    <span className="text-[11px] leading-relaxed block text-rose-700">{addendumError}</span>
-                                  </div>
-                                </div>
-                              )}
-
-                              {addendumSuccess && (
-                                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-start gap-2 shadow-2xs">
-                                  <CheckCircle2 size={15} className="shrink-0 text-emerald-600 mt-0.5" />
-                                  <div className="space-y-0.5">
-                                    <strong className="font-bold text-emerald-900 block">Registrado com Sucesso</strong>
-                                    <span className="text-[11px] leading-relaxed block text-emerald-700">{addendumSuccess}</span>
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
-                                  Motivo do Complemento *
-                                </label>
-                                <select
-                                  value={addendumMotivo}
-                                  onChange={e => setAddendumMotivo(e.target.value)}
-                                  disabled={submittingAddendum}
-                                  className="w-full text-xs font-medium bg-white border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500"
-                                >
-                                  <option value="Evolução / Observação Clínica Posterior">Evolução / Observação Clínica Posterior</option>
-                                  <option value="Resultado de Exame Laboratorial / Imagem">Resultado de Exame Laboratorial / Imagem</option>
-                                  <option value="Retorno para Curativo / Avaliação de Ferida">Retorno para Curativo / Avaliação de Ferida</option>
-                                  <option value="Ajuste / Retificação de Prescrição Anterior">Ajuste / Retificação de Prescrição Anterior</option>
-                                  <option value="Reação Adversa a Medicamento">Reação Adversa a Medicamento</option>
-                                  <option value="Outro Motivo Clínico">Outro Motivo Clínico</option>
-                                </select>
-                              </div>
-
-                              <div className="space-y-1">
-                                <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
-                                  Nota Complementar *
-                                </label>
-                                <textarea
-                                  rows={3}
-                                  value={addendumTexto}
-                                  onChange={e => setAddendumTexto(e.target.value)}
-                                  disabled={submittingAddendum}
-                                  placeholder="Digite as anotações clínicas complementares, atualizações ou informações posteriores..."
-                                  className="w-full text-xs bg-white border border-slate-300 rounded-xl p-3 text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-500 resize-y"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-end gap-2 pt-1">
-                                <button
-                                  type="button"
-                                  onClick={cancelAddendumForm}
-                                  disabled={submittingAddendum}
-                                  className="px-3.5 py-1.5 text-xs font-bold text-slate-600 hover:text-slate-800 rounded-xl hover:bg-slate-200/60 transition cursor-pointer"
-                                >
-                                  Cancelar
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleSaveAddendum(rec.id)}
-                                  disabled={submittingAddendum || !addendumTexto.trim()}
-                                  className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow transition disabled:opacity-50 cursor-pointer"
-                                >
-                                  {submittingAddendum ? (
-                                    <>
-                                      <RefreshCw size={13} className="animate-spin" /> Salvando...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <CheckCircle2 size={13} /> Salvar Complemento
-                                    </>
-                                  )}
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* LISTA DE COMPLEMENTOS EXISTENTES EM ORDEM CRONOLÓGICA */}
-                          {rec.adendos && rec.adendos.length > 0 ? (
+                            {/* LISTA DE COMPLEMENTOS EXISTENTES EM ORDEM CRONOLÓGICA */}
                             <div className="space-y-2 pt-1">
                               {rec.adendos.map((ad, adIdx) => {
                                 const adVet = users.find(u => u.id === ad.veterinarioId);
@@ -1017,27 +797,30 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                                 );
                               })}
                             </div>
-                          ) : (
-                            activeAddendumRecordId !== rec.id && (
-                              <p className="text-[10px] text-slate-400 italic">
-                                Nenhuma nota complementar ou adendo registrado para este atendimento.
-                              </p>
-                            )
-                          )}
-                        </div>
+                          </div>
+                        )}
 
-                        {/* AÇÕES DE IMPRESSÃO DO PRONTUÁRIO */}
+                        {/* AÇÕES DE IMPRESSÃO E NOVO ATENDIMENTO */}
                         <div className="pt-3 border-t border-slate-100 flex flex-wrap justify-between items-center gap-2">
                           <span className="text-[10px] text-slate-400 font-medium">
                             Prontuário Registrado • ID: {rec.id.substring(0, 8).toUpperCase()}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => printClinicalRecord(rec, animal)}
-                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
-                          >
-                            <Printer size={14} className="text-teal-400" /> Imprimir Prontuário Clínico
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={`/animais/atendimento/${animal.id}`}
+                              className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                              title="Registrar novas informações clínicas abrindo um novo atendimento"
+                            >
+                              <Stethoscope size={14} /> Novo Atendimento Clínico
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() => printClinicalRecord(rec, animal)}
+                              className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                            >
+                              <Printer size={14} className="text-teal-400" /> Imprimir Prontuário
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}

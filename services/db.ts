@@ -1328,20 +1328,33 @@ export const db = {
   saveTutor: (tutorData: Partial<Tutor>): Tutor => {
     const tutores = db.getTutores();
     const id = tutorData.id || crypto.randomUUID();
+    const existingIndex = tutores.findIndex(t => t.id === id);
+    const existingTutor = existingIndex >= 0 ? tutores[existingIndex] : undefined;
+
+    // REGRA DE PROTEÇÃO ABSOLUTA DO CADÚNICO:
+    // Uma atualização dos demais dados do tutor deve preservar o documento existente quando nenhum novo documento tiver sido enviado.
+    let finalDocumento = tutorData.documentoCadUnico;
+    if (finalDocumento === undefined || finalDocumento === null || String(finalDocumento).trim() === '') {
+      finalDocumento = existingTutor?.documentoCadUnico || '';
+    }
+
+    const finalTemCadUnico = tutorData.temCadUnico !== undefined 
+      ? !!tutorData.temCadUnico 
+      : (existingTutor ? !!existingTutor.temCadUnico : false);
+
     const newTutor: Tutor = {
       id,
-      nomeCompleto: tutorData.nomeCompleto || 'Tutor Desconhecido',
-      cpf: tutorData.cpf || '',
-      telefone: tutorData.telefone || '',
-      endereco: tutorData.endereco || '',
-      temCadUnico: !!tutorData.temCadUnico,
-      documentoCadUnico: tutorData.documentoCadUnico || '',
-      dataCadastro: tutorData.dataCadastro || new Date().toISOString()
+      nomeCompleto: tutorData.nomeCompleto || existingTutor?.nomeCompleto || 'Tutor Desconhecido',
+      cpf: tutorData.cpf !== undefined ? tutorData.cpf : (existingTutor?.cpf || ''),
+      telefone: tutorData.telefone !== undefined ? tutorData.telefone : (existingTutor?.telefone || ''),
+      endereco: tutorData.endereco !== undefined ? tutorData.endereco : (existingTutor?.endereco || ''),
+      temCadUnico: finalTemCadUnico,
+      documentoCadUnico: finalDocumento,
+      dataCadastro: tutorData.dataCadastro || existingTutor?.dataCadastro || new Date().toISOString()
     };
 
-    const existingIndex = tutores.findIndex(t => t.id === id);
     if (existingIndex >= 0) {
-      tutores[existingIndex] = { ...tutores[existingIndex], ...newTutor };
+      tutores[existingIndex] = newTutor;
     } else {
       tutores.push(newTutor);
     }
@@ -1349,6 +1362,27 @@ export const db = {
     localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
     syncTutorToSupabase(newTutor).catch(err => console.warn('Supabase syncTutor:', err));
     return newTutor;
+  },
+
+  saveTutorAsync: async (tutorData: Partial<Tutor>): Promise<{ success: boolean; tutor: Tutor; error?: string }> => {
+    const saved = db.saveTutor(tutorData);
+    try {
+      const synced = await syncTutorToSupabase(saved);
+      if (!synced) {
+        return { 
+          success: false, 
+          tutor: saved, 
+          error: 'Os dados foram atualizados localmente, mas a sincronização oficial com o banco Supabase falhou.' 
+        };
+      }
+      return { success: true, tutor: saved };
+    } catch (err: any) {
+      return { 
+        success: false, 
+        tutor: saved, 
+        error: err?.message || 'Falha na conexão com o banco de dados.' 
+      };
+    }
   },
 
   syncKennelsWithConfigs: (configs: KennelConfig[]) => {

@@ -133,25 +133,9 @@ export function recoverFromQuotaExceeded(triggerKey?: string): void {
     } catch {}
   }
 
-  // 2. Limpa documentos pesados de tutores (como cadúnico em Base64 antigo)
-  try {
-    const rawTutores = localStorage.getItem('sisbem_tutores');
-    if (rawTutores) {
-      const parsed = JSON.parse(rawTutores);
-      let modified = false;
-      const cleaned = parsed.map((t: any) => {
-        if (t.documentoCadUnico && isBase64Photo(t.documentoCadUnico)) {
-          modified = true;
-          return { ...t, documentoCadUnico: '' };
-        }
-        return t;
-      });
-      if (modified) {
-        localStorage.setItem('sisbem_tutores', JSON.stringify(cleaned));
-        console.info('[SISBEM safeStorage] Documentos pesados em Base64 removidos de sisbem_tutores.');
-      }
-    }
-  } catch (e) {}
+  // 2. PROTEÇÃO ABSOLUTA DO CADÚNICO:
+  // Documentos de comprovação legal do CadÚnico NUNCA são removidos ou esvaziados da cota local.
+  // A liberação de espaço atua estritamente em caches efêmeros, fotos de animais e logs secundários.
 
   // 3. Reduz logs de status antigos e prontuários volumosos
   try {
@@ -165,9 +149,15 @@ export function recoverFromQuotaExceeded(triggerKey?: string): void {
     }
   } catch (e) {}
 
-  // 4. Remove chaves temporárias obsoletas
+  // 4. Remove chaves temporárias obsoletas e caches de consulta voláteis
   try {
-    const keysToRemove = ['sisbem_temp_draft', 'sisbem_cached_query', 'sisbem_large_payload'];
+    const keysToRemove = [
+      'sisbem_temp_draft', 
+      'sisbem_cached_query', 
+      'sisbem_large_payload',
+      'sisbem_sync_stats',
+      'sisbem_reports_cache'
+    ];
     for (const k of keysToRemove) {
       localStorage.removeItem(k);
     }
@@ -176,7 +166,8 @@ export function recoverFromQuotaExceeded(triggerKey?: string): void {
 
 /**
  * Sanitização proativa executada ao iniciar a aplicação:
- * Remove quaisquer fotos em Base64 que estejam atualmente ocupando a quota do navegador
+ * Remove quaisquer fotos em Base64 de animais que estejam atualmente ocupando a quota do navegador.
+ * REGRA ESTRITA: O campo documentoCadUnico é integralmente preservado e JAMAIS modificado.
  */
 export function sanitizeExistingLocalStorage(): { base64PurgedCount: number; currentAnimalsCount: number } {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -206,25 +197,7 @@ export function sanitizeExistingLocalStorage(): { base64PurgedCount: number; cur
       if (hasBase64 || parsed.length > MAX_LOCAL_ANIMALS) {
         const pruned = cleaned.slice(0, MAX_LOCAL_ANIMALS);
         safeSetItem('sisbem_animals', JSON.stringify(pruned));
-        console.info(`[SISBEM safeStorage] Saneamento proativo concluído: ${base64PurgedCount} foto(s) em Base64 removidas do cache local. Total mantido: ${pruned.length} animais.`);
-      }
-    }
-
-    // Saneia tutores com documentoCadUnico em Base64
-    const rawTutores = localStorage.getItem('sisbem_tutores');
-    if (rawTutores) {
-      const parsed = JSON.parse(rawTutores);
-      let tutorCleaned = false;
-      const cleanedTutores = parsed.map((t: any) => {
-        if (t.documentoCadUnico && isBase64Photo(t.documentoCadUnico)) {
-          tutorCleaned = true;
-          return { ...t, documentoCadUnico: '' };
-        }
-        return t;
-      });
-      if (tutorCleaned) {
-        safeSetItem('sisbem_tutores', JSON.stringify(cleanedTutores));
-        console.info('[SISBEM safeStorage] Documentos em Base64 removidos de sisbem_tutores no cache local.');
+        console.info(`[SISBEM safeStorage] Saneamento proativo concluído: ${base64PurgedCount} foto(s) de animais em Base64 removidas do cache local. Total mantido: ${pruned.length} animais.`);
       }
     }
   } catch (e) {

@@ -525,7 +525,13 @@ const AnimalForm: React.FC = () => {
           dataCadastro: tutor.dataCadastro || new Date().toISOString()
         };
 
-        await syncTutorToSupabase(tutorToSync);
+        const tutorSavedOk = await syncTutorToSupabase(tutorToSync);
+        if (tutor.temCadUnico && tutor.documentoCadUnico && !tutorSavedOk) {
+          throw new Error('Falha ao persistir o documento do CadÚnico no banco oficial. Verifique a conexão e tente novamente.');
+        }
+
+        // Atualiza no repositório local preservando o documento
+        db.saveTutor(tutorToSync);
       } else {
         if (!finalSolId && solicitante.cpf && solicitante.cpf.trim() && solicitanteType === 'PARTICULAR') {
           const cleanCpf = solicitante.cpf.replace(/\D/g, '');

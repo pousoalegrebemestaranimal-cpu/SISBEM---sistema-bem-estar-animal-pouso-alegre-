@@ -832,6 +832,10 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
           const localTutores = db.getTutores();
           const tutMap = new Map<string, Tutor>();
           localTutores.forEach(t => tutMap.set(t.id, t));
+          const existingTut = tutMap.get(tutorData.id);
+          if (!tutorData.documentoCadUnico && existingTut?.documentoCadUnico) {
+            tutorData.documentoCadUnico = existingTut.documentoCadUnico;
+          }
           tutMap.set(tutorData.id, tutorData);
           localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(tutMap.values())));
         }
@@ -919,6 +923,10 @@ export async function fetchTutorById(id: string): Promise<{ tutor: Tutor; animal
       const localTutores = db.getTutores();
       const map = new Map<string, Tutor>();
       localTutores.forEach(t => map.set(t.id, t));
+      const existingTut = map.get(tutor.id);
+      if (!tutor.documentoCadUnico && existingTut?.documentoCadUnico) {
+        tutor.documentoCadUnico = existingTut.documentoCadUnico;
+      }
       map.set(tutor.id, tutor);
       localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(map.values())));
     } catch (e) {}

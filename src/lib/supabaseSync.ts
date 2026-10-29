@@ -692,16 +692,68 @@ export async function deleteSolicitanteFromSupabase(id: string) {
   }
 }
 
-export async function syncTutorToSupabase(tutor: Tutor) {
+export async function syncTutorToSupabase(tutor: Tutor): Promise<boolean> {
   try {
-    const payload = mapTutorToSupabase(tutor);
+    let docToPersist = cleanString(tutor.documentoCadUnico);
+
+    // REGRA DE PROTEÇÃO ABSOLUTA DO CADÚNICO:
+    // Se a cópia local não possui documento anexado, busca o documento já existente no Supabase para não sobrescrevê-lo com NULL.
+    if (!docToPersist && tutor.id) {
+      const { data: existingRemote } = await supabase
+        .from('tutores')
+        .select('documento_cad_unico, tem_cad_unico')
+        .eq('id', tutor.id)
+        .maybeSingle();
+
+      if (existingRemote?.documento_cad_unico) {
+        docToPersist = existingRemote.documento_cad_unico;
+        tutor.documentoCadUnico = existingRemote.documento_cad_unico;
+        // Atualiza o cache local para mantê-lo íntegro
+        try {
+          const localList: Tutor[] = JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
+          const idx = localList.findIndex(t => t.id === tutor.id);
+          if (idx >= 0) {
+            localList[idx].documentoCadUnico = existingRemote.documento_cad_unico;
+            localStorage.setItem('sisbem_tutores', JSON.stringify(localList));
+          }
+        } catch {}
+      }
+    }
+
+    const payload = {
+      id: tutor.id,
+      nome_completo: tutor.nomeCompleto || 'Não informado',
+      cpf: tutor.cpf || 'Não informado',
+      telefone: tutor.telefone || 'Não informado',
+      endereco: cleanString(tutor.endereco),
+      tem_cad_unico: !!tutor.temCadUnico,
+      documento_cad_unico: docToPersist,
+      data_cadastro: cleanString(tutor.dataCadastro) || new Date().toISOString(),
+    };
+
     const { error } = await supabase.from('tutores').upsert([payload]);
     if (error) {
-      console.warn('Supabase syncTutor error:', error.message);
+      console.error('Supabase syncTutor error:', error.message);
       return false;
     }
+
+    // Confirmação estrita de persistência quando documento foi enviado ou preservado
+    if (docToPersist) {
+      const { data: verified, error: verifyErr } = await supabase
+        .from('tutores')
+        .select('documento_cad_unico')
+        .eq('id', tutor.id)
+        .maybeSingle();
+
+      if (verifyErr || !verified?.documento_cad_unico) {
+        console.error('Falha ao confirmar persistência do CadÚnico no Supabase:', verifyErr?.message);
+        return false;
+      }
+    }
+
     return true;
   } catch (err) {
+    console.error('Supabase syncTutor exception:', err);
     return false;
   }
 }
@@ -1323,10 +1375,40 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
       else counts.solicitantes = localSol.length;
     }
 
-    // 3. Tutores
+    // 3. Tutores - Preservação estrita de documentos do CadÚnico
     const localTutores: Tutor[] = dbInstance.getTutores() || [];
     if (localTutores.length > 0) {
-      const payload = localTutores.map(mapTutorToSupabase);
+      // Consulta documentos existentes no Supabase para nunca sobrescrever com NULL
+      let remoteDocMap = new Map<string, string>();
+      try {
+        const { data: remoteDocs } = await supabase
+          .from('tutores')
+          .select('id, documento_cad_unico')
+          .not('documento_cad_unico', 'is', null);
+        (remoteDocs || []).forEach((r: any) => {
+          if (r.id && r.documento_cad_unico) {
+            remoteDocMap.set(r.id, r.documento_cad_unico);
+          }
+        });
+      } catch (e) {
+        console.warn('Aviso ao consultar documentos existentes no Supabase:', e);
+      }
+
+      const payload = localTutores.map(t => {
+        const remoteDoc = remoteDocMap.get(t.id);
+        const docToPersist = cleanString(t.documentoCadUnico) || remoteDoc || null;
+        return {
+          id: t.id,
+          nome_completo: t.nomeCompleto || 'Não informado',
+          cpf: t.cpf || 'Não informado',
+          telefone: t.telefone || 'Não informado',
+          endereco: cleanString(t.endereco),
+          tem_cad_unico: !!t.temCadUnico,
+          documento_cad_unico: docToPersist,
+          data_cadastro: cleanString(t.dataCadastro) || new Date().toISOString(),
+        };
+      });
+
       const { error } = await supabase.from('tutores').upsert(payload);
       if (error) errors.push(`Tutores: ${error.message}`);
       else counts.tutores = localTutores.length;
@@ -1561,7 +1643,15 @@ export async function pullFromSupabaseToLocal(
             : JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
           const map = new Map<string, Tutor>();
           localTut.forEach((t: Tutor) => map.set(t.id, t));
-          remTutores.forEach((r: any) => map.set(r.id, mapSupabaseToTutor(r)));
+          remTutores.forEach((r: any) => {
+            const mapped = mapSupabaseToTutor(r);
+            const existing = map.get(r.id);
+            // REGRA DE PROTEÇÃO ABSOLUTA: se o remoto trouxer documento vazio mas o local tiver um documento válido, preserva o local
+            if (!mapped.documentoCadUnico && existing?.documentoCadUnico) {
+              mapped.documentoCadUnico = existing.documentoCadUnico;
+            }
+            map.set(r.id, mapped);
+          });
           const merged = Array.from(map.values());
           localStorage.setItem('sisbem_tutores', JSON.stringify(merged));
           syncedCounts.tutores = merged.length;

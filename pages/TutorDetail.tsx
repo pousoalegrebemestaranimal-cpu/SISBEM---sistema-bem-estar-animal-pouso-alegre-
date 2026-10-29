@@ -1,20 +1,28 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { db } from '../services/db';
 import { Tutor, AnimalJoined } from '../types';
 import { fetchTutorById } from '../src/lib/supabaseQueries';
-import { ArrowLeft, IdCard, Phone, UserCircle, Calendar, ClipboardCheck, Dog, MapPin, Eye, Home, HeartPulse, User, FileText, ExternalLink, ShieldCheck, Loader2 } from 'lucide-react';
+import { 
+  ArrowLeft, IdCard, Phone, UserCircle, Calendar, ClipboardCheck, 
+  Dog, MapPin, Eye, Home, HeartPulse, User, FileText, ExternalLink, 
+  ShieldCheck, Loader2, Download, Upload, X, CheckCircle2, AlertCircle 
+} from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
 const TutorDetail: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [tutor, setTutor] = useState<Tutor | null>(() => (id ? db.getTutores().find(t => t.id === id) || null : null));
   const [animals, setAnimals] = useState<AnimalJoined[]>(() => (id ? db.getAnimalsByTutor(id) : []));
   const [isLoading, setIsLoading] = useState(!tutor);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [docFeedback, setDocFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -33,17 +41,75 @@ const TutorDetail: React.FC = () => {
       });
   }, [id]);
 
-  const handleOpenDoc = (base64: string) => {
-    const win = window.open();
-    if (win) {
-      win.document.write(
-        `<html><head><title>Comprovante CadÚnico - ${tutor?.nomeCompleto}</title><style>body{margin:0;display:flex;align-items:center;justify-content:center;background:#1e293b;}</style></head><body>` +
-        (base64.startsWith('data:application/pdf') 
-          ? `<embed width="100%" height="100%" src="${base64}" type="application/pdf">`
-          : `<img src="${base64}" style="max-width:100%; max-height:100%; object-fit:contain;">`) +
-        `</body></html>`
-      );
-      win.document.close();
+  const handleDownloadDoc = () => {
+    if (!tutor?.documentoCadUnico) return;
+    try {
+      const base64 = tutor.documentoCadUnico;
+      const isPdf = base64.includes('application/pdf');
+      const ext = isPdf ? 'pdf' : 'png';
+      const safeName = (tutor.nomeCompleto || 'Tutor').replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `CadUnico_${safeName}.${ext}`;
+
+      const link = document.createElement('a');
+      link.href = base64;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (e) {
+      console.error('Erro ao baixar documento:', e);
+    }
+  };
+
+  const handleUploadCadUnico = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !tutor) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setDocFeedback({ type: 'error', message: 'Documento muito grande. Escolha um arquivo de até 5MB.' });
+      return;
+    }
+
+    try {
+      setUploadingDoc(true);
+      setDocFeedback(null);
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64Result = reader.result as string;
+        try {
+          const res = await db.saveTutorAsync({
+            ...tutor,
+            temCadUnico: true,
+            documentoCadUnico: base64Result
+          });
+
+          if (!res.success) {
+            setDocFeedback({ 
+              type: 'error', 
+              message: res.error || 'Falha ao gravar comprovante no banco oficial. Tente novamente.' 
+            });
+            return;
+          }
+
+          setTutor(res.tutor);
+          setDocFeedback({ 
+            type: 'success', 
+            message: 'Comprovante do CadÚnico anexado e persistido com sucesso no banco oficial!' 
+          });
+        } catch (err: any) {
+          setDocFeedback({ 
+            type: 'error', 
+            message: err?.message || 'Erro inesperado ao salvar documento.' 
+          });
+        } finally {
+          setUploadingDoc(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      setUploadingDoc(false);
+      setDocFeedback({ type: 'error', message: err?.message || 'Erro ao processar arquivo.' });
     }
   };
 
@@ -58,6 +124,9 @@ const TutorDetail: React.FC = () => {
   }
 
   if (!tutor) return <div className="p-8 text-center text-slate-500 font-bold">Tutor não encontrado no sistema.</div>;
+
+  const hasDoc = !!tutor.documentoCadUnico && tutor.documentoCadUnico.trim().length > 0;
+  const isPdf = hasDoc && tutor.documentoCadUnico!.startsWith('data:application/pdf');
 
   return (
     <div className="space-y-8 animate-in fade-in">
@@ -108,8 +177,8 @@ const TutorDetail: React.FC = () => {
             </div>
 
             {/* CADUNICO SECTION */}
-            <div className="pt-6 border-t border-slate-100">
-               <div className={`p-4 rounded-2xl border-2 transition-all ${tutor.temCadUnico ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-100 opacity-60'}`}>
+            <div className="pt-6 border-t border-slate-100 space-y-3">
+               <div className={`p-4 rounded-2xl border-2 transition-all ${tutor.temCadUnico ? 'bg-indigo-50 border-indigo-200' : 'bg-slate-50 border-slate-100 opacity-70'}`}>
                   <div className="flex items-center gap-3 mb-3">
                     <div className={`p-2 rounded-xl ${tutor.temCadUnico ? 'bg-indigo-600 text-white' : 'bg-slate-300 text-white'}`}>
                       <ShieldCheck size={18} />
@@ -119,14 +188,66 @@ const TutorDetail: React.FC = () => {
                       <p className={`text-xs font-black uppercase ${tutor.temCadUnico ? 'text-indigo-700' : 'text-slate-500'}`}>CadÚnico: {tutor.temCadUnico ? 'Sim' : 'Não'}</p>
                     </div>
                   </div>
-                  {tutor.temCadUnico && tutor.documentoCadUnico && (
-                    <button 
-                      onClick={() => handleOpenDoc(tutor.documentoCadUnico!)}
-                      className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-indigo-200 text-indigo-600 text-[10px] font-black uppercase rounded-xl hover:bg-indigo-600 hover:text-white transition-all shadow-sm"
-                    >
-                      <FileText size={14} /> Ver Comprovante
-                    </button>
+
+                  {docFeedback && (
+                    <div className={`p-2.5 rounded-xl text-xs mb-3 flex items-start gap-2 ${
+                      docFeedback.type === 'success' 
+                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' 
+                        : 'bg-rose-50 text-rose-800 border border-rose-200'
+                    }`}>
+                      {docFeedback.type === 'success' ? <CheckCircle2 size={14} className="shrink-0 mt-0.5" /> : <AlertCircle size={14} className="shrink-0 mt-0.5" />}
+                      <span className="text-[11px] leading-tight">{docFeedback.message}</span>
+                    </div>
                   )}
+
+                  {hasDoc ? (
+                    <div className="space-y-2">
+                      <button 
+                        type="button"
+                        onClick={() => setIsPreviewOpen(true)}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-sm cursor-pointer"
+                      >
+                        <Eye size={14} /> Visualizar Comprovante
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={handleDownloadDoc}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 text-[10px] font-black uppercase rounded-xl transition-all shadow-2xs cursor-pointer"
+                      >
+                        <Download size={14} /> Baixar Arquivo
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadingDoc}
+                        className="w-full text-center text-[10px] font-bold text-slate-500 hover:text-indigo-600 pt-1 cursor-pointer"
+                      >
+                        {uploadingDoc ? 'Enviando...' : 'Atualizar / Substituir Comprovante'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-[10px] text-slate-500 italic text-center">
+                        {tutor.temCadUnico ? 'Nenhum arquivo digital anexado à ficha deste tutor.' : 'Tutor não possui CadÚnico registrado.'}
+                      </p>
+                      <button 
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploadingDoc}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-300 text-[10px] font-black uppercase rounded-xl transition-all shadow-2xs cursor-pointer"
+                      >
+                        <Upload size={14} /> {uploadingDoc ? 'Gravando...' : 'Anexar Comprovante'}
+                      </button>
+                    </div>
+                  )}
+
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleUploadCadUnico} 
+                    accept="image/*,application/pdf" 
+                    className="hidden" 
+                  />
                </div>
             </div>
           </div>
@@ -214,6 +335,72 @@ const TutorDetail: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* MODAL IN-APP DE VISUALIZAÇÃO SEGURA DO CADÚNICO */}
+      {isPreviewOpen && hasDoc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+            <div className="p-4 sm:p-5 bg-indigo-900 text-white flex items-center justify-between border-b border-indigo-800">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-indigo-700 rounded-xl">
+                  <ShieldCheck size={20} className="text-indigo-200" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm uppercase tracking-wide">Comprovante CadÚnico</h3>
+                  <p className="text-xs text-indigo-200 font-medium">{tutor.nomeCompleto} • CPF: {tutor.cpf}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadDoc}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 active:bg-indigo-800 text-white rounded-xl text-xs font-bold transition shadow-xs cursor-pointer"
+                  title="Baixar arquivo original"
+                >
+                  <Download size={14} /> <span className="hidden sm:inline">Baixar Arquivo</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsPreviewOpen(false)}
+                  className="p-2 hover:bg-indigo-800 rounded-xl transition text-indigo-200 hover:text-white cursor-pointer"
+                  title="Fechar"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-4 flex-1 overflow-auto bg-slate-100 flex items-center justify-center min-h-[50vh]">
+              {isPdf ? (
+                <iframe 
+                  src={tutor.documentoCadUnico} 
+                  title={`Comprovante CadÚnico - ${tutor.nomeCompleto}`}
+                  className="w-full h-[72vh] rounded-2xl border border-slate-200 bg-white shadow-inner"
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center p-2 max-w-full">
+                  <img 
+                    src={tutor.documentoCadUnico} 
+                    alt={`Comprovante CadÚnico - ${tutor.nomeCompleto}`} 
+                    className="max-h-[72vh] max-w-full object-contain rounded-2xl shadow-md border border-slate-200 bg-white"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 bg-white border-t border-slate-200 flex justify-between items-center text-[11px] text-slate-500 font-medium">
+              <span>Documento comprobatório socioeconômico oficial do SISBEM</span>
+              <button
+                type="button"
+                onClick={() => setIsPreviewOpen(false)}
+                className="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition cursor-pointer"
+              >
+                Fechar Visualização
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
