@@ -834,7 +834,7 @@ app.get('/api/health', (req, res) => {
     requireAuth,
     requireRoles(['VETERINARIO', 'ADMIN']),
     async (req: AuthenticatedRequest, res) => {
-      const { animalId } = req.body;
+      const { animalId, queueEntryTime } = req.body;
       if (!animalId) {
         return res.status(400).json({
           success: false,
@@ -861,10 +861,32 @@ app.get('/api/health', (req, res) => {
           "UPDATE public.animals SET condicao = 'Aguardando Atendimento', em_atendimento_vet_id = NULL, em_atendimento_inicio = NULL WHERE id = $1;",
           [animalId]
         );
+
+        const entryTime = queueEntryTime || new Date().toISOString();
+        const prevCond = checkRes.rows[0]?.condicao || 'Atendido';
+
+        // Registra histórico no Cloud SQL status_logs
+        try {
+          await pool.query(
+            "INSERT INTO public.status_logs (id, animal_id, status_anterior, status_novo, data_alteracao, usuario_id) VALUES ($1, $2, $3, $4, $5, $6);",
+            [crypto.randomUUID(), animalId, prevCond, 'Aguardando Atendimento', entryTime, req.user?.id || '1']
+          );
+        } catch (logErr) {
+          console.warn('[attendance/queue] Aviso Cloud SQL status_logs:', logErr);
+        }
+
         try {
           await supabase.from('animals').update({
             condicao: 'Aguardando Atendimento',
           }).eq('id', animalId);
+          await supabase.from('status_logs').insert({
+            id: crypto.randomUUID(),
+            animal_id: animalId,
+            status_anterior: prevCond,
+            status_novo: 'Aguardando Atendimento',
+            data_alteracao: entryTime,
+            usuario_id: req.user?.id || '1',
+          });
         } catch (sbErr) {
           console.warn('[attendance/queue] Aviso Supabase:', sbErr);
         }
@@ -931,12 +953,19 @@ app.get('/api/health', (req, res) => {
         if (result?.success && payload.record?.animalId) {
           try {
             const finalCondicao = payload.record.statusResultante || result.status_resultante || 'Em Tratamento';
-            await supabase.from('animals').update({
+            const animalUpdate: any = {
               condicao: finalCondicao,
               necessita_internacao: payload.record.necessitaInternacao ?? false,
               tipo_acomodacao_sugerida: payload.record.recommendedKennelType || null,
               justificativa_internacao: payload.record.accommodationJustification || null,
-            }).eq('id', payload.record.animalId);
+            };
+            if (payload.record.peso && String(payload.record.peso).trim() !== '') {
+              const numPeso = parseFloat(String(payload.record.peso).replace(',', '.'));
+              if (!isNaN(numPeso) && numPeso > 0) {
+                animalUpdate.peso = numPeso;
+              }
+            }
+            await supabase.from('animals').update(animalUpdate).eq('id', payload.record.animalId);
             const recordToSync = {
               ...payload.record,
               receitas: payload.prescriptions || payload.record.receitas || [],

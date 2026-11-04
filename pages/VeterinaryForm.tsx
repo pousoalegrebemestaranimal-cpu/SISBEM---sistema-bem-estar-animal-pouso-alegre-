@@ -212,13 +212,13 @@ const VeterinaryForm: React.FC = () => {
         }
 
         let initialData: any = {
-          peso: targetAnimal.peso !== undefined && targetAnimal.peso !== null ? targetAnimal.peso.toString() : '0',
+          peso: '', // REGRA OBRIGATÓRIA: o campo de peso deve iniciar VAZIO ('') para nova medição
           animalId: id,
           statusResultante: targetAnimal.temTutor ? AnimalCondicao.ATENDIDO : AnimalCondicao.EM_TRATAMENTO,
           dataObito: new Date().toISOString().split('T')[0]
         };
 
-        // Recuperação de Rascunho: impede perda de dados caso o veterinário saia da página acidentalmente
+        // Recuperação de Rascunho da sessão atual (se houver rascunho em andamento)
         try {
           const savedDraft = sessionStorage.getItem(`sisbem_attendance_draft_${id}`);
           if (savedDraft) {
@@ -232,15 +232,19 @@ const VeterinaryForm: React.FC = () => {
         setRecord(prev => ({
           ...prev,
           ...initialData,
-          peso: prev.peso || initialData.peso || (targetAnimal?.peso?.toString() ?? '0'),
+          peso: initialData.peso ? String(initialData.peso) : '',
           animalId: id,
         }));
 
         if (targetAnimal.temTutor) {
-          if (targetAnimal.necessitaInternacao || targetAnimal.condicao === AnimalCondicao.EM_TRATAMENTO) {
-            setNecessitaInternacaoExterno(true);
-            if (targetAnimal.tipoAcomodacaoSugerida) setTipoAcomodacaoExterno(targetAnimal.tipoAcomodacaoSugerida);
-            if (targetAnimal.justificativaInternacao) setJustificativaInternacaoExterno(targetAnimal.justificativaInternacao);
+          if (initialData.necessitaInternacao !== undefined) {
+            setNecessitaInternacaoExterno(!!initialData.necessitaInternacao);
+            if (initialData.recommendedKennelType) setTipoAcomodacaoExterno(initialData.recommendedKennelType);
+            if (initialData.accommodationJustification) setJustificativaInternacaoExterno(initialData.accommodationJustification);
+          } else {
+            setNecessitaInternacaoExterno(false);
+            setTipoAcomodacaoExterno('');
+            setJustificativaInternacaoExterno('');
           }
         }
       }

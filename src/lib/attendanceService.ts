@@ -215,6 +215,17 @@ export async function startClinicalAttendance(
   const localAnimals = db.getAnimals();
   const currentAnimal = localAnimals.find(a => a.id === animalId);
 
+  if (currentAnimal?.condicao === AnimalCondicao.EM_ATENDIMENTO && currentAnimal.emAtendimentoVetId && currentAnimal.emAtendimentoVetId !== vetId) {
+    const users = db.getUsers();
+    const otherVet = users.find(u => u.id === currentAnimal.emAtendimentoVetId);
+    return {
+      success: false,
+      code: 'ALREADY_IN_ATTENDANCE',
+      vetName: otherVet?.name || 'outro profissional',
+      message: `Este animal já está em atendimento clínico pelo veterinário ${otherVet?.name || 'outro profissional'}.`,
+    };
+  }
+
   let serverResponse: any = null;
 
   try {
@@ -486,12 +497,19 @@ export async function finishClinicalAttendance(
         const { syncRecordToSupabase } = await import('./supabaseSync');
         const resStatus = fullRecord.statusResultante || AnimalCondicao.EM_TRATAMENTO;
         await syncRecordToSupabase(fullRecord as ClinicalRecord);
-        await supabase.from('animals').update({
+        const animalUpdatePayload: any = {
           condicao: resStatus,
           necessita_internacao: fullRecord.necessitaInternacao ?? false,
           tipo_acomodacao_sugerida: fullRecord.recommendedKennelType || null,
           justificativa_internacao: fullRecord.accommodationJustification || null,
-        }).eq('id', record.animalId);
+        };
+        if (fullRecord.peso && String(fullRecord.peso).trim() !== '') {
+          const numP = parseFloat(String(fullRecord.peso).replace(',', '.'));
+          if (!isNaN(numP) && numP > 0) {
+            animalUpdatePayload.peso = numP;
+          }
+        }
+        await supabase.from('animals').update(animalUpdatePayload).eq('id', record.animalId);
         serverResponse = {
           success: true,
           status_resultante: resStatus,
@@ -514,12 +532,19 @@ export async function finishClinicalAttendance(
       const { syncRecordToSupabase } = await import('./supabaseSync');
       const resStatus = fullRecord.statusResultante || AnimalCondicao.EM_TRATAMENTO;
       await syncRecordToSupabase(fullRecord as ClinicalRecord);
-      await supabase.from('animals').update({
+      const animalUpdatePayload: any = {
         condicao: resStatus,
         necessita_internacao: fullRecord.necessitaInternacao ?? false,
         tipo_acomodacao_sugerida: fullRecord.recommendedKennelType || null,
         justificativa_internacao: fullRecord.accommodationJustification || null,
-      }).eq('id', record.animalId);
+      };
+      if (fullRecord.peso && String(fullRecord.peso).trim() !== '') {
+        const numP = parseFloat(String(fullRecord.peso).replace(',', '.'));
+        if (!isNaN(numP) && numP > 0) {
+          animalUpdatePayload.peso = numP;
+        }
+      }
+      await supabase.from('animals').update(animalUpdatePayload).eq('id', record.animalId);
       serverResponse = {
         success: true,
         status_resultante: resStatus,
@@ -544,6 +569,12 @@ export async function finishClinicalAttendance(
       localAnimals[aIdx].condicao = serverResponse.status_resultante || fullRecord.statusResultante || AnimalCondicao.EM_TRATAMENTO;
       localAnimals[aIdx].emAtendimentoVetId = undefined;
       localAnimals[aIdx].emAtendimentoInicio = undefined;
+      if (fullRecord.peso && String(fullRecord.peso).trim() !== '') {
+        const numP = parseFloat(String(fullRecord.peso).replace(',', '.'));
+        if (!isNaN(numP) && numP > 0) {
+          localAnimals[aIdx].peso = numP;
+        }
+      }
       safeSetLocalAnimals(localAnimals);
     }
 
@@ -566,7 +597,7 @@ export async function finishClinicalAttendance(
 /**
  * Envia o animal para a Fila Veterinária (estado de aguardando atendimento).
  * NÃO inicia o atendimento nem cria novo prontuário clínico.
- * O atendimento somente começará quando um veterinário assumir pela Fila Veterinária.
+ * Inicia um novo ciclo de espera na fila com timestamp atualizado (tempo de espera inicia em 0).
  */
 export async function sendAnimalToVetWaitlist(
   animalId: string
@@ -579,6 +610,8 @@ export async function sendAnimalToVetWaitlist(
   if (!currentUser || (currentUser.role !== 'VETERINARIO' && currentUser.role !== 'ADMIN')) {
     return { success: false, message: 'Apenas veterinários e administradores podem enviar animais para a fila.' };
   }
+
+  const queueEntryTime = new Date().toISOString();
 
   // 1. Verificação de concorrência e atualização oficial no Supabase (Fonte da verdade para Realtime e fila compartilhada)
   try {
@@ -609,12 +642,33 @@ export async function sendAnimalToVetWaitlist(
       console.error('[sendAnimalToVetWaitlist] Erro no Supabase:', error);
       return { success: false, message: error.message || 'Erro ao atualizar condição no Supabase.' };
     }
+
+    // Registra a entrada na fila no log oficial com o novo horário deste ciclo
+    try {
+      await supabase.from('status_logs').insert({
+        id: crypto.randomUUID(),
+        animal_id: animalId,
+        status_anterior: currentAnimal?.condicao || 'Atendido',
+        status_novo: AnimalCondicao.AGUARDANDO_ATENDIMENTO,
+        data_alteracao: queueEntryTime,
+        usuario_id: currentUser.id || '1',
+      });
+    } catch (logErr) {
+      console.warn('[sendAnimalToVetWaitlist] Aviso ao registrar status_log no Supabase:', logErr);
+    }
   } catch (err: any) {
     console.error('[sendAnimalToVetWaitlist] Falha de comunicação com Supabase:', err);
     return { success: false, message: err.message || 'Falha de comunicação com o banco de dados oficial.' };
   }
 
-  // 2. Sincronização secundária com o backend Express / Cloud SQL (se ativo)
+  // 2. Persiste o timestamp da fila no cache local para resposta imediata
+  try {
+    const queueMap = JSON.parse(localStorage.getItem('sisbem_queue_timestamps') || '{}');
+    queueMap[animalId] = queueEntryTime;
+    localStorage.setItem('sisbem_queue_timestamps', JSON.stringify(queueMap));
+  } catch (_) {}
+
+  // 3. Sincronização secundária com o backend Express / Cloud SQL (se ativo)
   try {
     const token = await getAuthToken();
     if (token) {
@@ -624,28 +678,43 @@ export async function sendAnimalToVetWaitlist(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ animalId }),
+        body: JSON.stringify({ animalId, queueEntryTime }),
       }).catch(() => null);
     }
   } catch (err) {
     console.warn('[sendAnimalToVetWaitlist] Aviso ao sincronizar com backend:', err);
   }
 
-  // 3. Atualização do cache local apenas após sucesso do Supabase
+  // 4. Atualização do cache local apenas após sucesso do Supabase
   try {
     const localAnimals = db.getAnimals();
     const idx = localAnimals.findIndex(a => a.id === animalId);
     if (idx !== -1) {
       localAnimals[idx].condicao = AnimalCondicao.AGUARDANDO_ATENDIMENTO;
+      localAnimals[idx].dataEntradaFila = queueEntryTime;
       localAnimals[idx].emAtendimentoVetId = undefined;
       localAnimals[idx].emAtendimentoInicio = undefined;
       safeSetLocalAnimals(localAnimals);
     }
 
+    // Também registra no status_logs local
+    try {
+      const logs = db.getStatusLogs();
+      logs.push({
+        id: crypto.randomUUID(),
+        animalId,
+        statusAnterior: (localAnimals[idx]?.condicao as any) || 'Atendido',
+        statusNovo: AnimalCondicao.AGUARDANDO_ATENDIMENTO,
+        dataAlteracao: queueEntryTime,
+        usuarioId: currentUser.id
+      });
+      localStorage.setItem('sisbem_status_logs', JSON.stringify(logs));
+    } catch (_) {}
+
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('sisbem-animals-changed', {
-          detail: { action: 'sent_to_waitlist', animalId },
+          detail: { action: 'sent_to_waitlist', animalId, queueEntryTime },
         })
       );
     }

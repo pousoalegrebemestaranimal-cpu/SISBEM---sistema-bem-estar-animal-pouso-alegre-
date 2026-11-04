@@ -262,6 +262,7 @@ export interface Animal {
   dataInternacao?: string;
   emAtendimentoVetId?: string;
   emAtendimentoInicio?: string;
+  dataEntradaFila?: string;
 }
 
 export interface AnimalJoined extends Animal {

@@ -17,6 +17,7 @@ interface WaitlistAnimal {
   especie: Especie;
   condicao: AnimalCondicao;
   dataCadastro: string;
+  dataEntradaFila?: string;
   temTutor: boolean;
   localResgate: string;
   castrado?: boolean;
@@ -61,8 +62,7 @@ const VetWaitlist: React.FC = () => {
       const { data, error } = await supabase
         .from('animals')
         .select('id, nome, especie, condicao, data_cadastro, tem_tutor, local_resgate, castrado, raca, cor_pelagem, tutor_id, tutores(id, nome_completo, cpf, telefone, tem_cad_unico)')
-        .in('condicao', ['Acolhido', 'Aguardando Atendimento', 'Em Atendimento'])
-        .order('data_cadastro', { ascending: true });
+        .in('condicao', ['Acolhido', 'Aguardando Atendimento', 'Em Atendimento']);
 
       if (error) {
         console.error('[VetWaitlist] Erro ao buscar fila do Supabase:', error);
@@ -74,9 +74,43 @@ const VetWaitlist: React.FC = () => {
             a.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO ||
             a.condicao === AnimalCondicao.EM_ATENDIMENTO
           )
-          .sort((a, b) => new Date(a.dataCadastro).getTime() - new Date(b.dataCadastro).getTime());
+          .sort((a, b) => new Date(a.dataEntradaFila || a.dataCadastro).getTime() - new Date(b.dataEntradaFila || b.dataCadastro).getTime());
         setWaitlist(localAnimals as any);
         return;
+      }
+
+      // Busca timestamps de entrada na fila do ciclo atual
+      const animalIds = (data || []).map((row: any) => row.id);
+      const queueTimestamps = new Map<string, string>();
+
+      // 1. Carrega timestamps do cache local imediato
+      try {
+        const stored = JSON.parse(localStorage.getItem('sisbem_queue_timestamps') || '{}');
+        Object.entries(stored).forEach(([aid, val]) => {
+          if (val && typeof val === 'string') queueTimestamps.set(aid, val);
+        });
+      } catch (_) {}
+
+      // 2. Consulta status_logs no Supabase para animais na fila
+      if (animalIds.length > 0) {
+        try {
+          const { data: logsData } = await supabase
+            .from('status_logs')
+            .select('animal_id, data_alteracao, created_at')
+            .in('animal_id', animalIds)
+            .in('status_novo', ['Aguardando Atendimento', 'Acolhido'])
+            .order('data_alteracao', { ascending: false });
+
+          if (logsData && logsData.length > 0) {
+            logsData.forEach((log: any) => {
+              if (log.animal_id && !queueTimestamps.has(log.animal_id)) {
+                queueTimestamps.set(log.animal_id, log.data_alteracao || log.created_at);
+              }
+            });
+          }
+        } catch (logErr) {
+          console.warn('[VetWaitlist] Aviso ao carregar logs de fila:', logErr);
+        }
       }
 
       const activeDraftsMap = new Map<string, any>();
@@ -98,12 +132,17 @@ const VetWaitlist: React.FC = () => {
         const localMatch = localAnimals.find(a => a.id === row.id);
         const draftInfo = activeDraftsMap.get(row.id);
 
+        // NOVO: Timestamp de entrada na fila exclusivo do ciclo atual.
+        // Fallback seguro: se o animal não possui timestamp específico de fila (ex: cadastros antigos), usa data_cadastro
+        const dataEntradaFila = queueTimestamps.get(row.id) || localMatch?.dataEntradaFila || row.data_cadastro;
+
         return {
           id: row.id,
           nome: row.nome,
           especie: row.especie as Especie,
           condicao: row.condicao as AnimalCondicao,
           dataCadastro: row.data_cadastro,
+          dataEntradaFila: dataEntradaFila,
           temTutor: !!row.tem_tutor,
           localResgate: row.local_resgate || 'Local não informado',
           castrado: row.castrado !== undefined ? !!row.castrado : !!localMatch?.castrado,
@@ -122,6 +161,13 @@ const VetWaitlist: React.FC = () => {
             version: draftInfo.version
           } : undefined,
         };
+      });
+
+      // Ordenação estrita FIFO pelo horário de entrada na fila (quem chegou primeiro neste ciclo é atendido primeiro)
+      mapped.sort((a, b) => {
+        const timeA = new Date(a.dataEntradaFila || a.dataCadastro).getTime();
+        const timeB = new Date(b.dataEntradaFila || b.dataCadastro).getTime();
+        return timeA - timeB;
       });
 
       setWaitlist(mapped);
@@ -392,7 +438,7 @@ const VetWaitlist: React.FC = () => {
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
                       <span className="flex items-center gap-1"><MapPin size={12} /> {animal.temTutor ? 'Endereço:' : 'Local:'} {animal.localResgate}</span>
                       <span className="flex items-center gap-1 font-bold text-teal-600">
-                        <Clock size={12} /> Esperando há {formatDistanceToNow(new Date(animal.dataCadastro), { locale: ptBR })}
+                        <Clock size={12} /> Esperando há {formatDistanceToNow(new Date(animal.dataEntradaFila || animal.dataCadastro), { locale: ptBR })}
                       </span>
                     </div>
                   </div>
@@ -400,8 +446,8 @@ const VetWaitlist: React.FC = () => {
                 
                 <div className="flex items-center gap-4 shrink-0 w-full md:w-auto border-t md:border-t-0 pt-4 md:pt-0">
                   <div className="text-right hidden md:block">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Chegada</p>
-                    <p className="text-sm font-black text-slate-700">{new Date(animal.dataCadastro).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Chegada na Fila</p>
+                    <p className="text-sm font-black text-slate-700">{new Date(animal.dataEntradaFila || animal.dataCadastro).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                   </div>
                   {isOtherVet ? (
                     <button 

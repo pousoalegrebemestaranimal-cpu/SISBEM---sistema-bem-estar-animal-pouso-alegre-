@@ -2109,6 +2109,16 @@ export const db = {
       }, null, vetId);
     }
 
+    if (record.peso && String(record.peso).trim() !== '') {
+      const numPeso = parseFloat(String(record.peso).replace(',', '.'));
+      if (!isNaN(numPeso) && numPeso > 0) {
+        db.saveAnimal({
+          id: animalId,
+          peso: numPeso
+        }, null, vetId);
+      }
+    }
+
     if (newRecord.receitas && newRecord.receitas.length > 0) {
       newRecord.receitas = newRecord.receitas.map(r => ({
         ...r,
