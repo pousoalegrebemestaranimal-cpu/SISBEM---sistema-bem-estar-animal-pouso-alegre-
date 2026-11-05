@@ -175,6 +175,11 @@ export interface ClinicalRecord {
   vermifugoData?: string;
   microchipAplicado?: boolean;
   numeroMicrochipAplicado?: string;
+  necessitaCurativo?: boolean;
+  curativoLocal?: string;
+  curativoDescricao?: string;
+  curativoFrequencia?: string;
+  curativoOrientacoes?: string;
   adendos?: ClinicalRecordAddendum[];
 }
 

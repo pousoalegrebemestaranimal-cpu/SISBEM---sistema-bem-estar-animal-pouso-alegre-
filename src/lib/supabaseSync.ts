@@ -421,6 +421,19 @@ export function mapRecordToSupabase(
   const vetId = cleanString(r.veterinarioId) || '1';
   const validVetId = (existingUserIds && existingUserIds.has(vetId)) ? vetId : (existingUserIds?.values().next().value || '1');
 
+  let obsGerais = cleanString(r.observacoesGerais) || '';
+  if (r.necessitaCurativo) {
+    const curativoTag = `[CURATIVO:SIM]\nLocal: ${r.curativoLocal || ''}\nDescrição: ${r.curativoDescricao || ''}\nFrequência: ${r.curativoFrequencia || ''}\nOrientações: ${r.curativoOrientacoes || ''}\n[/CURATIVO]`;
+    if (!obsGerais.includes('[CURATIVO:SIM]')) {
+      obsGerais = obsGerais ? `${obsGerais}\n\n${curativoTag}` : curativoTag;
+    }
+  } else if (r.necessitaCurativo === false) {
+    const curativoTag = `[CURATIVO:NAO][/CURATIVO]`;
+    if (!obsGerais.includes('[CURATIVO:NAO]')) {
+      obsGerais = obsGerais ? `${obsGerais}\n\n${curativoTag}` : curativoTag;
+    }
+  }
+
   return {
     id: r.id,
     animal_id: r.animalId,
@@ -438,7 +451,7 @@ export function mapRecordToSupabase(
     ausculta_pulmonar: cleanString(r.auscultaPulmonar),
     frequencia_cardiaca: cleanString(r.frequenciaCardiaca),
     frequencia_respiratoria: cleanString(r.frequenciaRespiratoria),
-    observacoes_gerais: cleanString(r.observacoesGerais),
+    observacoes_gerais: cleanString(obsGerais),
     exames_solicitados: cleanString(r.examesSolicitados),
     tratamento_ambulatorial: cleanString(r.tratamentoAmbulatorial),
     diagnostico_clinico: cleanString(r.diagnosticoClinico),
@@ -462,6 +475,33 @@ export function mapRecordToSupabase(
 }
 
 export function mapSupabaseToRecord(row: any): ClinicalRecord {
+  let necessitaCurativo: boolean = row.necessita_curativo !== undefined ? !!row.necessita_curativo : false;
+  let curativoLocal: string = row.curativo_local || '';
+  let curativoDescricao: string = row.curativo_descricao || '';
+  let curativoFrequencia: string = row.curativo_frequencia || '';
+  let curativoOrientacoes: string = row.curativo_orientacoes || '';
+  let rawObs: string = row.observacoes_gerais || '';
+
+  if (rawObs.includes('[CURATIVO:SIM]')) {
+    necessitaCurativo = true;
+    const match = rawObs.match(/\[CURATIVO:SIM\]([\s\S]*?)\[\/CURATIVO\]/);
+    if (match && match[1]) {
+      const content = match[1];
+      const localM = content.match(/Local:\s*([^\n]*)/i);
+      const descM = content.match(/Descrição:\s*([\s\S]*?)(?=\n(?:Frequência|Orientações):|$)/i);
+      const freqM = content.match(/Frequência:\s*([^\n]*)/i);
+      const orientM = content.match(/Orientações:\s*([\s\S]*?)$/i);
+      if (localM && localM[1]) curativoLocal = localM[1].trim();
+      if (descM && descM[1]) curativoDescricao = descM[1].trim();
+      if (freqM && freqM[1]) curativoFrequencia = freqM[1].trim();
+      if (orientM && orientM[1]) curativoOrientacoes = orientM[1].trim();
+    }
+    rawObs = rawObs.replace(/\n*\s*\[CURATIVO:SIM\][\s\S]*?\[\/CURATIVO\]\s*\n*/g, '').trim();
+  } else if (rawObs.includes('[CURATIVO:NAO]')) {
+    necessitaCurativo = false;
+    rawObs = rawObs.replace(/\n*\s*\[CURATIVO:NAO\][\s\S]*?\[\/CURATIVO\]\s*\n*/g, '').trim();
+  }
+
   return {
     id: row.id,
     animalId: row.animal_id,
@@ -479,7 +519,7 @@ export function mapSupabaseToRecord(row: any): ClinicalRecord {
     auscultaPulmonar: row.ausculta_pulmonar || '',
     frequenciaCardiaca: row.frequencia_cardiaca || '',
     frequenciaRespiratoria: row.frequencia_respiratoria || '',
-    observacoesGerais: row.observacoes_gerais || '',
+    observacoesGerais: rawObs,
     examesSolicitados: row.exames_solicitados || '',
     tratamentoAmbulatorial: row.tratamento_ambulatorial || '',
     diagnosticoClinico: row.diagnostico_clinico || '',
@@ -500,6 +540,11 @@ export function mapSupabaseToRecord(row: any): ClinicalRecord {
     vermifugoData: row.vermifugo_data || undefined,
     microchipAplicado: !!row.microchip_aplicado,
     numeroMicrochipAplicado: row.numero_microchip_aplicado || undefined,
+    necessitaCurativo,
+    curativoLocal: curativoLocal || undefined,
+    curativoDescricao: curativoDescricao || undefined,
+    curativoFrequencia: curativoFrequencia || undefined,
+    curativoOrientacoes: curativoOrientacoes || undefined,
   };
 }
 

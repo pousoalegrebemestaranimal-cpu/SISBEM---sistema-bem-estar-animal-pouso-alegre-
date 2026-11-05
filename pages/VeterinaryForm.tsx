@@ -92,7 +92,12 @@ const VeterinaryForm: React.FC = () => {
     vermifugoAplicado: false,
     vermifugoData: '',
     microchipAplicado: false,
-    numeroMicrochipAplicado: ''
+    numeroMicrochipAplicado: '',
+    necessitaCurativo: false,
+    curativoLocal: '',
+    curativoDescricao: '',
+    curativoFrequencia: '',
+    curativoOrientacoes: ''
   });
 
   useEffect(() => {
@@ -262,7 +267,7 @@ const VeterinaryForm: React.FC = () => {
   useEffect(() => {
     if (!id || editId) return;
     try {
-      if (record && (record.diagnosticoClinico || record.tratamentoAmbulatorial || record.observacoesGerais || (record.receitas && record.receitas.length > 0) || (record.encaminhamentos && record.encaminhamentos.length > 0))) {
+      if (record && (record.diagnosticoClinico || record.tratamentoAmbulatorial || record.observacoesGerais || record.necessitaCurativo || (record.receitas && record.receitas.length > 0) || (record.encaminhamentos && record.encaminhamentos.length > 0))) {
         sessionStorage.setItem(`sisbem_attendance_draft_${id}`, JSON.stringify(record));
       }
     } catch (_) {}
@@ -398,11 +403,34 @@ const VeterinaryForm: React.FC = () => {
       return;
     }
 
+    if (record.necessitaCurativo) {
+      if (!record.curativoLocal?.trim()) {
+        setError("Por favor, informe o local do curativo.");
+        return;
+      }
+      if (!record.curativoDescricao?.trim()) {
+        setError("Por favor, descreva o procedimento do curativo.");
+        return;
+      }
+      if (!record.curativoFrequencia?.trim()) {
+        setError("Por favor, informe a frequência de realização do curativo.");
+        return;
+      }
+    }
+
     if (isSubmittingRef.current || loading) return;
     isSubmittingRef.current = true;
     setLoading(true);
     try {
       const finalRecord = { ...record, animalId: id };
+      
+      if (!finalRecord.necessitaCurativo) {
+        finalRecord.necessitaCurativo = false;
+        finalRecord.curativoLocal = '';
+        finalRecord.curativoDescricao = '';
+        finalRecord.curativoFrequencia = '';
+        finalRecord.curativoOrientacoes = '';
+      }
       
       if (finalRecord.statusResultante === AnimalCondicao.OBITO && finalRecord.causaObito) {
         const rawCausa = finalRecord.causaObito.trim();
@@ -1090,6 +1118,129 @@ const VeterinaryForm: React.FC = () => {
               <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">TTO Ambulatorial realizado</label><textarea rows={2} value={record.tratamentoAmbulatorial} onChange={e => setRecord({...record, tratamentoAmbulatorial: e.target.value})} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 resize-none" /></div>
             </div>
             <div className="space-y-1"><label className="text-xs font-bold text-slate-500 uppercase">Observações Gerais</label><textarea rows={3} value={record.observacoesGerais} onChange={e => setRecord({...record, observacoesGerais: e.target.value})} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 resize-none" /></div>
+          </div>
+        </section>
+
+        {/* SEÇÃO DE CURATIVOS E CUIDADOS ESPECIAIS */}
+        <section className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 space-y-6">
+          <div className="flex items-center justify-between border-b pb-4">
+            <div className="flex items-center gap-2 text-teal-600">
+              <Activity size={18} />
+              <h3 className="text-xs font-black uppercase tracking-widest">Procedimentos e Prescrição de Curativos</h3>
+            </div>
+            {record.necessitaCurativo && (
+              <span className="px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-full text-[10px] font-black uppercase tracking-wider">
+                Prescrição de Curativo Ativa
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-5">
+            <div>
+              <label className="text-xs font-black text-slate-700 uppercase tracking-wide block mb-3">
+                O ANIMAL NECESSITA DE CURATIVOS?
+              </label>
+              <div className="flex items-center gap-3">
+                <label className={`flex items-center gap-2 px-6 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                  record.necessitaCurativo 
+                    ? 'bg-teal-600 text-white border-teal-600 shadow-sm ring-2 ring-teal-400' 
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}>
+                  <input
+                    type="radio"
+                    name="necessitaCurativo"
+                    checked={!!record.necessitaCurativo}
+                    onChange={() => setRecord({ ...record, necessitaCurativo: true })}
+                    className="hidden"
+                  />
+                  <span>Sim</span>
+                </label>
+                <label className={`flex items-center gap-2 px-6 py-2.5 rounded-xl border text-xs font-bold cursor-pointer transition-all ${
+                  !record.necessitaCurativo 
+                    ? 'bg-slate-800 text-white border-slate-800 shadow-sm' 
+                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                }`}>
+                  <input
+                    type="radio"
+                    name="necessitaCurativo"
+                    checked={!record.necessitaCurativo}
+                    onChange={() => setRecord({ 
+                      ...record, 
+                      necessitaCurativo: false,
+                      curativoLocal: '',
+                      curativoDescricao: '',
+                      curativoFrequencia: '',
+                      curativoOrientacoes: ''
+                    })}
+                    className="hidden"
+                  />
+                  <span>Não</span>
+                </label>
+              </div>
+            </div>
+
+            {/* SELECIONADO SIM: EXIBE OS 4 CAMPOS OBRIGATÓRIOS/ESTRUTURADOS */}
+            {record.necessitaCurativo && (
+              <div className="p-5 bg-teal-50/50 rounded-2xl border border-teal-200/80 space-y-4 animate-in fade-in duration-200">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-700 uppercase flex items-center justify-between">
+                      <span>1. Local do Curativo</span>
+                      <span className="text-[10px] text-teal-700 font-semibold lowercase">obrigatório</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Membro pélvico direito, flanco esquerdo, dorso..."
+                      value={record.curativoLocal || ''}
+                      onChange={e => setRecord({ ...record, curativoLocal: e.target.value })}
+                      className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm font-semibold"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-700 uppercase flex items-center justify-between">
+                      <span>3. Frequência de Realização</span>
+                      <span className="text-[10px] text-teal-700 font-semibold lowercase">obrigatório</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: A cada 24 horas, 2x ao dia, a cada 12 horas..."
+                      value={record.curativoFrequencia || ''}
+                      onChange={e => setRecord({ ...record, curativoFrequencia: e.target.value })}
+                      className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm font-semibold"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700 uppercase flex items-center justify-between">
+                    <span>2. Descrição do Procedimento</span>
+                    <span className="text-[10px] text-teal-700 font-semibold lowercase">obrigatório</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Ex: Limpeza da ferida com solução fisiológica, aplicação do produto prescrito e proteção com gaze e atadura..."
+                    value={record.curativoDescricao || ''}
+                    onChange={e => setRecord({ ...record, curativoDescricao: e.target.value })}
+                    className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm resize-none font-medium"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700 uppercase flex items-center justify-between">
+                    <span>4. Orientações Adicionais</span>
+                    <span className="text-[10px] text-slate-500 font-normal lowercase">opcional</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Ex: Observar secreção, sangramento e alterações na ferida..."
+                    value={record.curativoOrientacoes || ''}
+                    onChange={e => setRecord({ ...record, curativoOrientacoes: e.target.value })}
+                    className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 text-sm resize-none font-medium"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </section>
 

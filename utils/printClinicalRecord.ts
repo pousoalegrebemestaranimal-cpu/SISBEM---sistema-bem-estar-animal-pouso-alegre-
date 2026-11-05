@@ -678,6 +678,27 @@ export function generateClinicalRecordHTML(record: ClinicalRecord, animal: Anima
             <div style="font-size: 12.5px; font-weight: 600; color: #1e3a8a; margin-top: 2px; white-space: pre-wrap;">${record.tratamentoAmbulatorial || 'Sem procedimentos registrados'}</div>
           </div>
 
+          <!-- Prescrição de Curativos -->
+          ${record.necessitaCurativo ? `
+            <div style="background: #fffbeb; border: 1.5px solid #fde68a; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <div style="font-size: 11px; font-weight: 800; color: #b45309; text-transform: uppercase;">Prescrição de Curativos e Procedimentos Especiais</div>
+                <div style="font-size: 11px; font-weight: 800; color: #92400e; background: #fef3c7; padding: 2px 8px; border-radius: 4px;">Frequência: ${record.curativoFrequencia || 'Conforme orientação'}</div>
+              </div>
+              <div style="font-size: 12px; color: #78350f; margin-top: 2px;">
+                <strong>Local:</strong> ${record.curativoLocal || 'Não informado'}
+              </div>
+              <div style="font-size: 12px; color: #78350f; margin-top: 2px;">
+                <strong>Procedimento:</strong> ${record.curativoDescricao || 'Conforme prescrição'}
+              </div>
+              ${record.curativoOrientacoes ? `
+                <div style="font-size: 11.5px; color: #92400e; margin-top: 3px; font-style: italic;">
+                  <strong>Orientações:</strong> ${record.curativoOrientacoes}
+                </div>
+              ` : ''}
+            </div>
+          ` : ''}
+
           <!-- Observações Clínicas Gerais -->
           ${record.observacoesGerais ? `
             <div class="narrative-box">

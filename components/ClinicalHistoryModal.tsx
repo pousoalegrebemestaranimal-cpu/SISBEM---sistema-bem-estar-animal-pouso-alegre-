@@ -506,6 +506,36 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                           </div>
                         </div>
 
+                        {/* ORIENTAÇÃO DE CURATIVOS */}
+                        {rec.necessitaCurativo && (
+                          <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-2xl space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 text-amber-900 font-black text-xs uppercase tracking-wider">
+                                <Activity size={15} className="text-amber-600" /> Prescrição de Curativo
+                              </div>
+                              <span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
+                                {rec.curativoFrequencia || 'Frequência regular'}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <span className="text-[10px] font-bold text-amber-800 uppercase block">Local</span>
+                                <span className="font-semibold text-slate-800">{rec.curativoLocal || 'Não informado'}</span>
+                              </div>
+                              <div>
+                                <span className="text-[10px] font-bold text-amber-800 uppercase block">Procedimento</span>
+                                <span className="font-semibold text-slate-800">{rec.curativoDescricao || 'Conforme orientação'}</span>
+                              </div>
+                            </div>
+                            {rec.curativoOrientacoes && (
+                              <div className="text-xs pt-1 border-t border-amber-200/60 text-slate-700">
+                                <span className="text-[10px] font-bold text-amber-800 uppercase block">Orientações Adicionais</span>
+                                <span className="font-medium text-slate-600 italic">{rec.curativoOrientacoes}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         {/* 2. QUEIXA PRINCIPAL / ANAMNESE / OBSERVAÇÕES CLÍNICAS */}
                         {rec.observacoesGerais && (
                           <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1">

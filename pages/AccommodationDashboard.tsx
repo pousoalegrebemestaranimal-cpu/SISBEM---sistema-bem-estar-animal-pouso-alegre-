@@ -6,7 +6,7 @@ import {
   Home, Users, Search, AlertTriangle, CheckCircle, ArrowRightLeft, User, 
   ClipboardCheck, ArrowRight, Save, Info, Printer, History, LogOut, Layers, 
   X, Check, Filter, RotateCw, Dog, Cat, Plus, ChevronDown, ChevronUp, BedDouble, 
-  Sparkles, CheckCircle2 
+  Sparkles, CheckCircle2, Activity, FileText, Download, Eye 
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
@@ -117,6 +117,12 @@ const AccommodationDashboard: React.FC = () => {
   const [isPrintModalOpen, setIsPrintModalOpen] = useState(false);
   const [printKennelTypeFilter, setPrintKennelTypeFilter] = useState<string>('TODOS');
   const [printOnlyActiveTreatment, setPrintOnlyActiveTreatment] = useState<boolean>(true);
+  const [isPreviewTreatmentOpen, setIsPreviewTreatmentOpen] = useState(false);
+
+  // Estados para modal de planilha de curativos
+  const [isCurativosModalOpen, setIsCurativosModalOpen] = useState(false);
+  const [curativosKennelTypeFilter, setCurativosKennelTypeFilter] = useState<string>('TODOS');
+  const [isPreviewCurativosOpen, setIsPreviewCurativosOpen] = useState(false);
 
   const user = db.getCurrentUser();
   const [kennels, setKennels] = useState<Kennel[]>(() => db.getKennels());
@@ -499,6 +505,130 @@ const AccommodationDashboard: React.FC = () => {
 
     return counts;
   }, [allAnimals]);
+
+  // =========================================================================
+  // DADOS DA PLANILHA DE CURATIVOS (ANIMAIS ALOJADOS COM PRESCRIÇÃO ATIVA)
+  // =========================================================================
+  const curativosData = useMemo(() => {
+    const activeOccs = getAllActiveOccupations(occupations);
+    const activeAnimalIds = new Set(activeOccs.map(o => o.animalId));
+    const users = db.getUsers();
+
+    const items: Array<{
+      animal: AnimalJoined;
+      kennelName: string;
+      kennelType: string;
+      tutorInfo: string;
+      vetInfo: string;
+      curativoLocal: string;
+      curativoDescricao: string;
+      curativoFrequencia: string;
+      curativoOrientacoes: string;
+      latestRecord: any;
+    }> = [];
+
+    allAnimals.forEach(animal => {
+      // 1. Exclui animais com desfechos definitivos (óbito, soltura, adoção, alta)
+      if ([AnimalCondicao.OBITO, AnimalCondicao.SOLTURA, AnimalCondicao.ADOTADO, AnimalCondicao.ALTA].includes(animal.condicao)) {
+        return;
+      }
+
+      // 2. Deve estar na acomodação ou internado
+      const isAccommodated = activeAnimalIds.has(animal.id) || !!animal.currentOccupation || !!animal.necessitaInternacao || animal.condicao === AnimalCondicao.EM_TRATAMENTO;
+      if (!isAccommodated) {
+        return;
+      }
+
+      // 3. Obtém o prontuário mais recente do animal
+      const latestRecord = animal.historico && animal.historico.length > 0
+        ? [...animal.historico].sort((a, b) => new Date(b.dataAtendimento).getTime() - new Date(a.dataAtendimento).getTime())[0]
+        : null;
+
+      // 4. Deve ter prescrição de curativo ativa (necessitaCurativo === true)
+      if (!latestRecord || !latestRecord.necessitaCurativo) {
+        return;
+      }
+
+      // 5. Identificação da baia/acomodação
+      let kennelName = 'Aguardando Baia';
+      let kennelType = 'SEM_BAIA';
+      if (animal.currentOccupation?.kennel?.name) {
+        kennelName = animal.currentOccupation.kennel.name;
+        kennelType = animal.currentOccupation.kennel.type || 'SEM_BAIA';
+      } else {
+        const occ = activeOccs.find(o => o.animalId === animal.id);
+        if (occ) {
+          const k = kennels.find(k => k.id === occ.kennelId);
+          if (k) {
+            kennelName = k.name;
+            kennelType = k.type;
+          }
+        } else if (animal.tipoAcomodacaoSugerida) {
+          kennelName = `Sugerida: ${animal.tipoAcomodacaoSugerida}`;
+          kennelType = animal.tipoAcomodacaoSugerida;
+        } else if (latestRecord.recommendedKennelType) {
+          kennelName = `Sugerida: ${latestRecord.recommendedKennelType}`;
+          kennelType = latestRecord.recommendedKennelType;
+        }
+      }
+
+      // 6. Identificação do tutor (quando houver)
+      let tutorInfo = 'Sem tutor (Resgate)';
+      if (animal.temTutor && animal.tutor) {
+        tutorInfo = `${animal.tutor.nomeCompleto}${animal.tutor.telefone ? ` • Tel: ${animal.tutor.telefone}` : ''}`;
+      } else if (animal.temTutor) {
+        tutorInfo = 'Tutor cadastrado';
+      }
+
+      // 7. Veterinário responsável
+      const vet = users.find(u => u.id === latestRecord.veterinarioId);
+      const vetInfo = vet ? `${vet.name}${vet.crmv ? ` (CRMV: ${vet.crmv})` : ''}` : 'Veterinário SISBEM';
+
+      items.push({
+        animal,
+        kennelName,
+        kennelType,
+        tutorInfo,
+        vetInfo,
+        curativoLocal: latestRecord.curativoLocal || 'Local não informado',
+        curativoDescricao: latestRecord.curativoDescricao || 'Procedimento não detalhado',
+        curativoFrequencia: latestRecord.curativoFrequencia || 'Conforme orientação médica',
+        curativoOrientacoes: latestRecord.curativoOrientacoes || 'Observar ferida e integridade',
+        latestRecord
+      });
+    });
+
+    const extractNum = (kName: string): number => {
+      const match = kName.match(/\d+/);
+      return match ? parseInt(match[0], 10) : 999999;
+    };
+
+    items.sort((a, b) => {
+      const numA = extractNum(a.kennelName);
+      const numB = extractNum(b.kennelName);
+      if (numA !== numB) return numA - numB;
+      const comp = a.kennelName.localeCompare(b.kennelName, 'pt-BR', { numeric: true });
+      if (comp !== 0) return comp;
+      return (a.animal.nome || '').localeCompare(b.animal.nome || '', 'pt-BR');
+    });
+
+    return items;
+  }, [allAnimals, occupations, kennels]);
+
+  const curativosCountsByType = useMemo(() => {
+    const counts: Record<string, number> = { TODOS: curativosData.length, SEM_BAIA: 0 };
+    KENNEL_TYPE_PRINT_OPTIONS.forEach(opt => {
+      if (opt.id !== 'TODOS') counts[opt.id] = 0;
+    });
+    curativosData.forEach(item => {
+      if (counts[item.kennelType] !== undefined) {
+        counts[item.kennelType]++;
+      } else {
+        counts['SEM_BAIA'] = (counts['SEM_BAIA'] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [curativosData]);
 
   const handlePrintTreatmentSheet = (selectedType: string = printKennelTypeFilter, onlyTreatment: boolean = printOnlyActiveTreatment) => {
     const freshAnimals = db.getAnimalsJoined();
@@ -947,6 +1077,27 @@ const AccommodationDashboard: React.FC = () => {
         </style>
       </head>
       <body>
+        <div class="no-print" style="background: #f1f5f9; border-bottom: 2px solid #cbd5e1; padding: 12px 20px; margin: -24px -24px 20px -24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+          <div>
+            <div style="font-weight: 800; font-size: 15px; color: #0f766e;">SISBEM • Emissão de Documentos</div>
+            <div style="font-size: 12px; color: #64748b;">PLANILHA DE TRATAMENTOS E PRESCRIÇÕES</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button onclick="window.print()" style="background: #0d9488; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 13px; cursor: pointer;">
+              🖨️ Imprimir Planilha
+            </button>
+            <button onclick="window.print()" style="background: #0f172a; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 13px; cursor: pointer;">
+              📄 Salvar em PDF
+            </button>
+            <button onclick="window.close()" style="background: #e2e8f0; color: #334155; border: none; padding: 8px 14px; border-radius: 8px; font-weight: 700; font-size: 13px; cursor: pointer;">
+              ✕ Fechar
+            </button>
+          </div>
+        </div>
+        <div class="no-print" style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 8px 14px; margin-bottom: 16px; font-size: 12px; color: #065f46;">
+          💡 <strong>Dica para Gerar PDF:</strong> Na janela de impressão do seu navegador, selecione <strong>"Salvar como PDF"</strong> no campo <em>Destino/Impressora</em>.
+        </div>
+
         <div class="header">
           <div>
             <h1>SISBEM • BEM-ESTAR ANIMAL</h1>
@@ -1144,6 +1295,307 @@ const AccommodationDashboard: React.FC = () => {
     printWindow.document.close();
   };
 
+  const handlePrintCurativosSheet = (selectedType: string = curativosKennelTypeFilter) => {
+    const targetItems = selectedType === 'TODOS'
+      ? curativosData
+      : curativosData.filter(item => item.kennelType === selectedType);
+
+    const TYPE_TITLES: Record<string, string> = {
+      [KennelType.QUARENTENA]: 'Baias de Quarentena / Isolamento',
+      [KennelType.INDIVIDUAL]: 'Baias Individuais',
+      [KennelType.COLETIVA]: 'Baias Coletivas',
+      [KennelType.GATIL]: 'Gatil / Acomodação Felina',
+      [KennelType.PRE_OPERATORIO]: 'Baias de Pré-Operatório',
+      [KennelType.POS_OPERATORIO]: 'Baias de Pós-Operatório',
+      'SEM_BAIA': 'Aguardando Alocação em Baia'
+    };
+
+    const filterNameLabel = selectedType === 'TODOS' 
+      ? 'Todos os Setores (Geral do Centro)' 
+      : (TYPE_TITLES[selectedType] || selectedType);
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    const html = `
+      <!DOCTYPE html>
+      <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8">
+        <title>SISBEM - PLANILHA DE CURATIVOS • ${filterNameLabel}</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+          * { box-sizing: border-box; }
+          body { 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            padding: 20px; 
+            color: #0f172a; 
+            font-size: 13px; 
+            line-height: 1.4;
+            background: #ffffff;
+          }
+          .screen-bar {
+            background: #f1f5f9;
+            border-bottom: 2px solid #cbd5e1;
+            padding: 12px 20px;
+            margin: -20px -20px 20px -20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+          }
+          .btn-print {
+            background: #0d9488;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 13px;
+            cursor: pointer;
+          }
+          .btn-pdf {
+            background: #0f172a;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 13px;
+            cursor: pointer;
+          }
+          .btn-close {
+            background: #e2e8f0;
+            color: #334155;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 13px;
+            cursor: pointer;
+          }
+          .pdf-hint {
+            background: #ecfdf5;
+            border: 1px solid #a7f3d0;
+            border-radius: 8px;
+            padding: 8px 14px;
+            margin-bottom: 16px;
+            font-size: 12px;
+            color: #065f46;
+          }
+          .header { 
+            border-bottom: 2.5px solid #0d9488; 
+            padding-bottom: 12px; 
+            margin-bottom: 16px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: flex-end; 
+          }
+          .header h1 { 
+            margin: 0; 
+            color: #0f766e; 
+            font-size: 24px; 
+            font-weight: 900; 
+            letter-spacing: -0.5px;
+          }
+          .header h2 {
+            margin: 2px 0 0 0;
+            font-size: 15px;
+            font-weight: 800;
+            color: #1e293b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+          }
+          .header-meta { 
+            text-align: right; 
+            font-size: 12.5px; 
+            color: #64748b; 
+          }
+          .header-meta strong { 
+            color: #0f172a; 
+          }
+          .summary-bar {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+            font-weight: 600;
+            color: #475569;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+          }
+          th {
+            background: #0f766e;
+            color: #ffffff;
+            font-size: 10.5px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 8px 10px;
+            border: 1px solid #0f766e;
+            text-align: left;
+          }
+          td {
+            border: 1px solid #cbd5e1;
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 12px;
+          }
+          tr:nth-child(even) td {
+            background: #f8fafc;
+          }
+          .empty-msg {
+            padding: 30px;
+            text-align: center;
+            font-style: italic;
+            color: #64748b;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px dashed #cbd5e1;
+          }
+          @media print {
+            body { padding: 0; font-size: 12px; }
+            @page { margin: 8mm; size: landscape; }
+            .no-print { display: none !important; }
+            tr { page-break-inside: avoid; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="no-print screen-bar">
+          <div>
+            <div style="font-weight: 800; font-size: 15px; color: #0f766e;">SISBEM • Emissão de Documentos</div>
+            <div style="font-size: 12px; color: #64748b;">PLANILHA DE CURATIVOS E CUIDADOS ESPECIAIS</div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <button onclick="window.print()" class="btn-print">🖨️ Imprimir Planilha</button>
+            <button onclick="window.print()" class="btn-pdf">📄 Salvar em PDF</button>
+            <button onclick="window.close()" class="btn-close">✕ Fechar</button>
+          </div>
+        </div>
+        <div class="no-print pdf-hint">
+          💡 <strong>Dica para Gerar PDF:</strong> Na janela de impressão do seu navegador, escolha <strong>"Salvar como PDF"</strong> no campo <em>Destino/Impressora</em>.
+        </div>
+
+        <div class="header">
+          <div>
+            <h1>SISBEM • SISTEMA INTEGRADO DE SAÚDE E BEM-ESTAR ANIMAL</h1>
+            <h2>CENTRO MUNICIPAL DE BEM-ESTAR ANIMAL • PLANILHA DE CURATIVOS</h2>
+          </div>
+          <div class="header-meta">
+            <div>Data de Emissão: <strong>${format(new Date(), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}</strong></div>
+            <div>Emitido por: <strong>${user?.name || 'Veterinário / Operador SISBEM'}</strong></div>
+            <div>Setor / Filtro: <strong>${filterNameLabel}</strong></div>
+            <div>Ordenação: <strong>Crescente por Número da Baia</strong></div>
+          </div>
+        </div>
+
+        <div class="summary-bar">
+          <span>Setor: <strong>${filterNameLabel}</strong></span>
+          <span>Pacientes com Curativo Ativo: <strong>${targetItems.length}</strong></span>
+          <span>Controle: <strong>Orientações Veterinárias e Cuidados Especiais</strong></span>
+          <span>Status: <strong>Ativo na Acomodação</strong></span>
+        </div>
+
+        ${targetItems.length === 0 ? `
+          <div class="empty-msg">
+            Nenhum animal alojado ou internado necessita de curativos no setor selecionado (${filterNameLabel}).
+          </div>
+        ` : `
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 10%;">Acomodação</th>
+                <th style="width: 13%;">Animal</th>
+                <th style="width: 12%;">Tutor (quando houver)</th>
+                <th style="width: 13%;">Veterinário Responsável</th>
+                <th style="width: 11%;">Local do Curativo</th>
+                <th style="width: 16%;">Procedimento Prescrito</th>
+                <th style="width: 9%;">Frequência</th>
+                <th style="width: 16%;">Orientações Adicionais & Anotações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${targetItems.map(item => {
+                const pesoFmt = item.animal.peso 
+                  ? `${item.animal.peso.toString().replace('.', ',')} kg` 
+                  : (item.latestRecord?.peso 
+                      ? (item.latestRecord.peso.includes('kg') ? item.latestRecord.peso : `${item.latestRecord.peso} kg`) 
+                      : 'Não inf.');
+
+                return `
+                  <tr>
+                    <td>
+                      <div style="font-weight: 800; font-size: 13px; color: #0f766e;">🏠 ${item.kennelName}</div>
+                      <div style="font-size: 10px; color: #64748b; font-weight: 600;">${item.kennelType}</div>
+                    </td>
+                    <td>
+                      <div style="font-weight: 800; font-size: 13px; color: #0f172a;">${item.animal.nome}</div>
+                      <div style="font-size: 10.5px; color: #475569;">${item.animal.especie} • ${item.animal.raca || 'SRD'}</div>
+                      <div style="font-size: 10px; color: #64748b; margin-top: 2px;"><strong>Peso:</strong> ${pesoFmt}</div>
+                    </td>
+                    <td>
+                      <div style="font-size: 11.5px; font-weight: 700; color: #1e293b;">${item.tutorInfo}</div>
+                    </td>
+                    <td>
+                      <div style="font-size: 11.5px; font-weight: 700; color: #0f766e;">👨‍⚕️ ${item.vetInfo}</div>
+                    </td>
+                    <td>
+                      <div style="font-size: 12px; font-weight: 800; color: #b45309; background: #fef3c7; padding: 4px 6px; border-radius: 4px; display: inline-block;">
+                        📍 ${item.curativoLocal}
+                      </div>
+                    </td>
+                    <td>
+                      <div style="font-size: 11.5px; font-weight: 600; color: #1e293b; line-height: 1.4; white-space: pre-wrap;">${item.curativoDescricao}</div>
+                    </td>
+                    <td>
+                      <div style="font-size: 11.5px; font-weight: 800; color: #0369a1; background: #e0f2fe; padding: 4px 6px; border-radius: 4px; display: inline-block;">
+                        ⏱️ ${item.curativoFrequencia}
+                      </div>
+                    </td>
+                    <td>
+                      <div style="font-size: 11px; font-weight: 500; color: #334155; line-height: 1.35; white-space: pre-wrap;">${item.curativoOrientacoes}</div>
+                      <div style="margin-top: 8px; padding-top: 4px; border-top: 1px dashed #cbd5e1; font-size: 9.5px; color: #94a3b8; font-weight: bold; text-transform: uppercase;">
+                        Anotações da Equipe:
+                      </div>
+                      <div style="height: 22px; border-bottom: 1px dotted #cbd5e1;"></div>
+                    </td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `}
+
+        <div style="margin-top: 24px; padding-top: 12px; border-top: 1px solid #cbd5e1; display: flex; justify-content: space-between; font-size: 11.5px; color: #64748b;">
+          <span>SISBEM • Sistema Integrado de Saúde e Bem-Estar Animal</span>
+          <span>Documento operacional para orientação de curativos e cuidados aos animais alojados</span>
+          <span>Visto do Responsável pelo Plantão / Enfermagem: ___________________________________</span>
+        </div>
+
+        <script>
+          window.onload = function() { 
+            setTimeout(function() {
+              window.print(); 
+            }, 300);
+          }
+        </script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.write(html);
+    printWindow.document.close();
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in">
       <div className="flex flex-col md:flex-row justify-between items-start gap-4">
@@ -1168,6 +1620,17 @@ const AccommodationDashboard: React.FC = () => {
             className="flex items-center gap-2 px-5 py-2.5 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all cursor-pointer text-sm"
           >
             <Printer size={18} className="text-teal-600" /> Planilha de Tratamentos
+          </button>
+          <button 
+            onClick={() => setIsCurativosModalOpen(true)}
+            className="flex items-center gap-2 px-5 py-2.5 bg-white text-slate-700 font-bold rounded-xl border border-slate-200 shadow-sm hover:bg-slate-50 transition-all cursor-pointer text-sm"
+          >
+            <Activity size={18} className="text-amber-600" /> Planilha de Curativos
+            {curativosData.length > 0 && (
+              <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded-full text-xs font-black">
+                {curativosData.length}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -1505,11 +1968,11 @@ const AccommodationDashboard: React.FC = () => {
             </div>
 
             {/* Rodapé de Ações do Modal */}
-            <div className="p-4 sm:p-6 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-3">
+            <div className="p-4 sm:p-6 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-3">
               <button
                 type="button"
                 onClick={() => setIsPrintModalOpen(false)}
-                className="px-5 py-2.5 text-slate-600 font-bold hover:bg-slate-200/70 rounded-xl transition-colors text-sm cursor-pointer"
+                className="px-4 py-2.5 text-slate-600 font-bold hover:bg-slate-200/70 rounded-xl transition-colors text-sm cursor-pointer"
               >
                 Cancelar
               </button>
@@ -1519,7 +1982,224 @@ const AccommodationDashboard: React.FC = () => {
                   handlePrintTreatmentSheet(printKennelTypeFilter, printOnlyActiveTreatment);
                   setIsPrintModalOpen(false);
                 }}
+                className="flex items-center gap-2 px-5 py-2.5 bg-slate-800 text-white font-bold rounded-xl shadow-md hover:bg-slate-900 transition-all text-sm cursor-pointer"
+              >
+                <Download size={16} /> Gerar PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handlePrintTreatmentSheet(printKennelTypeFilter, printOnlyActiveTreatment);
+                  setIsPrintModalOpen(false);
+                }}
                 className="flex items-center gap-2 px-6 py-2.5 bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:bg-teal-700 transition-all text-sm cursor-pointer"
+              >
+                <Printer size={16} /> Imprimir Planilha
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal da Planilha de Curativos */}
+      {isCurativosModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full overflow-hidden animate-in zoom-in-95 border border-slate-200">
+            {/* Cabeçalho do Modal */}
+            <div className="p-5 sm:p-6 bg-slate-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-600 rounded-xl shrink-0">
+                  <Activity size={22} className="text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-black tracking-tight flex items-center gap-2">
+                    Planilha de Curativos & Cuidados
+                  </h3>
+                  <p className="text-xs text-slate-300">
+                    Orientações veterinárias e emissão para animais atualmente alojados com curativos ativos.
+                  </p>
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setIsCurativosModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+                title="Fechar"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Corpo do Modal */}
+            <div className="p-5 sm:p-6 space-y-6 max-h-[75vh] overflow-y-auto">
+              {/* Seção 1: Escolha do Setor */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-black text-slate-600 uppercase tracking-wider">
+                    1. Escolha o Setor ou Tipo de Baia:
+                  </label>
+                  <span className="text-[10px] text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                    Apenas animais com curativo ativo
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {KENNEL_TYPE_PRINT_OPTIONS.map((opt) => {
+                    const isSelected = curativosKennelTypeFilter === opt.id;
+                    const IconComponent = opt.icon;
+                    const count = curativosCountsByType[opt.id] || 0;
+
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setCurativosKennelTypeFilter(opt.id)}
+                        className={`text-left p-3.5 rounded-xl border transition-all flex items-start gap-3 relative cursor-pointer ${
+                          isSelected 
+                            ? 'border-amber-600 bg-amber-50/70 ring-2 ring-amber-500/20 shadow-sm' 
+                            : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50 bg-white'
+                        }`}
+                      >
+                        <div className={`p-2 rounded-lg mt-0.5 shrink-0 ${isSelected ? 'bg-amber-600 text-white' : 'bg-slate-100 text-slate-600'}`}>
+                          <IconComponent size={18} />
+                        </div>
+                        <div className="flex-1 min-w-0 pr-6">
+                          <span className={`text-xs font-bold ${isSelected ? 'text-amber-950' : 'text-slate-800'}`}>
+                            {opt.label}
+                          </span>
+                          <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
+                            {opt.desc}
+                          </p>
+                          <div className="mt-2 flex items-center gap-1.5">
+                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${
+                              count > 0 
+                                ? (isSelected ? 'bg-amber-200 text-amber-900' : 'bg-slate-200 text-slate-700') 
+                                : 'bg-slate-100 text-slate-400'
+                            }`}>
+                              {count} {count === 1 ? 'paciente com curativo' : 'pacientes com curativo'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {isSelected && (
+                          <div className="absolute top-3 right-3 text-amber-600">
+                            <div className="w-5 h-5 rounded-full bg-amber-600 text-white flex items-center justify-center shadow-xs">
+                              <Check size={12} strokeWidth={3} />
+                            </div>
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Seção 2: Prévia dos Animais */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-black text-slate-600 uppercase tracking-wider">
+                    2. Pacientes Selecionados ({curativosData.filter(i => curativosKennelTypeFilter === 'TODOS' || i.kennelType === curativosKennelTypeFilter).length}):
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsPreviewCurativosOpen(!isPreviewCurativosOpen)}
+                    className="text-xs text-amber-700 font-bold hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Eye size={13} /> {isPreviewCurativosOpen ? 'Ocultar detalhes' : 'Visualizar detalhes'}
+                  </button>
+                </div>
+
+                {(() => {
+                  const filtered = curativosData.filter(i => curativosKennelTypeFilter === 'TODOS' || i.kennelType === curativosKennelTypeFilter);
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="p-6 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-center text-xs text-slate-500">
+                        Nenhum animal alojado no setor selecionado possui prescrição ativa de curativos.
+                      </div>
+                    );
+                  }
+
+                  if (!isPreviewCurativosOpen) {
+                    return (
+                      <div className="p-4 bg-amber-50/60 border border-amber-200 rounded-xl flex items-center justify-between">
+                        <div className="text-xs text-amber-900 font-semibold">
+                          {filtered.length} {filtered.length === 1 ? 'animal com prescrição ativa' : 'animais com prescrição ativa'} para a planilha deste setor.
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsPreviewCurativosOpen(true)}
+                          className="px-3 py-1 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-colors cursor-pointer"
+                        >
+                          Ver Lista
+                        </button>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                      {filtered.map(item => (
+                        <div key={item.animal.id} className="p-3 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1.5 text-xs">
+                          <div className="flex items-center justify-between">
+                            <div className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                              <span className="px-2 py-0.5 bg-teal-50 text-teal-800 rounded font-bold border border-teal-200 text-[11px]">
+                                {item.kennelName}
+                              </span>
+                              <span>{item.animal.nome}</span>
+                              <span className="text-[11px] font-normal text-slate-500">
+                                ({item.animal.especie} • {item.animal.peso ? `${item.animal.peso} kg` : 'Sem peso'})
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                              {item.curativoFrequencia}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600">
+                            <div><strong>Local:</strong> {item.curativoLocal}</div>
+                            <div><strong>Veterinário:</strong> {item.vetInfo}</div>
+                          </div>
+                          <div className="text-[11px] text-slate-700 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                            <strong>Procedimento:</strong> {item.curativoDescricao}
+                          </div>
+                          {item.curativoOrientacoes && (
+                            <div className="text-[10.5px] text-slate-500 italic">
+                              <strong>Orientações:</strong> {item.curativoOrientacoes}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            {/* Rodapé de Ações do Modal */}
+            <div className="p-4 sm:p-6 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setIsCurativosModalOpen(false)}
+                className="px-4 py-2.5 text-slate-600 font-bold hover:bg-slate-200/70 rounded-xl transition-colors text-sm cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handlePrintCurativosSheet(curativosKennelTypeFilter);
+                  setIsCurativosModalOpen(false);
+                }}
+                className="flex items-center gap-2 px-5 py-2.5 bg-slate-800 text-white font-bold rounded-xl shadow-md hover:bg-slate-900 transition-all text-sm cursor-pointer"
+              >
+                <Download size={16} /> Gerar PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handlePrintCurativosSheet(curativosKennelTypeFilter);
+                  setIsCurativosModalOpen(false);
+                }}
+                className="flex items-center gap-2 px-6 py-2.5 bg-amber-600 text-white font-bold rounded-xl shadow-lg hover:bg-amber-700 transition-all text-sm cursor-pointer"
               >
                 <Printer size={16} /> Imprimir Planilha
               </button>
