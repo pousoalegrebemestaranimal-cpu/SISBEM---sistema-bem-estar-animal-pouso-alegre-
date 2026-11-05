@@ -209,7 +209,7 @@ const AccommodationDashboard: React.FC = () => {
     fetchOfficialWaitingQueue();
 
     // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela
-    pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true }).then(() => {
+    pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels', 'occupations', 'animals'], force: true }).then(() => {
       refreshData();
     }).catch(() => {});
 
@@ -237,7 +237,7 @@ const AccommodationDashboard: React.FC = () => {
     setQueueError(null);
     try {
       await Promise.all([
-        pullFromSupabaseToLocal(db, { modules: ['kennels', 'occupations', 'animals'], force: true }),
+        pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels', 'occupations', 'animals'], force: true }),
         fetchOfficialOccupations(),
         fetchOfficialWaitingQueue()
       ]);

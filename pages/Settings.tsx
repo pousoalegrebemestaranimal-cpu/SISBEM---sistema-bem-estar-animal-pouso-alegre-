@@ -25,6 +25,12 @@ const SettingsPage: React.FC = () => {
   const [migrationProgress, setMigrationProgress] = useState<{ current: number; total: number } | null>(null);
   const [migrationResult, setMigrationResult] = useState<{ migrated: number; skipped: number; errors: string[] } | null>(null);
 
+  const currentUser = db.getCurrentUser();
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const [metadata, setMetadata] = useState<{ version: number; updatedAt: string | null; updatedBy: any }>(() => {
+    return (db as any).getKennelConfigsMetadata ? (db as any).getKennelConfigsMetadata() : { version: 1, updatedAt: null, updatedBy: null };
+  });
+
   const localAnimals = db.getAnimals();
   const base64PhotosCount = localAnimals.filter(a => isBase64Image(a.foto)).length;
   const storagePhotosCount = localAnimals.filter(a => a.foto && !isBase64Image(a.foto)).length;
@@ -402,20 +408,42 @@ END $$;`;
 
   useEffect(() => {
     setConfigs(db.getKennelConfigs());
+    if ((db as any).getKennelConfigsMetadata) {
+      setMetadata((db as any).getKennelConfigsMetadata());
+    }
+
+    // Consulta imediatamente o banco central para garantir dados atualizados ao abrir a tela
+    pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels'], force: true }).then(() => {
+      setConfigs(db.getKennelConfigs());
+      if ((db as any).getKennelConfigsMetadata) {
+        setMetadata((db as any).getKennelConfigsMetadata());
+      }
+    }).catch(e => console.warn('Aviso pull configs:', e));
 
     const handleSettingsChanged = (e: any) => {
       const newConfigs = e.detail?.configs || db.getKennelConfigs();
       setConfigs(newConfigs);
+      if (e.detail?.version) {
+        setMetadata({
+          version: e.detail.version,
+          updatedAt: e.detail.updatedAt || null,
+          updatedBy: e.detail.updatedBy || null
+        });
+      }
       if (e.detail?.source === 'realtime') {
+        const authorName = e.detail?.updatedBy?.name ? `por ${e.detail.updatedBy.name}` : 'a partir de outro computador';
         setMessage({ 
           type: 'success', 
-          text: 'Configurações de infraestrutura atualizadas em tempo real a partir de outro usuário/dispositivo!' 
+          text: `Configurações atualizadas em tempo real ${authorName} (Versão ${e.detail?.version || 1}) e aplicadas automaticamente!` 
         });
       }
     };
 
     const handleKennelsChanged = () => {
       setConfigs(db.getKennelConfigs());
+      if ((db as any).getKennelConfigsMetadata) {
+        setMetadata((db as any).getKennelConfigsMetadata());
+      }
     };
 
     window.addEventListener('sisbem-settings-changed', handleSettingsChanged);
@@ -430,16 +458,22 @@ END $$;`;
   }, []);
 
   const handleCountChange = (type: KennelType, value: string) => {
+    if (!isAdmin) return;
     const num = parseInt(value) || 0;
     setConfigs(prev => prev.map(c => c.type === type ? { ...c, count: num } : c));
   };
 
   const handleCapacityChange = (type: KennelType, value: string) => {
+    if (!isAdmin) return;
     const num = parseInt(value) || 0;
     setConfigs(prev => prev.map(c => c.type === type ? { ...c, capacity: num } : c));
   };
 
   const handleClearFictitiousData = () => {
+    if (!isAdmin) {
+      alert('Apenas administradores podem apagar cadastros do sistema.');
+      return;
+    }
     if (window.confirm('Tem certeza de que deseja apagar todos os cadastros fictícios de teste? Esta ação removerá permanentemente todos os animais, tutores, cirurgias e prontuários de teste, deixando o sistema pronto para cadastros reais.')) {
       setSeedingLoading(true);
       try {
@@ -458,6 +492,10 @@ END $$;`;
   };
 
   const handleResetAndSeed = () => {
+    if (!isAdmin) {
+      alert('Apenas administradores podem reinicializar dados de demonstração.');
+      return;
+    }
     if (window.confirm('Deseja recarregar o banco de dados completo de testes? Serão gerados 18 animais diversificados (cães, gatos, castrados e não castrados, com tutor e solicitantes), cirurgias gerais e castrações, prontuários detalhados, acomodações em baias e gatis.')) {
       setSeedingLoading(true);
       try {
@@ -478,6 +516,12 @@ END $$;`;
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(null);
+
+    if (!isAdmin) {
+      setMessage({ type: 'error', text: 'Permissão negada: Apenas administradores possuem autorização para alterar as configurações do centro.' });
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -501,8 +545,18 @@ END $$;`;
       });
 
       if (!hasError) {
-        await db.saveKennelConfigsAsync(configs);
-        setMessage({ type: 'success', text: 'Configurações de infraestrutura atualizadas e propagadas automaticamente para todos os usuários em tempo real!' });
+        const res = await (db as any).saveKennelConfigsAsync(configs, metadata.version);
+        if (res?.version) {
+          setMetadata({
+            version: res.version,
+            updatedAt: res.updatedAt || new Date().toISOString(),
+            updatedBy: currentUser
+          });
+        }
+        setMessage({
+          type: 'success',
+          text: `Configurações de infraestrutura salvas no banco central (Versão ${res?.version || metadata.version + 1}) e propagadas para todos os computadores em tempo real!`
+        });
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message });
@@ -606,6 +660,29 @@ END $$;`;
 
       <form onSubmit={handleSubmit} className="space-y-6">
         <div className="bg-white p-8 rounded-2xl shadow-sm border border-slate-200 space-y-8">
+          {/* Status da Sincronização Centralizada */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                <span className="text-xs font-bold text-slate-800 uppercase tracking-wide">Configuração Central Oficial (SISBEM)</span>
+                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[11px] font-bold">
+                  Versão {metadata.version}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Última alteração: {metadata.updatedAt ? new Date(metadata.updatedAt).toLocaleString('pt-BR') : 'Configuração inicial'}
+                {metadata.updatedBy?.name ? ` por ${metadata.updatedBy.name} (${metadata.updatedBy.username || 'admin'})` : ''}
+              </p>
+            </div>
+
+            {!isAdmin && (
+              <span className="inline-flex items-center gap-1 px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-lg text-xs font-semibold">
+                <AlertTriangle size={13} className="text-amber-600" /> Somente Leitura (Requer Perfil ADMIN)
+              </span>
+            )}
+          </div>
+
           <div className="flex items-center gap-3 bg-blue-50 p-4 rounded-xl border border-blue-100 text-blue-800">
             <Info size={20} className="shrink-0" />
             <p className="text-xs leading-relaxed">
@@ -624,9 +701,10 @@ END $$;`;
                     <input 
                       type="number" 
                       min="0"
+                      disabled={!isAdmin || loading}
                       value={cfg.count} 
                       onChange={e => handleCountChange(cfg.type, e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500"
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                     />
                   </div>
                   <div className="space-y-1">
@@ -634,9 +712,10 @@ END $$;`;
                     <input 
                       type="number" 
                       min="1"
+                      disabled={!isAdmin || loading}
                       value={cfg.capacity} 
                       onChange={e => handleCapacityChange(cfg.type, e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500"
+                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                     />
                   </div>
                 </div>
@@ -647,14 +726,15 @@ END $$;`;
 
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
           <p className="text-xs text-slate-500">
-            * As alterações serão sincronizadas e aplicadas para <strong>todos os usuários logados</strong> automaticamente em tempo real.
+            * As alterações serão persistidas no banco central e propagadas para <strong>todos os computadores conectados</strong> automaticamente em tempo real.
           </p>
           <button 
             type="submit" 
-            disabled={loading}
-            className="w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:bg-teal-700 disabled:opacity-50 transition-all cursor-pointer"
+            disabled={loading || !isAdmin}
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3 bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer"
+            title={!isAdmin ? 'Apenas administradores podem salvar alterações' : 'Salvar no banco central'}
           >
-            <Save size={18} /> {loading ? 'Sincronizando em tempo real...' : 'Salvar Alterações'}
+            <Save size={18} /> {loading ? 'Gravando no banco central...' : (isAdmin ? 'Salvar Alterações Centrais' : 'Somente Leitura')}
           </button>
         </div>
       </form>

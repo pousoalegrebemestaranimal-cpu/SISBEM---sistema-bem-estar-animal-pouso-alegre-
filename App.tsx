@@ -75,8 +75,8 @@ const App: React.FC = () => {
     sanitizeExistingLocalStorage();
     sanitizeCredentialsFromLocalStorage();
 
-    // Sincroniza dados do Supabase imediatamente ao carregar o aplicativo
-    pullFromSupabaseToLocal(db).catch(err => console.warn('Supabase initial pull error:', err));
+    // Sincroniza dados e configurações oficiais do Supabase imediatamente ao carregar o aplicativo
+    pullFromSupabaseToLocal(db, { force: true }).catch(err => console.warn('Supabase initial pull error:', err));
 
     // Inicializa a escuta em tempo real (Realtime Channel) para manter todos os usuários conectados em sincronia
     const cleanupRealtime = initRealtimeSync();

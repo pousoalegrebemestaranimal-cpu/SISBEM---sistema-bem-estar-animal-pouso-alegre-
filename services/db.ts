@@ -1427,34 +1427,75 @@ export const db = {
     localStorage.setItem(KEYS.KENNELS, JSON.stringify(newKennels));
   },
 
-  saveKennelConfigs: (configs: KennelConfig[]) => {
-    localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(configs));
-    db.syncKennelsWithConfigs(configs);
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', { detail: { configs } }));
-      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
-      window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+  getKennelConfigsMetadata: () => {
+    const version = localStorage.getItem('sisbem_kennel_configs_version');
+    const updatedAt = localStorage.getItem('sisbem_kennel_configs_updated_at');
+    const updatedByRaw = localStorage.getItem('sisbem_kennel_configs_updated_by');
+    let updatedBy: any = null;
+    if (updatedByRaw) {
+      try { updatedBy = JSON.parse(updatedByRaw); } catch {}
     }
-
-    syncKennelConfigsToSupabase(configs).catch(err => console.warn('Supabase syncConfigs:', err));
-    const currentKennels = db.getKennels();
-    syncKennelsFullToSupabase(currentKennels).catch(err => console.warn('Supabase syncKennelsFull:', err));
+    return {
+      version: version ? parseInt(version) : 1,
+      updatedAt: updatedAt || null,
+      updatedBy
+    };
   },
 
-  saveKennelConfigsAsync: async (configs: KennelConfig[]) => {
-    localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(configs));
-    db.syncKennelsWithConfigs(configs);
+  saveKennelConfigs: (configs: KennelConfig[]) => {
+    db.saveKennelConfigsAsync(configs).catch(err => {
+      console.error('Falha ao salvar configurações de forma assíncrona:', err);
+    });
+  },
 
+  saveKennelConfigsAsync: async (configs: KennelConfig[], expectedVersion?: number) => {
+    const currentUser = db.getCurrentUser();
+    if (!currentUser || currentUser.role !== 'ADMIN') {
+      throw new Error('Permissão negada: Apenas administradores possuem autorização para alterar as configurações do centro.');
+    }
+
+    // 1. Persiste no banco de dados central primeiro com controle de versão
+    const result = await syncKennelConfigsToSupabase(configs, expectedVersion, currentUser);
+    if (!result.success) {
+      throw new Error(result.error || 'Falha ao salvar configurações no banco de dados central.');
+    }
+
+    // 2. Sincroniza e gera as baias físicas correspondentes
+    db.syncKennelsWithConfigs(configs);
+    const currentKennels = db.getKennels();
+    await syncKennelsFullToSupabase(currentKennels);
+
+    // 3. Atualiza cache local SOMENTE após sucesso confirmado no banco central
+    localStorage.setItem(KEYS.KENNEL_CONFIGS, JSON.stringify(configs));
+    if (result.version) {
+      localStorage.setItem('sisbem_kennel_configs_version', String(result.version));
+    }
+    if (result.updatedAt) {
+      localStorage.setItem('sisbem_kennel_configs_updated_at', result.updatedAt);
+    }
+    localStorage.setItem('sisbem_kennel_configs_updated_by', JSON.stringify({
+      id: currentUser.id,
+      name: currentUser.name,
+      username: currentUser.username,
+      role: currentUser.role
+    }));
+
+    // 4. Notifica a aplicação local
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', { detail: { configs } }));
-      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed'));
+      window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+        detail: {
+          configs,
+          version: result.version,
+          updatedAt: result.updatedAt,
+          updatedBy: currentUser,
+          source: 'save'
+        }
+      }));
+      window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', { detail: { source: 'save' } }));
       window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
     }
 
-    await syncKennelConfigsToSupabase(configs);
-    const currentKennels = db.getKennels();
-    await syncKennelsFullToSupabase(currentKennels);
+    return result;
   },
 
   getAnimalsJoined: (): AnimalJoined[] => {

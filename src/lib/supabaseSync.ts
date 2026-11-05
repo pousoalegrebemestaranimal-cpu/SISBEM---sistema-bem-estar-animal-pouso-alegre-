@@ -1315,26 +1315,130 @@ export async function deleteUserFromSupabase(id: string) {
   }
 }
 
-export async function syncKennelConfigsToSupabase(configs: KennelConfig[]): Promise<boolean> {
+export interface SystemConfigsPayload {
+  configs: KennelConfig[];
+  version: number;
+  updatedAt: string;
+  updatedBy?: {
+    id?: string;
+    name?: string;
+    username?: string;
+    role?: string;
+  };
+}
+
+export function parseSystemConfigs(raw: any): {
+  configs: KennelConfig[];
+  version: number;
+  updatedAt: string;
+  updatedBy: any;
+} | null {
+  if (!raw) return null;
   try {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (Array.isArray(data)) {
+      return {
+        configs: data,
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        updatedBy: null
+      };
+    }
+    if (data && Array.isArray(data.configs)) {
+      return {
+        configs: data.configs,
+        version: typeof data.version === 'number' ? data.version : 1,
+        updatedAt: data.updatedAt || new Date().toISOString(),
+        updatedBy: data.updatedBy || null
+      };
+    }
+  } catch (e) {
+    console.warn('Erro ao decodificar configurações do sistema:', e);
+  }
+  return null;
+}
+
+export async function syncKennelConfigsToSupabase(
+  configs: KennelConfig[],
+  expectedVersion?: number,
+  currentUser?: any
+): Promise<{ success: boolean; version?: number; updatedAt?: string; error?: string }> {
+  try {
+    // 1. Controle de Permissões: Apenas administradores podem persistir alterações
+    if (currentUser && currentUser.role !== 'ADMIN') {
+      return {
+        success: false,
+        error: 'Permissão negada: Somente usuários administradores podem salvar configurações institucionais.'
+      };
+    }
+
+    // 2. Consulta estado atual remoto para concorrência e integridade
+    const { data: remoteRow, error: fetchErr } = await supabase
+      .from('solicitantes')
+      .select('observacoes, created_at')
+      .eq('id', 'system-configs-v1')
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.warn('Erro ao verificar versão remota de configurações:', fetchErr.message);
+    }
+
+    let remoteVersion = 0;
+    if (remoteRow?.observacoes) {
+      const parsed = parseSystemConfigs(remoteRow.observacoes);
+      if (parsed) {
+        remoteVersion = parsed.version;
+      }
+    }
+
+    // Se uma versão esperada foi informada e a versão remota é estritamente superior, houve conflito concorrente
+    if (expectedVersion !== undefined && remoteVersion > expectedVersion) {
+      return {
+        success: false,
+        error: `Conflito de concorrência: A configuração foi atualizada recentemente por outro administrador (versão atual: ${remoteVersion}). Por favor, recarregue os dados antes de salvar.`
+      };
+    }
+
+    const nextVersion = Math.max(remoteVersion, expectedVersion || 0) + 1;
+    const now = new Date().toISOString();
+    const updatedBy = currentUser ? {
+      id: currentUser.id,
+      name: currentUser.name,
+      username: currentUser.username,
+      role: currentUser.role
+    } : null;
+
+    const payloadObj: SystemConfigsPayload = {
+      configs,
+      version: nextVersion,
+      updatedAt: now,
+      updatedBy: updatedBy || undefined
+    };
+
     const payload = {
       id: 'system-configs-v1',
       nome_completo: 'Configurações do Sistema (SISBEM)',
       cpf: 'CONFIG-SYSTEM',
       telefone: '0000',
       tipo: 'ORGAO_PUBLICO',
-      observacoes: JSON.stringify(configs),
-      created_at: new Date().toISOString()
+      observacoes: JSON.stringify(payloadObj),
+      created_at: now
     };
+
     const { error } = await supabase.from('solicitantes').upsert([payload]);
     if (error) {
       console.warn('Supabase syncKennelConfigs aviso:', error.message);
-      return false;
+      return { success: false, error: error.message };
     }
-    return true;
-  } catch (err) {
+
+    return {
+      success: true,
+      version: nextVersion,
+      updatedAt: now
+    };
+  } catch (err: any) {
     console.warn('Erro syncKennelConfigsToSupabase:', err);
-    return false;
+    return { success: false, error: err?.message || 'Falha de comunicação com o banco central' };
   }
 }
 
@@ -1402,13 +1506,16 @@ export async function syncAllLocalDataToSupabase(dbInstance: any): Promise<{
   };
 
   try {
-    // 1. Kennels
+    // 1. Kennels (proteção: se o banco central já possui baias cadastradas, mantém as oficiais e evita sobrescrita por cache local)
+    const { count: remoteKennelsCount } = await supabase.from('kennels').select('*', { count: 'exact', head: true });
     const localKennels: Kennel[] = dbInstance.getKennels() || [];
-    if (localKennels.length > 0) {
+    if (localKennels.length > 0 && (!remoteKennelsCount || remoteKennelsCount === 0)) {
       const payload = localKennels.map(mapKennelToSupabase);
       const { error } = await supabase.from('kennels').upsert(payload);
       if (error) errors.push(`Baias: ${error.message}`);
       else counts.kennels = localKennels.length;
+    } else if (remoteKennelsCount && remoteKennelsCount > 0) {
+      counts.kennels = remoteKennelsCount;
     }
 
     // 2. Solicitantes
@@ -1626,23 +1733,42 @@ export async function pullFromSupabaseToLocal(
 
       const syncedCounts: Partial<SyncStats['counts']> = {};
 
-      // 0. Configurações de Baias e Sistema
+      // 0. Configurações de Baias e Sistema (Centralizadas no banco de dados)
       if (shouldSync('configs')) {
         try {
           const { data: configRow } = await supabase
             .from('solicitantes')
-            .select('observacoes')
+            .select('observacoes, created_at')
             .eq('id', 'system-configs-v1')
             .maybeSingle();
 
           if (configRow?.observacoes) {
-            const parsedConfigs = JSON.parse(configRow.observacoes);
-            if (Array.isArray(parsedConfigs) && parsedConfigs.length > 0) {
-              localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsedConfigs));
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
-                  detail: { configs: parsedConfigs, source: 'supabase-pull' }
-                }));
+            const parsed = parseSystemConfigs(configRow.observacoes);
+            if (parsed && Array.isArray(parsed.configs) && parsed.configs.length > 0) {
+              const localVersionStored = localStorage.getItem('sisbem_kennel_configs_version');
+              const localTimestampStored = localStorage.getItem('sisbem_kennel_configs_updated_at');
+              const localVersion = localVersionStored ? parseInt(localVersionStored) : 0;
+              const localTimestamp = localTimestampStored ? new Date(localTimestampStored).getTime() : 0;
+              const remoteTimestamp = new Date(parsed.updatedAt).getTime();
+
+              if (isForce || parsed.version >= localVersion || remoteTimestamp >= localTimestamp || !localStorage.getItem('sisbem_kennel_configs')) {
+                localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsed.configs));
+                localStorage.setItem('sisbem_kennel_configs_version', String(parsed.version));
+                localStorage.setItem('sisbem_kennel_configs_updated_at', parsed.updatedAt);
+                if (parsed.updatedBy) {
+                  localStorage.setItem('sisbem_kennel_configs_updated_by', JSON.stringify(parsed.updatedBy));
+                }
+                syncLocalKennelsWithConfigs(parsed.configs);
+
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+                    detail: { ...parsed, source: 'supabase-pull' }
+                  }));
+                  window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
+                    detail: { source: 'supabase-pull' }
+                  }));
+                  window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+                }
               }
             }
           }
@@ -2063,6 +2189,84 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
             if (onUpdate) onUpdate('kennel_occupations', payload);
           } catch (e) {
             console.warn('Erro ao processar realtime de ocupações de baias:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'solicitantes', filter: 'id=eq.system-configs-v1' },
+        (payload: any) => {
+          try {
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const rawObs = payload.new?.observacoes;
+              if (rawObs) {
+                const parsed = parseSystemConfigs(rawObs);
+                if (parsed && Array.isArray(parsed.configs) && parsed.configs.length > 0) {
+                  const localVersionStored = localStorage.getItem('sisbem_kennel_configs_version');
+                  const localTimestampStored = localStorage.getItem('sisbem_kennel_configs_updated_at');
+                  const localVersion = localVersionStored ? parseInt(localVersionStored) : 0;
+                  const localTimestamp = localTimestampStored ? new Date(localTimestampStored).getTime() : 0;
+                  const remoteTimestamp = new Date(parsed.updatedAt).getTime();
+
+                  if (parsed.version >= localVersion || remoteTimestamp >= localTimestamp) {
+                    localStorage.setItem('sisbem_kennel_configs', JSON.stringify(parsed.configs));
+                    localStorage.setItem('sisbem_kennel_configs_version', String(parsed.version));
+                    localStorage.setItem('sisbem_kennel_configs_updated_at', parsed.updatedAt);
+                    if (parsed.updatedBy) {
+                      localStorage.setItem('sisbem_kennel_configs_updated_by', JSON.stringify(parsed.updatedBy));
+                    }
+                    syncLocalKennelsWithConfigs(parsed.configs);
+
+                    window.dispatchEvent(new CustomEvent('sisbem-settings-changed', {
+                      detail: { ...parsed, source: 'realtime' }
+                    }));
+                    window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
+                      detail: { source: 'realtime' }
+                    }));
+                    window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+                  }
+                }
+              }
+            }
+            if (onUpdate) onUpdate('solicitantes_configs', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de configurações:', e);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'kennels' },
+        (payload: any) => {
+          try {
+            const list: Kennel[] = JSON.parse(localStorage.getItem('sisbem_kennels') || '[]');
+            if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+              const mapped = mapSupabaseToKennel(payload.new);
+              const idx = list.findIndex(k => k.id === mapped.id);
+              if (idx > -1) {
+                list[idx] = mapped;
+              } else {
+                list.push(mapped);
+              }
+            } else if (payload.eventType === 'DELETE') {
+              const deletedId = payload.old?.id;
+              if (deletedId) {
+                const filtered = list.filter(k => k.id !== deletedId);
+                list.length = 0;
+                list.push(...filtered);
+              }
+            }
+            localStorage.setItem('sisbem_kennels', JSON.stringify(list));
+            localStorage.setItem('sisbem_raw_kennels', JSON.stringify(list));
+
+            window.dispatchEvent(new CustomEvent('sisbem-kennels-changed', {
+              detail: { type: payload.eventType, source: 'realtime' }
+            }));
+            window.dispatchEvent(new CustomEvent('sisbem-occupations-changed'));
+
+            if (onUpdate) onUpdate('kennels', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de baias:', e);
           }
         }
       )
