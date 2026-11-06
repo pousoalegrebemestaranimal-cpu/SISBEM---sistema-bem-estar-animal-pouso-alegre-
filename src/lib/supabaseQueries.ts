@@ -110,6 +110,82 @@ export function mapRemoteOccupationWithKennel(r: any): KennelOccupation & { kenn
 }
 
 /**
+ * Consulta estritamente as ocupações ATIVAS (exit_date IS NULL) no Supabase,
+ * com join nas baias (kennels) e animais.
+ * Utilizada para grade de baias, animais acomodados e movimentações.
+ */
+export async function fetchActiveOccupationsWithKennel(): Promise<Array<KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any }>> {
+  try {
+    const { data: rows, error } = await supabase
+      .from('kennel_occupations')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity), animals (id, nome, especie, condicao, tem_tutor)')
+      .is('exit_date', null)
+      .order('entry_date', { ascending: false });
+
+    if (error || !rows) {
+      console.warn('fetchActiveOccupationsWithKennel aviso:', error?.message);
+      return [];
+    }
+
+    return rows.map(mapRemoteOccupationWithKennel);
+  } catch (err) {
+    console.warn('Erro ao buscar ocupações ativas no Supabase:', err);
+    return [];
+  }
+}
+
+export interface FetchOccupationsHistoryParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface OccupationsHistoryResult {
+  data: Array<KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any }>;
+  hasMore: boolean;
+  totalCount: number;
+}
+
+/**
+ * Consulta paginada do histórico geral de ocupações no Supabase.
+ * Ordenado por entry_date do mais recente para o mais antigo.
+ * Preserva 100% dos dados históricos no banco.
+ */
+export async function fetchOccupationsHistoryPaginated(
+  params: FetchOccupationsHistoryParams = {}
+): Promise<OccupationsHistoryResult> {
+  const limit = params.limit ?? 25;
+  const offset = params.offset ?? 0;
+  const from = offset;
+  const to = offset + limit - 1;
+
+  try {
+    const { data: rows, count, error } = await supabase
+      .from('kennel_occupations')
+      .select('id, kennel_id, animal_id, entry_date, exit_date, vet_id, clinical_record_id, justification, kennels (id, name, type, capacity), animals (id, nome, especie, condicao, tem_tutor)', { count: 'exact' })
+      .order('entry_date', { ascending: false })
+      .range(from, to);
+
+    if (error || !rows) {
+      console.warn('fetchOccupationsHistoryPaginated aviso:', error?.message);
+      return { data: [], hasMore: false, totalCount: 0 };
+    }
+
+    const mapped = rows.map(mapRemoteOccupationWithKennel);
+    const total = count ?? 0;
+    const hasMore = (from + rows.length) < total;
+
+    return {
+      data: mapped,
+      hasMore,
+      totalCount: total
+    };
+  } catch (err) {
+    console.warn('Erro ao buscar histórico paginado de ocupações:', err);
+    return { data: [], hasMore: false, totalCount: 0 };
+  }
+}
+
+/**
  * Consulta todas as ocupações registradas no Supabase com join nas baias (kennels) e animais.
  * Fonte canônica e oficial do sistema.
  */

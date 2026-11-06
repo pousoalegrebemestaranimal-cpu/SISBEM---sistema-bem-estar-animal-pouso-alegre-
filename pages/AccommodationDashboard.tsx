@@ -15,6 +15,8 @@ import { pullFromSupabaseToLocal } from '../src/lib/supabaseSync';
 import { 
   isOccupationActive, 
   getAllActiveOccupations, 
+  fetchActiveOccupationsWithKennel,
+  fetchOccupationsHistoryPaginated,
   fetchAllOccupationsWithKennel, 
   buildKennelCanonicalLookup, 
   fetchAllKennelsFromSupabase,
@@ -91,7 +93,8 @@ export const SECTOR_META: Record<KennelType, {
 };
 
 const AccommodationDashboard: React.FC = () => {
-  const [filterType, setFilterType] = useState<string>('TODOS');
+  // ETAPA 3: Inicia sem setor selecionado para apresentação dos resumos antes de exibir as baias
+  const [filterType, setFilterType] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'TODAS' | 'LIVRES' | 'OCUPADAS' | 'LOTADAS'>('TODAS');
   const [searchTerm, setSearchTerm] = useState('');
   const debouncedSearch = useDebounce(searchTerm, 300);
@@ -99,6 +102,13 @@ const AccommodationDashboard: React.FC = () => {
   const [selectedKennelId, setSelectedKennelId] = useState('');
   const [justification, setJustification] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // ETAPA 2: Histórico geral de ocupações sob demanda com paginação
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [historyList, setHistoryList] = useState<Array<KennelOccupation & { kennel?: Kennel; animal?: any; animals?: any }>>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
+  const [historyHasMore, setHistoryHasMore] = useState<boolean>(false);
+  const [historyTotalCount, setHistoryTotalCount] = useState<number>(0);
 
   // Alocação a partir do clique direto na baia
   const [targetKennelForAllocation, setTargetKennelForAllocation] = useState<Kennel | null>(null);
@@ -186,14 +196,14 @@ const AccommodationDashboard: React.FC = () => {
   // Lista canônica de baias deduplicadas
   const uniqueKennels = kennelLookup.canonicalKennels;
 
-  // Busca ocupações oficiais diretamente no Supabase com join em kennels e animals, e todas as baias
+  // ETAPA 2: Busca ocupações ATIVAS (exit_date IS NULL) diretamente no Supabase com join em kennels e animals, e todas as baias
   const fetchOfficialOccupations = async () => {
     try {
       const [rem, remKennels] = await Promise.all([
-        fetchAllOccupationsWithKennel(),
+        fetchActiveOccupationsWithKennel(),
         fetchAllKennelsFromSupabase()
       ]);
-      if (rem && rem.length > 0) {
+      if (rem) {
         setOccupations(rem);
         localStorage.setItem('sisbem_occupations', JSON.stringify(rem));
       }
@@ -202,7 +212,41 @@ const AccommodationDashboard: React.FC = () => {
         localStorage.setItem('sisbem_raw_kennels', JSON.stringify(remKennels));
       }
     } catch (err) {
-      console.warn('Aviso ao carregar ocupações oficiais:', err);
+      console.warn('Aviso ao carregar ocupações ativas oficiais:', err);
+    }
+  };
+
+  // ETAPA 2: Consulta paginada do histórico geral sob demanda
+  const loadInitialHistory = async () => {
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetchOccupationsHistoryPaginated({ limit: 25, offset: 0 });
+      setHistoryList(res.data);
+      setHistoryHasMore(res.hasMore);
+      setHistoryTotalCount(res.totalCount);
+    } catch (err) {
+      console.warn('Erro ao carregar histórico inicial de ocupações:', err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  const loadMoreHistory = async () => {
+    if (isLoadingHistory || !historyHasMore) return;
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetchOccupationsHistoryPaginated({ limit: 25, offset: historyList.length });
+      setHistoryList(prev => {
+        const existingIds = new Set(prev.map(p => p.id));
+        const newOnes = res.data.filter(d => !existingIds.has(d.id));
+        return [...prev, ...newOnes];
+      });
+      setHistoryHasMore(res.hasMore);
+      setHistoryTotalCount(res.totalCount);
+    } catch (err) {
+      console.warn('Erro ao carregar mais histórico de ocupações:', err);
+    } finally {
+      setIsLoadingHistory(false);
     }
   };
 
@@ -230,26 +274,57 @@ const AccommodationDashboard: React.FC = () => {
     }
   };
 
-  const refreshData = () => {
+  // Atualização coordenada dos dados sem chamadas repetitivas
+  const refreshData = async () => {
     setKennels(db.getKennels());
     setOccupations(db.getOccupations());
     setAllAnimals(db.getAnimalsJoined());
-    fetchOfficialOccupations();
-    fetchOfficialWaitingQueue();
+    await Promise.all([
+      fetchOfficialOccupations(),
+      fetchOfficialWaitingQueue()
+    ]);
   };
 
+  // ETAPA 1: Eliminação de consultas redundantes no carregamento inicial
   useEffect(() => {
-    refreshData();
-    fetchOfficialOccupations();
-    fetchOfficialWaitingQueue();
+    let isMounted = true;
 
-    // Sincroniza em segundo plano apenas os módulos necessários ao abrir a tela
-    pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels', 'occupations', 'animals'], force: true }).then(() => {
-      refreshData();
-    }).catch(() => {});
+    // 1. Apresenta imediatamente os dados em cache local (instantâneo, sem flicker)
+    setKennels(db.getKennels());
+    setOccupations(db.getOccupations());
+    setAllAnimals(db.getAnimalsJoined());
 
+    // 2. Consulta coordenada única das fontes oficiais no Supabase
+    const initLoad = async () => {
+      try {
+        await Promise.all([
+          fetchOfficialOccupations(),
+          fetchOfficialWaitingQueue()
+        ]);
+      } catch (err) {
+        console.warn('Aviso no carregamento inicial das acomodações:', err);
+      }
+
+      // 3. Atualiza cache local em segundo plano de forma passiva, sem disparar nova cascata
+      if (isMounted) {
+        pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels'], force: false }).catch(() => {});
+      }
+    };
+
+    initLoad();
+
+    // 4. ETAPA 4: Listener com debounce para eventos locais e Realtime (evita tempestade de consultas)
+    let debounceTimer: any = null;
     const handleUpdate = () => {
-      refreshData();
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (!isMounted) return;
+        setKennels(db.getKennels());
+        setOccupations(db.getOccupations());
+        setAllAnimals(db.getAnimalsJoined());
+        fetchOfficialOccupations();
+        fetchOfficialWaitingQueue();
+      }, 300);
     };
 
     window.addEventListener('sisbem-occupations-changed', handleUpdate);
@@ -259,6 +334,8 @@ const AccommodationDashboard: React.FC = () => {
     window.addEventListener('storage', handleUpdate);
 
     return () => {
+      isMounted = false;
+      if (debounceTimer) clearTimeout(debounceTimer);
       window.removeEventListener('sisbem-occupations-changed', handleUpdate);
       window.removeEventListener('sisbem-animals-changed', handleUpdate);
       window.removeEventListener('sisbem-kennels-changed', handleUpdate);
@@ -272,13 +349,16 @@ const AccommodationDashboard: React.FC = () => {
     setQueueError(null);
     try {
       await Promise.all([
-        pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels', 'occupations', 'animals'], force: true }),
+        pullFromSupabaseToLocal(db, { modules: ['configs', 'kennels', 'animals'], force: true }),
         fetchOfficialOccupations(),
         fetchOfficialWaitingQueue()
       ]);
       setKennels(db.getKennels());
       setOccupations(db.getOccupations());
       setAllAnimals(db.getAnimalsJoined());
+      if (showHistory) {
+        loadInitialHistory();
+      }
     } catch (e: any) {
       console.warn('Erro ao sincronizar baias:', e);
       setQueueError('Erro ao consultar o servidor central. Tente novamente.');
@@ -443,8 +523,7 @@ const AccommodationDashboard: React.FC = () => {
       setAllocatingAnimal(null);
       setSelectedKennelId('');
       setJustification('');
-      refreshData();
-      await fetchOfficialOccupations();
+      await refreshData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -467,8 +546,7 @@ const AccommodationDashboard: React.FC = () => {
       setTargetKennelForAllocation(null);
       setSelectedAnimalIdToAllocate('');
       setJustification('');
-      refreshData();
-      await fetchOfficialOccupations();
+      await refreshData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -478,8 +556,7 @@ const AccommodationDashboard: React.FC = () => {
     if (!window.confirm(`Tem certeza que deseja desalocar o animal ${animalName} desta baia?`)) return;
     try {
       await db.releaseAnimalFromKennelAsync(animalId);
-      refreshData();
-      await fetchOfficialOccupations();
+      await refreshData();
     } catch (err: any) {
       alert(err.message);
     }
@@ -2356,6 +2433,18 @@ const AccommodationDashboard: React.FC = () => {
               </button>
             );
           })}
+
+          {filterType && (
+            <button
+              type="button"
+              onClick={() => setFilterType('')}
+              className="px-3 py-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
+              title="Voltar para a tela inicial de seleção de setores"
+            >
+              <X size={14} />
+              <span className="hidden sm:inline">Desmarcar</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -2406,7 +2495,49 @@ const AccommodationDashboard: React.FC = () => {
       </div>
 
       {/* 4. Grade de Baias Organizadas com Capacidade Configurada e Animais Alojados */}
-      {filteredKennels.length === 0 ? (
+      {!filterType ? (
+        <div className="bg-white rounded-3xl border border-slate-200/90 p-8 sm:p-12 text-center space-y-6 shadow-xs animate-in fade-in">
+          <div className="w-16 h-16 mx-auto bg-teal-50 text-teal-700 rounded-2xl flex items-center justify-center border border-teal-100 shadow-2xs">
+            <Layers size={32} />
+          </div>
+          <div className="max-w-xl mx-auto space-y-2">
+            <h3 className="text-lg font-black text-slate-800">Selecione um Setor de Acomodação</h3>
+            <p className="text-xs text-slate-500 leading-relaxed font-medium">
+              Os indicadores gerais de ocupação acima já estão calculados. Escolha um setor específico para visualizar as baias e animais internados, ou selecione <strong>Todos os Setores</strong> para ver a distribuição completa das 126 baias.
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-2.5 max-w-2xl mx-auto pt-2">
+            <button
+              type="button"
+              onClick={() => setFilterType('TODOS')}
+              className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition-all shadow-sm flex items-center gap-2 cursor-pointer"
+            >
+              <Layers size={15} />
+              <span>Todos os Setores ({uniqueKennels.length} baias)</span>
+            </button>
+            {stats.map(s => {
+              const meta = SECTOR_META[s.type];
+              const Icon = meta?.icon || Home;
+              return (
+                <button
+                  key={s.type}
+                  type="button"
+                  onClick={() => setFilterType(s.type)}
+                  className="px-4 py-2.5 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 font-bold text-xs rounded-xl transition-all shadow-2xs flex items-center gap-2 cursor-pointer"
+                >
+                  <Icon size={15} className={meta?.colorText || 'text-slate-600'} />
+                  <span>{meta?.name || s.type}</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                    s.occupied >= s.capacity && s.capacity > 0 ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-700'
+                  }`}>
+                    {s.occupied}/{s.capacity}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : filteredKennels.length === 0 ? (
         <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center space-y-3 shadow-xs">
           <AlertTriangle size={32} className="mx-auto text-amber-500" />
           <h4 className="text-base font-bold text-slate-800">Nenhuma baia encontrada</h4>
@@ -3037,101 +3168,182 @@ const AccommodationDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Seção de Histórico de Movimentações */}
-      <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row justify-between sm:items-center gap-4">
-          <div className="flex items-center gap-2">
-            <History className="text-teal-600" size={18} />
-            <h3 className="text-sm font-black uppercase tracking-wider text-slate-800">Histórico Geral de Ocupações e Movimentações</h3>
+      {/* Seção de Histórico de Movimentações (ETAPA 2: Sob Demanda e Paginado) */}
+      {!showHistory ? (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 sm:p-6 flex flex-col sm:flex-row items-center justify-between gap-4 animate-in fade-in">
+          <div className="flex items-center gap-3.5">
+            <div className="p-3 bg-teal-50 text-teal-700 rounded-xl border border-teal-100 shrink-0">
+              <History size={22} />
+            </div>
+            <div>
+              <h3 className="text-sm font-black uppercase tracking-wider text-slate-800">
+                Histórico Geral de Ocupações e Movimentações
+              </h3>
+              <p className="text-xs text-slate-500 font-medium">
+                Consulte o registro cronológico de todas as altas, transferências e internações anteriores.
+              </p>
+            </div>
           </div>
-          <div className="text-[10px] font-bold text-slate-400">
-            Total de movimentações: {occupations.length}
+          <button
+            type="button"
+            onClick={() => {
+              setShowHistory(true);
+              if (historyList.length === 0) {
+                loadInitialHistory();
+              }
+            }}
+            className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-2 cursor-pointer shrink-0"
+          >
+            <Eye size={15} />
+            <span>Consultar Histórico</span>
+          </button>
+        </section>
+      ) : (
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in">
+          <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+            <div className="flex items-center gap-2.5">
+              <History className="text-teal-600" size={18} />
+              <h3 className="text-sm font-black uppercase tracking-wider text-slate-800">
+                Histórico Geral de Ocupações e Movimentações
+              </h3>
+              {isLoadingHistory && <RotateCw size={13} className="animate-spin text-teal-600" />}
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="text-xs font-bold text-slate-500">
+                Exibindo <strong>{historyList.length}</strong> de <strong>{historyTotalCount}</strong> registros
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHistory(false)}
+                className="text-xs font-bold text-slate-600 hover:text-slate-900 px-3 py-1.5 bg-white border border-slate-200 rounded-lg shadow-2xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <ChevronUp size={14} />
+                <span>Ocultar Histórico</span>
+              </button>
+            </div>
           </div>
-        </div>
-        
-        {occupations.length === 0 ? (
-          <div className="p-12 text-center text-slate-400 italic text-sm">
-            Nenhuma movimentação registrada no histórico.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse font-sans">
-              <thead>
-                <tr className="bg-slate-100/50 border-b border-slate-200">
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Animal</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Acomodação</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Entrada</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Saída</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Status</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Justificativa</th>
-                  <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Responsável</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {[...occupations]
-                  .sort((a, b) => new Date((b.entryDate || (b as any).entry_date) || 0).getTime() - new Date((a.entryDate || (a as any).entry_date) || 0).getTime())
-                  .map(occ => {
-                    const aid = occ.animalId || (occ as any).animal_id;
-                    const animal = allAnimals.find(a => a.id === aid);
-                    const kid = occ.kennelId || (occ as any).kennel_id;
-                    const kennel = kennelLookup.resolveKennel(kid, (occ as any).kennel);
-                    const vid = occ.vetId || (occ as any).vet_id;
-                    const responsible = db.getUsers().find(u => u.id === vid);
-                    const isActive = isOccupationActive(occ);
-                    const exitTime = occ.exitDate || (occ as any).exit_date;
-                    const entryTime = occ.entryDate || (occ as any).entry_date;
-                    
-                    return (
-                      <tr key={occ.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-4">
-                          {animal ? (
-                            <Link to={`/animais/ficha/${animal.id}`} className="font-bold text-slate-900 hover:text-teal-600 transition-colors uppercase text-xs">
-                              {animal.nome}
-                            </Link>
-                          ) : (
-                            <span className="text-slate-400 text-xs italic">Desconhecido</span>
-                          )}
-                        </td>
-                        <td className="p-4">
-                          <span className="text-xs font-semibold text-slate-700 bg-slate-100 px-2 py-1 rounded">
-                            {kennel ? `${kennel.name} (${kennel.type})` : ((occ as any).kennel?.name ? `${(occ as any).kennel.name} (${(occ as any).kennel.type || 'Acomodação'})` : 'Baia')}
-                          </span>
-                        </td>
-                        <td className="p-4 text-xs text-slate-600 font-medium">
-                          {entryTime ? format(new Date(entryTime), 'dd/MM/yyyy HH:mm', { locale: ptBR }) : '--'}
-                        </td>
-                        <td className="p-4 text-xs text-slate-600 font-medium">
-                          {!isActive && exitTime ? (
-                            format(new Date(exitTime), 'dd/MM/yyyy HH:mm', { locale: ptBR })
-                          ) : (
-                            <span className="text-slate-400 italic">--</span>
-                          )}
-                        </td>
-                        <td className="p-4">
-                          {!isActive ? (
-                            <span className="bg-slate-100 text-slate-500 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded uppercase">
-                              Histórico
+          
+          {historyList.length === 0 ? (
+            <div className="p-12 text-center text-slate-400 italic text-sm">
+              {isLoadingHistory ? 'Carregando histórico do servidor...' : 'Nenhuma movimentação registrada no histórico.'}
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse font-sans">
+                  <thead>
+                    <tr className="bg-slate-100/50 border-b border-slate-200">
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Animal</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Acomodação</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Entrada</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Saída</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Status</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Justificativa</th>
+                      <th className="p-4 text-[10px] font-black uppercase text-slate-500 tracking-wider">Responsável</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {historyList.map(occ => {
+                      const aid = occ.animalId || (occ as any).animal_id;
+                      const animal = allAnimals.find(a => a.id === aid);
+                      const kid = occ.kennelId || (occ as any).kennel_id;
+                      const kennel = kennelLookup.resolveKennel(kid, (occ as any).kennel);
+                      const vid = occ.vetId || (occ as any).vet_id;
+                      const responsible = db.getUsers().find(u => u.id === vid);
+                      const isActive = isOccupationActive(occ);
+                      const exitTime = occ.exitDate || (occ as any).exit_date;
+                      const entryTime = occ.entryDate || (occ as any).entry_date;
+                      const animalName = animal?.nome || (occ as any).animals?.nome || (occ as any).animal?.nome;
+
+                      return (
+                        <tr key={occ.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="p-4">
+                            {animal ? (
+                              <Link to={`/animais/ficha/${animal.id}`} className="font-bold text-slate-900 hover:text-teal-600 transition-colors uppercase text-xs">
+                                {animal.nome}
+                              </Link>
+                            ) : animalName ? (
+                              <span className="font-bold text-slate-800 text-xs uppercase">
+                                {animalName}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 text-xs italic">Desconhecido</span>
+                            )}
+                          </td>
+                          <td className="p-4">
+                            <span className="text-xs font-semibold text-slate-700 bg-slate-100 px-2 py-1 rounded">
+                              {kennel ? `${kennel.name} (${kennel.type})` : ((occ as any).kennel?.name ? `${(occ as any).kennel.name} (${(occ as any).kennel.type || 'Acomodação'})` : 'Baia')}
                             </span>
-                          ) : (
-                            <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 text-[9px] font-black px-2 py-0.5 rounded uppercase">
-                              Ativo
-                            </span>
-                          )}
-                        </td>
-                        <td className="p-4 text-xs text-slate-600 font-medium max-w-[200px] truncate" title={occ.justification}>
-                          {occ.justification || <span className="text-slate-300 italic">Sem justificativa</span>}
-                        </td>
-                        <td className="p-4 text-xs text-slate-500 font-semibold">
-                          {responsible?.name || 'Sistema'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+                          </td>
+                          <td className="p-4 text-xs text-slate-600 font-medium">
+                            {entryTime ? format(new Date(entryTime), 'dd/MM/yyyy HH:mm', { locale: ptBR }) : '--'}
+                          </td>
+                          <td className="p-4 text-xs text-slate-600 font-medium">
+                            {!isActive && exitTime ? (
+                              format(new Date(exitTime), 'dd/MM/yyyy HH:mm', { locale: ptBR })
+                            ) : (
+                              <span className="text-slate-400 italic">--</span>
+                            )}
+                          </td>
+                          <td className="p-4">
+                            {!isActive ? (
+                              <span className="bg-slate-100 text-slate-500 border border-slate-200 text-[9px] font-bold px-2 py-0.5 rounded uppercase">
+                                Histórico
+                              </span>
+                            ) : (
+                              <span className="bg-emerald-50 text-emerald-700 border border-emerald-100 text-[9px] font-black px-2 py-0.5 rounded uppercase">
+                                Ativo
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-4 text-xs text-slate-600 font-medium max-w-[200px] truncate" title={occ.justification}>
+                            {occ.justification || <span className="text-slate-300 italic">Sem justificativa</span>}
+                          </td>
+                          <td className="p-4 text-xs text-slate-500 font-semibold">
+                            {responsible?.name || 'Sistema'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Rodapé com botão Carregar Mais ou Indicação de Fim */}
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+                <span className="text-slate-500 font-medium">
+                  Mostrando {historyList.length} de {historyTotalCount} registros históricos no banco.
+                </span>
+
+                {historyHasMore ? (
+                  <button
+                    type="button"
+                    disabled={isLoadingHistory}
+                    onClick={loadMoreHistory}
+                    className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl transition-all shadow-xs flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {isLoadingHistory ? (
+                      <>
+                        <RotateCw size={14} className="animate-spin" />
+                        <span>Carregando próximos...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown size={14} />
+                        <span>Carregar mais registros</span>
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <span className="text-slate-400 font-semibold italic">
+                    Todos os registros disponíveis foram carregados.
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+      )}
       {/* Modal de Consulta do Prontuário Clínico Completo (Somente Leitura) */}
       {historyModalAnimal && (
         <ClinicalHistoryModal
