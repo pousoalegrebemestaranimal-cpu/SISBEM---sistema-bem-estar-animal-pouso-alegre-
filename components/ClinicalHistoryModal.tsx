@@ -56,6 +56,7 @@ interface ClinicalHistoryModalProps {
   onClose: () => void;
   animal: AnimalJoined;
   currentEditId?: string | null;
+  hideNewAttendanceButton?: boolean;
 }
 
 const safeFormatDate = (dateStr?: string | null, formatPattern: string = 'dd/MM/yyyy', fallback: string = '-') => {
@@ -75,7 +76,8 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
   isOpen,
   onClose,
   animal,
-  currentEditId
+  currentEditId,
+  hideNewAttendanceButton = false
 }) => {
   const [records, setRecords] = useState<ClinicalRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -84,6 +86,28 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
   const [viewingAttachment, setViewingAttachment] = useState<{ url: string; title: string } | null>(null);
 
   const users = useMemo(() => db.getUsers(), []);
+
+  const tutor = useMemo(() => {
+    if (animal.tutor) return animal.tutor;
+    if (animal.tutorId) {
+      try {
+        const list = db.getTutores();
+        return list.find(t => t.id === animal.tutorId);
+      } catch {}
+    }
+    return undefined;
+  }, [animal.tutor, animal.tutorId]);
+
+  const solicitante = useMemo(() => {
+    if (animal.solicitante) return animal.solicitante;
+    if (animal.solicitanteId) {
+      try {
+        const list = db.getSolicitantes();
+        return list.find(s => s.id === animal.solicitanteId);
+      } catch {}
+    }
+    return undefined;
+  }, [animal.solicitante, animal.solicitanteId]);
 
   // Carrega o histórico clínico do animal APENAS quando o modal é aberto (Lazy Loading)
   const loadHistory = useCallback(async () => {
@@ -273,6 +297,22 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                   </>
                 )}
               </p>
+              {(tutor || solicitante) && (
+                <div className="flex items-center gap-2 mt-1.5 flex-wrap text-xs text-slate-300">
+                  <span className="font-semibold text-teal-300 flex items-center gap-1">
+                    <UserIcon size={12} /> {tutor ? 'Tutor(a)' : 'Solicitante'}:
+                  </span>
+                  <span className="font-bold text-white">{tutor?.nomeCompleto || solicitante?.nomeCompleto}</span>
+                  {tutor?.telefone && (
+                    <span className="text-slate-400 font-normal">• Tel: {tutor.telefone}</span>
+                  )}
+                  {tutor?.temCadUnico && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300 border border-emerald-700/60 text-[10px] font-bold">
+                      CadÚnico Ativo
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -836,13 +876,15 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                             Prontuário Registrado • ID: {rec.id.substring(0, 8).toUpperCase()}
                           </span>
                           <div className="flex items-center gap-2">
-                            <a
-                              href={`/animais/atendimento/${animal.id}`}
-                              className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
-                              title="Registrar novas informações clínicas abrindo um novo atendimento"
-                            >
-                              <Stethoscope size={14} /> Novo Atendimento Clínico
-                            </a>
+                            {!hideNewAttendanceButton && (
+                              <a
+                                href={`#/animais/atendimento/${animal.id}`}
+                                className="inline-flex items-center gap-1.5 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider shadow-sm transition-all cursor-pointer"
+                                title="Registrar novas informações clínicas abrindo um novo atendimento"
+                              >
+                                <Stethoscope size={14} /> Novo Atendimento Clínico
+                              </a>
+                            )}
                             <button
                               type="button"
                               onClick={() => printClinicalRecord(rec, animal)}

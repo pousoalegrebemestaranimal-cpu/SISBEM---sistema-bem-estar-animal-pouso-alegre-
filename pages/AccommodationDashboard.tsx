@@ -23,6 +23,7 @@ import {
 } from '../src/lib/supabaseQueries';
 import { useDebounce } from '../src/hooks/useDebounce';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
+import { ClinicalHistoryModal } from '../components/ClinicalHistoryModal';
 
 export const SECTOR_META: Record<KennelType, {
   name: string;
@@ -123,6 +124,40 @@ const AccommodationDashboard: React.FC = () => {
   const [isCurativosModalOpen, setIsCurativosModalOpen] = useState(false);
   const [curativosKennelTypeFilter, setCurativosKennelTypeFilter] = useState<string>('TODOS');
   const [isPreviewCurativosOpen, setIsPreviewCurativosOpen] = useState(false);
+
+  // Estado para consulta de prontuário clínico a partir da fila de acomodações
+  const [historyModalAnimal, setHistoryModalAnimal] = useState<AnimalJoined | null>(null);
+
+  const handleOpenHistoryModal = (animal: WaitingAccommodationAnimal | AnimalJoined) => {
+    const joined: AnimalJoined = allAnimals.find(a => a.id === animal.id) || {
+      id: animal.id,
+      nome: animal.nome,
+      especie: (animal.especie as any) || 'Cão',
+      raca: animal.raca || 'SRD',
+      porte: (animal as any).porte || 'Médio',
+      sexo: (animal as any).sexo || 'Macho',
+      corPelagem: (animal as any).corPelagem || 'Não informada',
+      peso: (animal as any).peso || 0,
+      castrado: !!(animal as any).castrado,
+      temTutor: !!animal.temTutor,
+      tutorId: animal.tutorId,
+      solicitanteId: animal.solicitanteId || '',
+      condicao: animal.condicao,
+      localResgate: animal.localResgate || 'Não informado',
+      dataResgate: (animal as any).dataResgate || animal.dataCadastro,
+      dataCadastro: animal.dataCadastro,
+      motivo: (animal as any).motivo || '',
+      usuarioResponsavelId: (animal as any).usuarioResponsavelId || '1',
+      resgateSamuvet: !!(animal as any).resgateSamuvet,
+      necessitaInternacao: !!animal.necessitaInternacao,
+      tipoAcomodacaoSugerida: animal.tipoAcomodacaoSugerida as any,
+      justificativaInternacao: animal.justificativaInternacao,
+      tutor: (animal as any).tutor,
+      solicitante: (animal as any).solicitante,
+      historico: (animal as any).historico
+    };
+    setHistoryModalAnimal(joined);
+  };
 
   const user = db.getCurrentUser();
   const [kennels, setKennels] = useState<Kennel[]>(() => db.getKennels());
@@ -1708,16 +1743,31 @@ const AccommodationDashboard: React.FC = () => {
                       )}
                     </div>
 
-                    <button 
-                      onClick={() => {
-                        setAllocatingAnimal(animal);
-                        setSelectedKennelId('');
-                        setJustification(recJustification || (animal.temTutor ? 'Internação clínica autorizada pelo veterinário' : ''));
-                      }}
-                      className={`w-full flex items-center justify-center gap-2 py-2 text-white text-xs font-bold rounded-lg transition-colors shadow-sm ${animal.temTutor ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-amber-600 hover:bg-amber-700'}`}
-                    >
-                      Alocar Baia Agora <ArrowRight size={14} />
-                    </button>
+                    <div className="flex items-center gap-2 pt-1">
+                      <button 
+                        type="button"
+                        onClick={() => handleOpenHistoryModal(animal)}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-slate-50 text-slate-700 hover:text-teal-700 font-bold text-xs rounded-lg border border-slate-300 hover:border-teal-400 transition-all shadow-2xs cursor-pointer"
+                        title="Consultar prontuário clínico completo do animal antes de acomodar"
+                      >
+                        <FileText size={14} className="text-teal-600 shrink-0" />
+                        <span>Ver Prontuário</span>
+                      </button>
+
+                      <button 
+                        type="button"
+                        onClick={() => {
+                          setAllocatingAnimal(animal);
+                          setSelectedKennelId('');
+                          setJustification(recJustification || (animal.temTutor ? 'Internação clínica autorizada pelo veterinário' : ''));
+                        }}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 text-white text-xs font-bold rounded-lg transition-colors shadow-sm cursor-pointer ${animal.temTutor ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-amber-600 hover:bg-amber-700'}`}
+                        title="Prosseguir com a acomodação do animal em baia"
+                      >
+                        <span>Alocar Baia</span>
+                        <ArrowRight size={14} className="shrink-0" />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -3082,6 +3132,15 @@ const AccommodationDashboard: React.FC = () => {
           </div>
         )}
       </section>
+      {/* Modal de Consulta do Prontuário Clínico Completo (Somente Leitura) */}
+      {historyModalAnimal && (
+        <ClinicalHistoryModal
+          isOpen={!!historyModalAnimal}
+          onClose={() => setHistoryModalAnimal(null)}
+          animal={historyModalAnimal}
+          hideNewAttendanceButton={true}
+        />
+      )}
     </div>
   );
 };
