@@ -3,7 +3,7 @@ import React, { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { db } from './services/db';
 import { supabase, resolveSupabaseProfile } from './src/lib/supabase';
-import { pullFromSupabaseToLocal, initRealtimeSync } from './src/lib/supabaseSync';
+import { pullFromSupabaseToLocal, initRealtimeSync, initReconnectionListeners } from './src/lib/supabaseSync';
 import { sanitizeExistingLocalStorage, sanitizeCredentialsFromLocalStorage } from './src/lib/safeStorage';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -78,8 +78,9 @@ const App: React.FC = () => {
     // Sincroniza dados e configurações oficiais do Supabase imediatamente ao carregar o aplicativo
     pullFromSupabaseToLocal(db, { force: true }).catch(err => console.warn('Supabase initial pull error:', err));
 
-    // Inicializa a escuta em tempo real (Realtime Channel) para manter todos os usuários conectados em sincronia
+    // Inicializa a escuta em tempo real (Realtime Channel) e reconciliação automática
     const cleanupRealtime = initRealtimeSync();
+    const cleanupReconnection = initReconnectionListeners();
 
     // Restaura sessão existente do Supabase e resolve perfil institucional apenas se houver sessão ativa
     supabase.auth.getSession().then(async ({ data }) => {
@@ -114,6 +115,7 @@ const App: React.FC = () => {
     return () => {
       subscription.unsubscribe();
       cleanupRealtime();
+      cleanupReconnection();
     };
   }, []);
 

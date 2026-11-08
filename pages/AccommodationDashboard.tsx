@@ -331,6 +331,7 @@ const AccommodationDashboard: React.FC = () => {
     window.addEventListener('sisbem-animals-changed', handleUpdate);
     window.addEventListener('sisbem-kennels-changed', handleUpdate);
     window.addEventListener('sisbem-settings-changed', handleUpdate);
+    window.addEventListener('sisbem-reconcile', handleUpdate);
     window.addEventListener('storage', handleUpdate);
 
     return () => {
@@ -340,6 +341,7 @@ const AccommodationDashboard: React.FC = () => {
       window.removeEventListener('sisbem-animals-changed', handleUpdate);
       window.removeEventListener('sisbem-kennels-changed', handleUpdate);
       window.removeEventListener('sisbem-settings-changed', handleUpdate);
+      window.removeEventListener('sisbem-reconcile', handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };
   }, []);

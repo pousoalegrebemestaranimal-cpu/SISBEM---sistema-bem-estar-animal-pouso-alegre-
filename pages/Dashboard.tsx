@@ -1,78 +1,149 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { db } from '../services/db';
-import { Especie, AnimalCondicao, AnimalJoined, CirurgiaStatus } from '../types';
+import { AnimalCondicao } from '../types';
+import { fetchDashboardMetrics, DashboardMetrics } from '../src/lib/supabaseQueries';
 import { 
-  Dog, Cat, Calendar, ClipboardCheck, Clock, MapPin, Camera, Stethoscope, Heart, FileText, Scissors
+  Dog, Cat, Calendar, ClipboardCheck, Clock, MapPin, Camera, Stethoscope, Heart, 
+  FileText, Scissors, RotateCw, CheckCircle2, AlertCircle, WifiOff, Loader2 
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
 const Dashboard: React.FC = () => {
-  const [animals, setAnimals] = useState<AnimalJoined[]>([]);
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [syncStatus, setSyncStatus] = useState<'sincronizado' | 'atualizando' | 'offline' | 'erro'>('atualizando');
+  const [lastSyncDate, setLastSyncDate] = useState<Date | null>(null);
+  const [feedbackMessage, setFeedbackMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const debounceTimerRef = useRef<any>(null);
+  const isMountedRef = useRef<boolean>(true);
+
+  const loadOfficialMetrics = async (isManual = false) => {
+    if (typeof window !== 'undefined' && !window.navigator.onLine) {
+      setSyncStatus('offline');
+      return;
+    }
+
+    setIsSyncing(true);
+    setSyncStatus('atualizando');
+    if (isManual) setFeedbackMessage(null);
+
+    try {
+      const data = await fetchDashboardMetrics();
+      if (!isMountedRef.current) return;
+      setMetrics(data);
+      const now = new Date();
+      setLastSyncDate(now);
+      setSyncStatus('sincronizado');
+      if (isManual) {
+        setFeedbackMessage({ type: 'success', text: 'Indicadores oficiais atualizados com sucesso!' });
+        setTimeout(() => setFeedbackMessage(null), 3000);
+      }
+    } catch (err: any) {
+      console.warn('Erro ao carregar métricas oficiais do Dashboard:', err);
+      if (!isMountedRef.current) return;
+      setSyncStatus('erro');
+      if (isManual) {
+        setFeedbackMessage({ type: 'error', text: 'Não foi possível consultar o servidor central. Verifique a conexão.' });
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setIsSyncing(false);
+      }
+    }
+  };
+
+  const scheduleDebouncedRefresh = () => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        loadOfficialMetrics(false);
+      }
+    }, 400);
+  };
 
   useEffect(() => {
-    const refresh = () => setAnimals(db.getAnimalsJoined());
-    refresh();
+    isMountedRef.current = true;
+    loadOfficialMetrics(false);
 
-    window.addEventListener('sisbem-animals-changed', refresh);
-    window.addEventListener('sisbem-occupations-changed', refresh);
-    window.addEventListener('storage', refresh);
+    const handleReconcile = () => loadOfficialMetrics(false);
+    const handleOnline = () => loadOfficialMetrics(false);
+    const handleOffline = () => setSyncStatus('offline');
+
+    window.addEventListener('sisbem-animals-changed', scheduleDebouncedRefresh);
+    window.addEventListener('sisbem-surgeries-changed', scheduleDebouncedRefresh);
+    window.addEventListener('sisbem-occupations-changed', scheduleDebouncedRefresh);
+    window.addEventListener('sisbem-reconcile', handleReconcile);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('storage', scheduleDebouncedRefresh);
+
     return () => {
-      window.removeEventListener('sisbem-animals-changed', refresh);
-      window.removeEventListener('sisbem-occupations-changed', refresh);
-      window.removeEventListener('storage', refresh);
+      isMountedRef.current = false;
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+      window.removeEventListener('sisbem-animals-changed', scheduleDebouncedRefresh);
+      window.removeEventListener('sisbem-surgeries-changed', scheduleDebouncedRefresh);
+      window.removeEventListener('sisbem-occupations-changed', scheduleDebouncedRefresh);
+      window.removeEventListener('sisbem-reconcile', handleReconcile);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('storage', scheduleDebouncedRefresh);
     };
   }, []);
 
-  const stats = React.useMemo(() => {
-    const now = new Date();
-    const thisMonth = now.getMonth();
-    const thisYear = now.getFullYear();
-
-    // Filtramos apenas os animais que estão efetivamente sob custódia do centro (Ativos e sem tutor)
-    const activeAnimals = animals.filter(a => 
-      !a.temTutor && ![AnimalCondicao.ADOTADO, AnimalCondicao.OBITO, AnimalCondicao.SOLTURA].includes(a.condicao)
-    );
-
-    const cirurgiasAgendadas = db.getCirurgias().filter(c => c.status === CirurgiaStatus.AGENDADA || c.status === CirurgiaStatus.EM_PREPARO).length;
-    const naoCastrados = activeAnimals.filter(a => !a.castrado).length;
-
-    return {
-      total: activeAnimals.length,
-      caes: activeAnimals.filter(a => a.especie === Especie.CAO).length,
-      gatos: activeAnimals.filter(a => a.especie === Especie.GATO).length,
-      emTratamento: animals.filter(a => !a.temTutor && a.condicao === AnimalCondicao.EM_TRATAMENTO).length,
-      disponivelAdocao: animals.filter(a => !a.temTutor && a.condicao === AnimalCondicao.DISPONIVEL_ADOCAO).length,
-      cirurgiasAgendadas,
-      naoCastrados,
-      // O indicador de resgates do mês mostra apenas acolhimentos/resgates de animais sem tutor do mês
-      resgatesMes: animals.filter(a => {
-        if (a.temTutor || !a.dataResgate) return false;
-        const d = new Date(a.dataResgate);
-        return d.getMonth() === thisMonth && d.getFullYear() === thisYear;
-      }).length
-    };
-  }, [animals]);
-
   const cards = [
-    { label: 'Total em Acolhimento', value: stats.total, icon: ClipboardCheck, color: 'bg-indigo-500' },
-    { label: 'Fila Cirúrgica / Agendadas', value: stats.cirurgiasAgendadas, icon: Scissors, color: 'bg-teal-600', link: '/cirurgias/fila' },
-    { label: 'Não Castrados (Pendentes)', value: stats.naoCastrados, icon: Scissors, color: 'bg-amber-500', link: '/cirurgias/fila' },
-    { label: 'Em Tratamento', value: stats.emTratamento, icon: Stethoscope, color: 'bg-blue-600' },
-    { label: 'Para Adoção', value: stats.disponivelAdocao, icon: Heart, color: 'bg-emerald-500' },
-    { label: 'Resgates (Mês)', value: stats.resgatesMes, icon: Calendar, color: 'bg-slate-700' },
+    { label: 'Total em Acolhimento', value: metrics?.total ?? 0, icon: ClipboardCheck, color: 'bg-indigo-500' },
+    { label: 'Fila Cirúrgica / Agendadas', value: metrics?.cirurgiasAgendadas ?? 0, icon: Scissors, color: 'bg-teal-600', link: '/cirurgias/fila' },
+    { label: 'Não Castrados (Pendentes)', value: metrics?.naoCastrados ?? 0, icon: Scissors, color: 'bg-amber-500', link: '/cirurgias/fila' },
+    { label: 'Em Tratamento', value: metrics?.emTratamento ?? 0, icon: Stethoscope, color: 'bg-blue-600' },
+    { label: 'Para Adoção', value: metrics?.disponivelAdocao ?? 0, icon: Heart, color: 'bg-emerald-500' },
+    { label: 'Resgates (Mês)', value: metrics?.resgatesMes ?? 0, icon: Calendar, color: 'bg-slate-700' },
   ];
+
+  const recentList = metrics?.recentRescues || [];
 
   return (
     <div className="space-y-8 animate-in fade-in">
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">Painel de Controle Interno</h2>
-          <p className="text-slate-500">Visão geral das atividades e ocupação atual do Centro.</p>
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-bold text-slate-900">Painel de Controle Interno</h2>
+            {/* Indicador Discreto de Sincronização */}
+            <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border shadow-2xs ${
+              syncStatus === 'sincronizado' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+              syncStatus === 'atualizando' ? 'bg-indigo-50 text-indigo-700 border-indigo-200' :
+              syncStatus === 'offline' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+              'bg-rose-50 text-rose-700 border-rose-200'
+            }`}>
+              {syncStatus === 'sincronizado' && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
+              {syncStatus === 'atualizando' && <Loader2 size={11} className="animate-spin text-indigo-600" />}
+              {syncStatus === 'offline' && <WifiOff size={11} className="text-amber-600" />}
+              {syncStatus === 'erro' && <AlertCircle size={11} className="text-rose-600" />}
+              <span>
+                {syncStatus === 'sincronizado' ? (lastSyncDate ? `Sincronizado • ${format(lastSyncDate, 'HH:mm:ss')}` : 'Sincronizado') :
+                 syncStatus === 'atualizando' ? 'Atualizando...' :
+                 syncStatus === 'offline' ? 'Sem conexão' :
+                 'Falha na sincronização'}
+              </span>
+            </div>
+          </div>
+          <p className="text-slate-500">Visão geral das atividades e ocupação atual do Centro baseada na base oficial do Supabase.</p>
         </div>
-        <div className="flex items-center gap-3">
+
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Botão de Atualização Manual Oficial */}
+          <button
+            type="button"
+            onClick={() => loadOfficialMetrics(true)}
+            disabled={isSyncing}
+            className="flex items-center gap-2 px-3.5 py-2 bg-white hover:bg-slate-50 active:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl border border-slate-200 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+            title="Consultar indicadores em tempo real no Supabase"
+          >
+            <RotateCw size={14} className={isSyncing ? 'animate-spin text-teal-600' : 'text-slate-500'} />
+            <span>{isSyncing ? 'Atualizando...' : 'Atualizar Informações'}</span>
+          </button>
+
           <Link
             to="/relatorios"
             className="flex items-center gap-2 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold rounded-xl shadow-sm transition-all"
@@ -84,6 +155,15 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {feedbackMessage && (
+        <div className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 transition-all animate-in fade-in duration-200 ${
+          feedbackMessage.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'
+        }`}>
+          {feedbackMessage.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+          <span>{feedbackMessage.text}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {cards.map((card, idx) => {
@@ -119,6 +199,11 @@ const Dashboard: React.FC = () => {
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
           <h3 className="font-bold text-slate-900 flex items-center gap-2"><Clock size={18} className="text-teal-600" /> Resgates Mais Recentes</h3>
+          {metrics && (
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Fonte Oficial: Supabase ({recentList.length} registros exibidos)
+            </span>
+          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -131,7 +216,7 @@ const Dashboard: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {animals.slice(0, 10).map((animal) => (
+              {recentList.map((animal) => (
                 <tr key={animal.id} className="hover:bg-slate-50 transition-colors group cursor-pointer" onClick={() => window.location.hash = `#/animais/ficha/${animal.id}`}>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
@@ -170,9 +255,11 @@ const Dashboard: React.FC = () => {
                   </td>
                 </tr>
               ))}
-              {animals.length === 0 && (
+              {recentList.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center text-slate-400 italic">Nenhum animal cadastrado no sistema.</td>
+                  <td colSpan={4} className="px-6 py-12 text-center text-slate-400 italic">
+                    {isSyncing ? 'Carregando dados oficiais do Supabase...' : 'Nenhum animal cadastrado no sistema.'}
+                  </td>
                 </tr>
               )}
             </tbody>

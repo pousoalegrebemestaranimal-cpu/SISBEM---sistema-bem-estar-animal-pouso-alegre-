@@ -1182,3 +1182,119 @@ export async function fetchWaitingAccommodationAnimals(): Promise<WaitingAccommo
     throw err;
   }
 }
+
+export interface DashboardMetrics {
+  total: number;
+  caes: number;
+  gatos: number;
+  emTratamento: number;
+  disponivelAdocao: number;
+  naoCastrados: number;
+  cirurgiasAgendadas: number;
+  resgatesMes: number;
+  recentRescues: Array<{
+    id: string;
+    nome: string;
+    especie: string;
+    raca: string;
+    condicao: string;
+    localResgate?: string;
+    dataResgate: string;
+    foto?: string;
+  }>;
+  lastUpdated: string;
+}
+
+/**
+ * Consulta Agregada Oficial para o Dashboard Geral do SISBEM:
+ * Executa contagens nativas (count: 'exact', head: true) diretamente no Supabase,
+ * garantindo dados oficiais e atualizados de todos os animais do centro, sem tráfego de dados pesados.
+ */
+export async function fetchDashboardMetrics(): Promise<DashboardMetrics> {
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString().split('T')[0];
+
+  const [
+    totalRes,
+    caesRes,
+    gatosRes,
+    tratRes,
+    adocRes,
+    castrRes,
+    cirRes,
+    resgRes,
+    recentRes
+  ] = await Promise.all([
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .not('condicao', 'in', '("ADOTADO","ÓBITO","OBITO","SOLTURA","ALTA")'),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .not('condicao', 'in', '("ADOTADO","ÓBITO","OBITO","SOLTURA","ALTA")')
+      .in('especie', ['Cão', 'CAO', 'C\u00e3o']),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .not('condicao', 'in', '("ADOTADO","ÓBITO","OBITO","SOLTURA","ALTA")')
+      .in('especie', ['Gato', 'GATO']),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .eq('condicao', 'Em Tratamento'),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .eq('condicao', 'Disponível para Adoção'),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .not('condicao', 'in', '("ADOTADO","ÓBITO","OBITO","SOLTURA","ALTA")')
+      .eq('castrado', false),
+    supabase
+      .from('surgeries')
+      .select('id', { count: 'exact', head: true })
+      .in('status', ['Agendada', 'AGENDADA', 'Em Pré-operatório', 'EM_PREPARO']),
+    supabase
+      .from('animals')
+      .select('id', { count: 'exact', head: true })
+      .eq('tem_tutor', false)
+      .gte('data_resgate', startOfMonth)
+      .lte('data_resgate', endOfMonth),
+    supabase
+      .from('animals')
+      .select('id, nome, especie, raca, condicao, local_resgate, data_resgate, foto')
+      .order('data_resgate', { ascending: false })
+      .limit(10)
+  ]);
+
+  return {
+    total: totalRes.count || 0,
+    caes: caesRes.count || 0,
+    gatos: gatosRes.count || 0,
+    emTratamento: tratRes.count || 0,
+    disponivelAdocao: adocRes.count || 0,
+    naoCastrados: castrRes.count || 0,
+    cirurgiasAgendadas: cirRes.count || 0,
+    resgatesMes: resgRes.count || 0,
+    recentRescues: (recentRes.data || []).map((r: any) => ({
+      id: r.id,
+      nome: r.nome || 'Sem nome',
+      especie: r.especie || 'Cão',
+      raca: r.raca || 'SRD',
+      condicao: r.condicao || 'Em Tratamento',
+      localResgate: r.local_resgate || 'Local não informado',
+      dataResgate: r.data_resgate || new Date().toISOString(),
+      foto: r.foto || undefined
+    })),
+    lastUpdated: new Date().toISOString()
+  };
+}

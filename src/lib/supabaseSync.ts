@@ -2264,12 +2264,26 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
           }
         }
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'surgeries' },
+        (payload: any) => {
+          try {
+            window.dispatchEvent(new CustomEvent('sisbem-surgeries-changed', {
+              detail: { type: payload.eventType, data: payload }
+            }));
+            if (onUpdate) onUpdate('surgeries', payload);
+          } catch (e) {
+            console.warn('Erro ao processar realtime de cirurgias:', e);
+          }
+        }
+      )
       .subscribe();
   } catch (err) {
     console.warn('Erro ao inicializar canal realtime Supabase:', err);
   }
 
-  // Cleanup: cancela a assinatura realtime. Sem polling e sem listeners de focus.
+  // Cleanup: cancela a assinatura realtime.
   return () => {
     if (realtimeChannel) {
       realtimeChannel.unsubscribe();
@@ -2278,3 +2292,68 @@ export function initRealtimeSync(onUpdate?: (table: string, payload: any) => voi
     realtimeInitialized = false;
   };
 }
+
+let lastReconcileTimestamp = 0;
+let isReconciling = false;
+
+/**
+ * Dispara reconciliação coordenada após reconexão ou retomada de foco.
+ * Aplica cooldown de 30 segundos para evitar tempestade de consultas.
+ */
+export function triggerReconciliation(reason: string = 'manual') {
+  if (typeof window === 'undefined') return;
+  const now = Date.now();
+  if (reason !== 'manual' && now - lastReconcileTimestamp < 30000) {
+    return;
+  }
+  if (isReconciling) return;
+  isReconciling = true;
+  lastReconcileTimestamp = now;
+
+  // Notifica componentes e dashboards ativos sobre a necessidade de revalidação
+  window.dispatchEvent(new CustomEvent('sisbem-reconcile', {
+    detail: { reason, timestamp: now }
+  }));
+
+  pullFromSupabaseToLocal(undefined, { modules: ['configs', 'kennels'], force: false })
+    .catch(() => {})
+    .finally(() => {
+      isReconciling = false;
+    });
+}
+
+/**
+ * Inicializa ouvintes de evento de reconexão de rede (window online) e
+ * retomada de aba suspensa (document visibilitychange) com debounce e cooldown de 30s.
+ */
+export function initReconnectionListeners(): () => void {
+  if (typeof window === 'undefined') return () => {};
+
+  let debounceTimer: any = null;
+
+  const handleOnline = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      triggerReconciliation('online');
+    }, 1000);
+  };
+
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        triggerReconciliation('visibilitychange');
+      }, 1000);
+    }
+  };
+
+  window.addEventListener('online', handleOnline);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
+  return () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    window.removeEventListener('online', handleOnline);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  };
+}
+
