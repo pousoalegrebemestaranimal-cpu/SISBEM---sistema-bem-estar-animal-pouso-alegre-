@@ -631,6 +631,14 @@ export async function sendAnimalToVetWaitlist(
       };
     }
 
+    // Se já estiver aguardando atendimento, retorna sucesso imediatamente de forma idempotente
+    if (!queryErr && currentAnimal?.condicao === AnimalCondicao.AGUARDANDO_ATENDIMENTO) {
+      return {
+        success: true,
+        message: 'O animal já está na fila de atendimento veterinário.',
+      };
+    }
+
     const { error } = await supabase
       .from('animals')
       .update({

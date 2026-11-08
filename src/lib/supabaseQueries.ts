@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, ClinicalRecordAddendum, Prescription, Referral, ExamFile } from '../../types';
 import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante, mapSupabaseToRecord } from './supabaseSync';
-import { safeSetLocalAnimals } from './safeStorage';
+import { safeSetLocalAnimals, safeSetLocalTutores } from './safeStorage';
 import { db } from '../../services/db';
 
 /**
@@ -358,7 +358,7 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
     let query = supabase
       .from('animals')
       .select(
-        'id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto, tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro), solicitantes (id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email)',
+        'id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, foto, tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro), solicitantes (id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email)',
         { count: 'exact' }
       );
 
@@ -440,7 +440,7 @@ export async function fetchAnimalsPaginated(params: FetchAnimalsParams): Promise
           }
         });
         if (tutUpdated) {
-          localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(tutMap.values())));
+          safeSetLocalTutores(Array.from(tutMap.values()));
         }
       } catch (e) {}
 
@@ -506,7 +506,7 @@ export async function fetchTutoresPaginated(params: FetchTutoresParams): Promise
   try {
     let query = supabase
       .from('tutores')
-      .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro', { count: 'exact' });
+      .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro', { count: 'exact' });
 
     if (search && search.trim()) {
       const s = search.trim();
@@ -847,7 +847,7 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
       .from('animals')
       .select(`
         id, nome, peso, idade, cor_pelagem, especie, raca, porte, sexo, castrado, microchipado, numero_microchip, tem_tutor, local_resgate, data_resgate, motivo, data_cadastro, condicao, tutor_id, solicitante_id, usuario_responsavel_id, necessita_internacao, tipo_acomodacao_sugerida, justificativa_internacao, data_internacao, foto, data_obito, causa_obito, data_soltura, local_soltura, data_adocao, adotante_nome, adotante_cpf, adotante_telefone, resgate_samuvet, responsavel_samuvet,
-        tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro),
+        tutores (id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro),
         solicitantes (id, nome_completo, cpf, telefone, tipo, codigo_ong, responsavel, endereco, email)
       `)
       .eq('id', id)
@@ -868,7 +868,7 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
       try {
         const { data: remoteTut } = await supabase
           .from('tutores')
-          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro')
+          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro')
           .eq('id', animal.tutorId)
           .maybeSingle();
         if (remoteTut) {
@@ -908,12 +908,8 @@ export async function fetchAnimalById(id: string): Promise<AnimalJoined | null> 
           const localTutores = db.getTutores();
           const tutMap = new Map<string, Tutor>();
           localTutores.forEach(t => tutMap.set(t.id, t));
-          const existingTut = tutMap.get(tutorData.id);
-          if (!tutorData.documentoCadUnico && existingTut?.documentoCadUnico) {
-            tutorData.documentoCadUnico = existingTut.documentoCadUnico;
-          }
           tutMap.set(tutorData.id, tutorData);
-          localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(tutMap.values())));
+          safeSetLocalTutores(Array.from(tutMap.values()));
         }
         if (solicitanteData) {
           const localSols = db.getSolicitantes();
@@ -976,7 +972,7 @@ export async function fetchTutorById(id: string): Promise<{ tutor: Tutor; animal
   try {
     const { data: row, error } = await supabase
       .from('tutores')
-      .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro')
+      .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro')
       .eq('id', id)
       .maybeSingle();
 
@@ -999,17 +995,33 @@ export async function fetchTutorById(id: string): Promise<{ tutor: Tutor; animal
       const localTutores = db.getTutores();
       const map = new Map<string, Tutor>();
       localTutores.forEach(t => map.set(t.id, t));
-      const existingTut = map.get(tutor.id);
-      if (!tutor.documentoCadUnico && existingTut?.documentoCadUnico) {
-        tutor.documentoCadUnico = existingTut.documentoCadUnico;
-      }
       map.set(tutor.id, tutor);
-      localStorage.setItem('sisbem_tutores', JSON.stringify(Array.from(map.values())));
+      safeSetLocalTutores(Array.from(map.values()));
     } catch (e) {}
 
     return { tutor, animals };
   } catch (err) {
     console.warn('Erro ao buscar tutor por id no Supabase:', err);
+    return null;
+  }
+}
+
+/**
+ * Consulta sob demanda estritamente o documento CadÚnico de um tutor específico no Supabase.
+ * Usado exclusivamente quando o usuário solicita a visualização ou download do comprovante no perfil do tutor.
+ */
+export async function fetchTutorDocumentById(id: string): Promise<string | null> {
+  try {
+    const { data: row, error } = await supabase
+      .from('tutores')
+      .select('documento_cad_unico')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error || !row) return null;
+    return row.documento_cad_unico || null;
+  } catch (err) {
+    console.warn('Erro ao buscar documento CadÚnico sob demanda:', err);
     return null;
   }
 }

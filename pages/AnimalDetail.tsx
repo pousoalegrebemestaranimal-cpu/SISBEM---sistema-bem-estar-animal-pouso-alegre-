@@ -112,7 +112,7 @@ const AnimalDetail: React.FC = () => {
   const [queueFeedback, setQueueFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   const handleSendToWaitlist = async () => {
-    if (!animal || !user) return;
+    if (!animal || !user || isSendingToWaitlist) return;
     setIsSendingToWaitlist(true);
     setQueueFeedback(null);
     try {
@@ -122,7 +122,13 @@ const AnimalDetail: React.FC = () => {
           type: 'success',
           message: `Paciente ${animal.nome} enviado para a Fila Veterinária com sucesso! Aguardando atendimento.`,
         });
-        reloadAnimal();
+        // Atualiza a condição local imediatamente
+        setAnimal(prev => prev ? { ...prev, condicao: AnimalCondicao.AGUARDANDO_ATENDIMENTO } : null);
+        try {
+          await reloadAnimal();
+        } catch (reloadErr) {
+          console.warn('Animal recarregado com fallback após fila:', reloadErr);
+        }
       } else {
         setQueueFeedback({
           type: 'error',

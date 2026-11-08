@@ -9,7 +9,7 @@
  * 5. Limpeza automática e segura de caches pesados na inicialização e em caso de saturação.
  */
 
-import { Animal } from '../../types';
+import { Animal, Tutor } from '../../types';
 
 export const MAX_LOCAL_ANIMALS = 40;
 
@@ -108,6 +108,41 @@ export function safeSetLocalAnimals(animals: Animal[]): boolean {
 }
 
 /**
+ * Sanitiza um tutor para persistência no localStorage:
+ * Garante que somente os metadados leves sejam armazenados:
+ * id, nomeCompleto, cpf, telefone, endereco, temCadUnico, dataCadastro.
+ * O campo documentoCadUnico (especialmente Base64) é SEMPRE excluído da lista no localStorage.
+ * O documento oficial e permanente permanece 100% preservado no Supabase.
+ */
+export function sanitizeTutorForLocal(tutor: Partial<Tutor>): Tutor {
+  return {
+    id: tutor.id || '',
+    nomeCompleto: tutor.nomeCompleto || '',
+    cpf: tutor.cpf || '',
+    telefone: tutor.telefone || '',
+    endereco: tutor.endereco || '',
+    temCadUnico: !!tutor.temCadUnico,
+    dataCadastro: tutor.dataCadastro || new Date().toISOString(),
+    documentoCadUnico: undefined
+  };
+}
+
+/**
+ * Salva a lista de tutores no localStorage de forma estritamente segura e leve:
+ * - Sem Base64 nem arquivos pesados (reduz consumo em > 99%)
+ * - Com tratamento resiliente de QuotaExceededError
+ */
+export function safeSetLocalTutores(tutores: Tutor[]): boolean {
+  try {
+    const sanitized = tutores.map(sanitizeTutorForLocal);
+    return safeSetItem('sisbem_tutores', JSON.stringify(sanitized));
+  } catch (err) {
+    console.warn('[SISBEM safeStorage] Erro ao salvar sisbem_tutores seguro:', err);
+    return false;
+  }
+}
+
+/**
  * Libera espaço no localStorage removendo caches pesados, fotos Base64 legadas e histórico antigo
  */
 export function recoverFromQuotaExceeded(triggerKey?: string): void {
@@ -133,9 +168,16 @@ export function recoverFromQuotaExceeded(triggerKey?: string): void {
     } catch {}
   }
 
-  // 2. PROTEÇÃO ABSOLUTA DO CADÚNICO:
-  // Documentos de comprovação legal do CadÚnico NUNCA são removidos ou esvaziados da cota local.
-  // A liberação de espaço atua estritamente em caches efêmeros, fotos de animais e logs secundários.
+  // 2. Garante que sisbem_tutores no cache local não contenha strings Base64
+  try {
+    const rawTutores = localStorage.getItem('sisbem_tutores');
+    if (rawTutores) {
+      const parsed: Tutor[] = JSON.parse(rawTutores);
+      const sanitized = parsed.map(sanitizeTutorForLocal);
+      localStorage.setItem('sisbem_tutores', JSON.stringify(sanitized));
+      console.info('[SISBEM safeStorage] Cache sisbem_tutores sanitizado sem Base64.');
+    }
+  } catch (e) {}
 
   // 3. Reduz logs de status antigos e prontuários volumosos
   try {

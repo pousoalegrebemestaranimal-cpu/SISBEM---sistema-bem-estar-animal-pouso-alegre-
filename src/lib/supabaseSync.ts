@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
-import { hashPassword } from './authCrypto';
-import { safeSetLocalAnimals, isBase64Photo, safeSetItem } from './safeStorage';
+import { safeSetLocalAnimals, safeSetLocalTutores, isBase64Photo, safeSetItem } from './safeStorage';
 import {
   Animal,
   Solicitante,
@@ -753,13 +752,13 @@ export async function syncTutorToSupabase(tutor: Tutor): Promise<boolean> {
       if (existingRemote?.documento_cad_unico) {
         docToPersist = existingRemote.documento_cad_unico;
         tutor.documentoCadUnico = existingRemote.documento_cad_unico;
-        // Atualiza o cache local para mantê-lo íntegro
+        // Atualiza o cache local para mantê-lo íntegro com metadados leves (sem Base64 no localStorage)
         try {
           const localList: Tutor[] = JSON.parse(localStorage.getItem('sisbem_tutores') || '[]');
           const idx = localList.findIndex(t => t.id === tutor.id);
           if (idx >= 0) {
-            localList[idx].documentoCadUnico = existingRemote.documento_cad_unico;
-            localStorage.setItem('sisbem_tutores', JSON.stringify(localList));
+            localList[idx].temCadUnico = true;
+            safeSetLocalTutores(localList);
           }
         } catch {}
       }
@@ -1802,11 +1801,11 @@ export async function pullFromSupabaseToLocal(
         moduleCacheTimestamps.solicitantes = now;
       }
 
-      // 2. Tutores (apenas colunas necessárias, sem SELECT *)
+      // 2. Tutores (apenas colunas necessárias, sem documento_cad_unico e sem SELECT *)
       if (shouldSync('tutores')) {
         const { data: remTutores } = await supabase
           .from('tutores')
-          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico, data_cadastro');
+          .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, data_cadastro');
 
         if (remTutores && remTutores.length > 0) {
           const localTut = (dbInstance && typeof dbInstance.getTutores === 'function')
@@ -1816,15 +1815,10 @@ export async function pullFromSupabaseToLocal(
           localTut.forEach((t: Tutor) => map.set(t.id, t));
           remTutores.forEach((r: any) => {
             const mapped = mapSupabaseToTutor(r);
-            const existing = map.get(r.id);
-            // REGRA DE PROTEÇÃO ABSOLUTA: se o remoto trouxer documento vazio mas o local tiver um documento válido, preserva o local
-            if (!mapped.documentoCadUnico && existing?.documentoCadUnico) {
-              mapped.documentoCadUnico = existing.documentoCadUnico;
-            }
             map.set(r.id, mapped);
           });
           const merged = Array.from(map.values());
-          localStorage.setItem('sisbem_tutores', JSON.stringify(merged));
+          safeSetLocalTutores(merged);
           syncedCounts.tutores = merged.length;
         }
         moduleCacheTimestamps.tutores = now;

@@ -208,7 +208,7 @@ const AnimalForm: React.FC = () => {
         try {
           const { data: remoteTut } = await supabase
             .from('tutores')
-            .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico, documento_cad_unico')
+            .select('id, nome_completo, cpf, telefone, endereco, tem_cad_unico')
             .or(`cpf.eq.${formatted},cpf.eq.${cleanCPF}`)
             .maybeSingle();
 
@@ -221,7 +221,7 @@ const AnimalForm: React.FC = () => {
               telefone: remoteTut.telefone ? formatTelefone(remoteTut.telefone) : '',
               endereco: remoteTut.endereco || '',
               temCadUnico: !!remoteTut.tem_cad_unico,
-              documentoCadUnico: remoteTut.documento_cad_unico || ''
+              documentoCadUnico: ''
             });
             setMessage({ type: 'info', text: 'Tutor localizado no banco de dados oficial (Supabase).' });
           } else {

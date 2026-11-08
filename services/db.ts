@@ -22,7 +22,7 @@ import {
   syncAllLocalDataToSupabase,
   pullFromSupabaseToLocal
 } from '../src/lib/supabaseSync';
-import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal, sanitizeCredentialsFromLocalStorage } from '../src/lib/safeStorage';
+import { safeSetItem, safeSetLocalAnimals, sanitizeAnimalForLocal, sanitizeCredentialsFromLocalStorage, safeSetLocalTutores, sanitizeTutorForLocal } from '../src/lib/safeStorage';
 import { isOccupationActive, getActiveOccupation, getAllActiveOccupations, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
 import { authenticateWithSupabase, supabase } from '../src/lib/supabase';
 
@@ -95,7 +95,7 @@ export const resetAndSeedAllData = () => {
     { id: 'tutor-5', nomeCompleto: 'Sandra Helena Guimarães', cpf: '567.890.123-44', telefone: '(35) 98455-6677', endereco: 'Rua Bom Jesus, 215 - Bairro Santo Antônio', dataCadastro: twoDaysAgo, temCadUnico: true },
     { id: 'tutor-6', nomeCompleto: 'Renata Aparecida Dias', cpf: '678.901.234-55', telefone: '(35) 99911-2233', endereco: 'Rua Monsenhor Dutra, 88 - Bairro Costa Rios', dataCadastro: yesterday, temCadUnico: true }
   ];
-  localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
+  safeSetLocalTutores(tutores);
 
   // 5. Animais Diversificados (18 animais cobrindo cães, gatos, castrados, não castrados, com tutor, resgates SAMUVET, todas as condições)
   const animals: Animal[] = [
@@ -1359,7 +1359,7 @@ export const db = {
       tutores.push(newTutor);
     }
 
-    localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
+    safeSetLocalTutores(tutores);
     syncTutorToSupabase(newTutor).catch(err => console.warn('Supabase syncTutor:', err));
     return newTutor;
   },
@@ -1690,7 +1690,7 @@ export const db = {
           tutorId = tutores[tutorIdx].id;
           syncTutorToSupabase(tutores[tutorIdx]).catch(err => console.warn('Supabase syncTutor:', err));
         }
-        localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
+        safeSetLocalTutores(tutores);
       } else {
         // Lógica para Solicitante / ONG
         const solPersona = personaData as Partial<Solicitante>;
@@ -2077,7 +2077,7 @@ export const db = {
 
   deleteTutor: (id: string) => {
     const tutores = db.getTutores().filter(t => t.id !== id);
-    localStorage.setItem(KEYS.TUTORES, JSON.stringify(tutores));
+    safeSetLocalTutores(tutores);
     
     const animals = db.getAnimals();
     const updatedAnimals = animals.map(a => a.tutorId === id ? { ...a, tutorId: undefined, temTutor: false } : a);

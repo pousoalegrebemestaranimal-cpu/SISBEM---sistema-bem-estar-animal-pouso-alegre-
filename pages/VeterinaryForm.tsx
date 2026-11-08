@@ -758,8 +758,8 @@ const VeterinaryForm: React.FC = () => {
               }`}>
                 <CheckCircle2 size={15} className={animal.tutor?.temCadUnico ? 'text-teal-300' : 'text-slate-400'} />
                 <span>CadÚnico do Tutor: <strong className={animal.tutor?.temCadUnico ? 'text-teal-200 underline underline-offset-2' : 'text-slate-300'}>{animal.tutor?.temCadUnico ? 'SIM (Beneficiário)' : 'NÃO POSSUI'}</strong></span>
-                {animal.tutor?.documentoCadUnico && (
-                  <span className="text-[10px] font-normal opacity-80 normal-case">({animal.tutor.documentoCadUnico})</span>
+                {(animal.tutor?.documentoCadUnico || animal.tutor?.temCadUnico) && (
+                  <span className="text-[10px] font-normal opacity-90 normal-case">(Documento anexado)</span>
                 )}
               </div>
             ) : (

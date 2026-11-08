@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { db } from '../services/db';
 import { Tutor, AnimalJoined } from '../types';
-import { fetchTutorById } from '../src/lib/supabaseQueries';
+import { fetchTutorById, fetchTutorDocumentById } from '../src/lib/supabaseQueries';
 import { 
   ArrowLeft, IdCard, Phone, UserCircle, Calendar, ClipboardCheck, 
   Dog, MapPin, Eye, Home, HeartPulse, User, FileText, ExternalLink, 
@@ -23,6 +23,8 @@ const TutorDetail: React.FC = () => {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [docFeedback, setDocFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [cachedDocument, setCachedDocument] = useState<string | null>(null);
+  const [isLoadingDoc, setIsLoadingDoc] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -41,17 +43,60 @@ const TutorDetail: React.FC = () => {
       });
   }, [id]);
 
-  const handleDownloadDoc = () => {
-    if (!tutor?.documentoCadUnico) return;
+  const getDocumentOnDemand = async (): Promise<string | null> => {
+    if (cachedDocument) return cachedDocument;
+    if (tutor?.documentoCadUnico) {
+      setCachedDocument(tutor.documentoCadUnico);
+      return tutor.documentoCadUnico;
+    }
+    if (!tutor?.id) return null;
+    setIsLoadingDoc(true);
     try {
-      const base64 = tutor.documentoCadUnico;
-      const isPdf = base64.includes('application/pdf');
+      const doc = await fetchTutorDocumentById(tutor.id);
+      if (doc) {
+        setCachedDocument(doc);
+        return doc;
+      }
+      return null;
+    } catch (e) {
+      console.error('Erro ao buscar documento sob demanda:', e);
+      return null;
+    } finally {
+      setIsLoadingDoc(false);
+    }
+  };
+
+  const handleOpenPreview = async () => {
+    setDocFeedback(null);
+    const doc = await getDocumentOnDemand();
+    if (doc) {
+      setIsPreviewOpen(true);
+    } else {
+      setDocFeedback({
+        type: 'error',
+        message: 'Nenhum comprovante digital anexado foi encontrado no banco oficial para este tutor.',
+      });
+    }
+  };
+
+  const handleDownloadDoc = async () => {
+    setDocFeedback(null);
+    const doc = await getDocumentOnDemand();
+    if (!doc) {
+      setDocFeedback({
+        type: 'error',
+        message: 'Nenhum comprovante digital disponível para download.',
+      });
+      return;
+    }
+    try {
+      const isPdf = doc.includes('application/pdf');
       const ext = isPdf ? 'pdf' : 'png';
-      const safeName = (tutor.nomeCompleto || 'Tutor').replace(/[^a-zA-Z0-9]/g, '_');
+      const safeName = (tutor?.nomeCompleto || 'Tutor').replace(/[^a-zA-Z0-9]/g, '_');
       const filename = `CadUnico_${safeName}.${ext}`;
 
       const link = document.createElement('a');
-      link.href = base64;
+      link.href = doc;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
@@ -92,6 +137,7 @@ const TutorDetail: React.FC = () => {
             return;
           }
 
+          setCachedDocument(base64Result);
           setTutor(res.tutor);
           setDocFeedback({ 
             type: 'success', 
@@ -125,8 +171,9 @@ const TutorDetail: React.FC = () => {
 
   if (!tutor) return <div className="p-8 text-center text-slate-500 font-bold">Tutor não encontrado no sistema.</div>;
 
-  const hasDoc = !!tutor.documentoCadUnico && tutor.documentoCadUnico.trim().length > 0;
-  const isPdf = hasDoc && tutor.documentoCadUnico!.startsWith('data:application/pdf');
+  const docToDisplay = cachedDocument || tutor.documentoCadUnico || '';
+  const hasDoc = !!tutor.temCadUnico || (!!docToDisplay && docToDisplay.trim().length > 0);
+  const isPdf = docToDisplay.startsWith('data:application/pdf') || docToDisplay.includes('application/pdf');
 
   return (
     <div className="space-y-8 animate-in fade-in">
@@ -204,17 +251,21 @@ const TutorDetail: React.FC = () => {
                     <div className="space-y-2">
                       <button 
                         type="button"
-                        onClick={() => setIsPreviewOpen(true)}
-                        className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-sm cursor-pointer"
+                        onClick={handleOpenPreview}
+                        disabled={isLoadingDoc}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase rounded-xl transition-all shadow-sm cursor-pointer disabled:opacity-50"
                       >
-                        <Eye size={14} /> Visualizar Comprovante
+                        {isLoadingDoc ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />} 
+                        {isLoadingDoc ? 'Carregando documento...' : 'Visualizar Comprovante'}
                       </button>
                       <button 
                         type="button"
                         onClick={handleDownloadDoc}
-                        className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 text-[10px] font-black uppercase rounded-xl transition-all shadow-2xs cursor-pointer"
+                        disabled={isLoadingDoc}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 text-[10px] font-black uppercase rounded-xl transition-all shadow-2xs cursor-pointer disabled:opacity-50"
                       >
-                        <Download size={14} /> Baixar Arquivo
+                        {isLoadingDoc ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} 
+                        Baixar Arquivo
                       </button>
                       <button
                         type="button"
@@ -373,14 +424,14 @@ const TutorDetail: React.FC = () => {
             <div className="p-4 flex-1 overflow-auto bg-slate-100 flex items-center justify-center min-h-[50vh]">
               {isPdf ? (
                 <iframe 
-                  src={tutor.documentoCadUnico} 
+                  src={docToDisplay} 
                   title={`Comprovante CadÚnico - ${tutor.nomeCompleto}`}
                   className="w-full h-[72vh] rounded-2xl border border-slate-200 bg-white shadow-inner"
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center p-2 max-w-full">
                   <img 
-                    src={tutor.documentoCadUnico} 
+                    src={docToDisplay} 
                     alt={`Comprovante CadÚnico - ${tutor.nomeCompleto}`} 
                     className="max-h-[72vh] max-w-full object-contain rounded-2xl shadow-md border border-slate-200 bg-white"
                   />
