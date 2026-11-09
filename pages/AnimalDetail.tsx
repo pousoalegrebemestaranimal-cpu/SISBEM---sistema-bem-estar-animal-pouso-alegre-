@@ -3,21 +3,21 @@ import React, { useState, useMemo, useEffect } from 'react';
 import * as ReactRouterDOM from 'react-router-dom';
 const { useParams, useNavigate, Link, useSearchParams } = ReactRouterDOM as any;
 import { db } from '../services/db';
-import { AnimalCondicao, Especie, KennelType, Kennel, Adotante, AnimalJoined, ClinicalRecord, Prescription, Referral, Porte, CirurgiaStatus, CirurgiaPrioridade, AgendamentoCirurgia } from '../types';
+import { AnimalCondicao, Especie, KennelType, Kennel, Adotante, AnimalJoined, ClinicalRecord, Prescription, Referral, Porte, CirurgiaStatus, CirurgiaPrioridade, AgendamentoCirurgia, AnimalOriginDocument } from '../types';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
   ArrowLeft, Dog, User, Clipboard, FileText, Heart, 
   Stethoscope, Clock, MapPin, Scale, Calendar, Info, Plus, History, Phone, ShieldCheck, Pill, Skull, AlertTriangle, Leaf, Home, ArrowRightLeft, CheckCircle2, Activity, ArrowRight, UserCheck, Share2, Thermometer, Droplets, HeartPulse, Wind, Microscope, Syringe, Palette, IdCard, Eye, Camera, FlaskConical, ExternalLink, FileSearch, X, FileBadge2, MessageSquare, BriefcaseMedical, Zap, FileType, HeartHandshake, Save, Printer, Ambulance, UserCircle, ClipboardCheck, LogOut, Cpu, QrCode, HelpCircle, Scissors, XCircle, Check,
   AlertCircle,
-  ChevronDown, ChevronUp, ChevronsUpDown, Loader2
+  ChevronDown, ChevronUp, ChevronsUpDown, Loader2, Download, Building2
 } from 'lucide-react';
 import { formatCPF, formatTelefone, validateCPF } from '../utils/validation';
 import { printAnimalSheet } from '../utils/printAnimalSheet';
 import { printClinicalRecord } from '../utils/printClinicalRecord';
 import { generatePrintHTML as generatePrintHTMLShared } from '../utils/printPrescription';
 import { ensureAnimalPhoto } from '../src/lib/supabaseSync';
-import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup } from '../src/lib/supabaseQueries';
+import { fetchAnimalById, isOccupationActive, getActiveOccupation, getAllActiveOccupations, fetchOccupationsByAnimalId, buildKennelCanonicalLookup, fetchAnimalOriginDocumentMeta, fetchAnimalOriginDocumentContent } from '../src/lib/supabaseQueries';
 import { SearchableKennelSelect } from '../components/SearchableKennelSelect';
 import { sendAnimalToVetWaitlist, addClinicalRecordAddendum } from '../src/lib/attendanceService';
 
@@ -70,6 +70,64 @@ const AnimalDetail: React.FC = () => {
   const [internacaoTipoAcomodacao, setInternacaoTipoAcomodacao] = useState<KennelType | ''>('');
   const [internacaoJustificativa, setInternacaoJustificativa] = useState('');
   const [isSubmittingInternacao, setIsSubmittingInternacao] = useState(false);
+
+  // Documentos de Origem (Clínicas Conveniadas)
+  const [originDocMeta, setOriginDocMeta] = useState<AnimalOriginDocument | null>(null);
+  const [loadingOriginDoc, setLoadingOriginDoc] = useState(false);
+  const [originDocPreviewOpen, setOriginDocPreviewOpen] = useState(false);
+  const [originDocPreviewContent, setOriginDocPreviewContent] = useState<string | null>(null);
+  const [loadingDocContent, setLoadingDocContent] = useState(false);
+
+  // Carrega metadados do documento de origem com zero egress
+  useEffect(() => {
+    if (animal?.id) {
+      setLoadingOriginDoc(true);
+      fetchAnimalOriginDocumentMeta(animal.id)
+        .then(doc => setOriginDocMeta(doc))
+        .catch(err => console.warn('Aviso ao consultar documento de origem:', err))
+        .finally(() => setLoadingOriginDoc(false));
+    }
+  }, [animal?.id]);
+
+  const handleViewOriginDoc = async () => {
+    if (!animal?.id) return;
+    setLoadingDocContent(true);
+    try {
+      const content = await fetchAnimalOriginDocumentContent(animal.id);
+      if (content) {
+        setOriginDocPreviewContent(content);
+        setOriginDocPreviewOpen(true);
+      } else {
+        alert('Não foi possível carregar o arquivo do documento.');
+      }
+    } catch (e: any) {
+      alert('Erro ao carregar o documento: ' + (e?.message || 'Falha de rede'));
+    } finally {
+      setLoadingDocContent(false);
+    }
+  };
+
+  const handleDownloadOriginDoc = async () => {
+    if (!animal?.id || !originDocMeta) return;
+    setLoadingDocContent(true);
+    try {
+      const content = await fetchAnimalOriginDocumentContent(animal.id);
+      if (content) {
+        const link = document.createElement('a');
+        link.href = content;
+        link.download = originDocMeta.nomeArquivo || 'ficha_clinica_conveniada';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      } else {
+        alert('Não foi possível baixar o arquivo.');
+      }
+    } catch (e: any) {
+      alert('Erro ao baixar documento: ' + (e?.message || 'Falha de rede'));
+    } finally {
+      setLoadingDocContent(false);
+    }
+  };
 
   const handleConfirmarInternacao = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1414,6 +1472,91 @@ const AnimalDetail: React.FC = () => {
                   </div>
                 </div>
 
+                {/* SEÇÃO: DOCUMENTOS DE ORIGEM (CLÍNICA CONVENIADA) */}
+                <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b pb-3 gap-2">
+                    <div>
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-700 flex items-center gap-2">
+                        <Building2 size={16} className="text-teal-600" />
+                        Documentos de Origem
+                      </h3>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        Ficha de atendimento encaminhada por clínica veterinária conveniada ao município.
+                      </p>
+                    </div>
+                    {originDocMeta && (
+                      <span className="px-2.5 py-1 bg-teal-50 border border-teal-200 text-teal-800 text-[10px] font-black rounded-lg uppercase tracking-wider self-start sm:self-auto shadow-sm">
+                        {originDocMeta.clinicaOrigem}
+                      </span>
+                    )}
+                  </div>
+
+                  {loadingOriginDoc ? (
+                    <div className="p-6 text-center text-slate-400 flex items-center justify-center gap-2 text-xs">
+                      <Loader2 size={16} className="animate-spin text-teal-600" />
+                      <span>Verificando documentos de origem...</span>
+                    </div>
+                  ) : originDocMeta ? (
+                    <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="p-3 bg-teal-100 text-teal-800 rounded-xl shrink-0">
+                          <FileText size={22} />
+                        </div>
+                        <div className="space-y-0.5 min-w-0">
+                          <p className="text-xs font-black text-slate-800 truncate" title={originDocMeta.nomeArquivo}>
+                            {originDocMeta.nomeArquivo}
+                          </p>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                            <span>Clínica de Origem: <strong className="text-slate-700">{originDocMeta.clinicaOrigem}</strong></span>
+                            <span>•</span>
+                            <span>Data de Anexação: <strong className="text-slate-700">{safeFormatDate(originDocMeta.dataAnexo, 'dd/MM/yyyy HH:mm')}</strong></span>
+                            {originDocMeta.tamanhoBytes && originDocMeta.tamanhoBytes > 0 && (
+                              <>
+                                <span>•</span>
+                                <span>{(originDocMeta.tamanhoBytes / 1024).toFixed(1)} KB</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-200">
+                        <button
+                          type="button"
+                          onClick={handleViewOriginDoc}
+                          disabled={loadingDocContent}
+                          className="flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-300 shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          {loadingDocContent ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} className="text-teal-600" />}
+                          Visualizar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDownloadOriginDoc}
+                          disabled={loadingDocContent}
+                          className="flex items-center gap-1.5 px-3.5 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          <Download size={14} />
+                          Baixar
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="py-4 px-4 bg-slate-50/60 rounded-xl border border-dashed border-slate-200 text-center">
+                      <p className="text-xs text-slate-400 italic font-medium">
+                        Nenhuma ficha de clínica conveniada anexada
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="p-3 bg-amber-50/60 border border-amber-200/60 rounded-xl flex items-start gap-2 text-[11px] text-amber-800">
+                    <Info size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                    <span>
+                      Este documento é a ficha de encaminhamento emitida pela clínica de origem e não deve ser confundido com os prontuários clínicos produzidos pelos veterinários do Centro de Bem Estar Animal.
+                    </span>
+                  </div>
+                </div>
+
                 {/* HISTÓRICO DE CICLO (ÓBITO, ADOÇÃO, SOLTURA) SE HOUVER */}
                 {(animal.condicao === AnimalCondicao.OBITO || animal.condicao === AnimalCondicao.ADOTADO || animal.condicao === AnimalCondicao.SOLTURA) && (
                   <div className={`p-6 rounded-2xl border-2 shadow-sm animate-in zoom-in-95 ${
@@ -2620,6 +2763,63 @@ const AnimalDetail: React.FC = () => {
                       </button>
                     </div>
                   </form>
+                </div>
+              </div>
+            )}
+
+            {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FICHA DA CLÍNICA CONVENIADA */}
+            {originDocPreviewOpen && originDocPreviewContent && originDocMeta && (
+              <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+                <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200 animate-in zoom-in-95">
+                  <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="p-2 bg-teal-100 text-teal-800 rounded-lg shrink-0">
+                        <FileText size={18} />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight truncate max-w-md">
+                          {originDocMeta.nomeArquivo}
+                        </h3>
+                        <p className="text-[11px] text-slate-500">
+                          {originDocMeta.clinicaOrigem} • Anexado em {safeFormatDate(originDocMeta.dataAnexo, 'dd/MM/yyyy HH:mm')}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleDownloadOriginDoc}
+                        className="flex items-center gap-1.5 px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer shadow-sm"
+                      >
+                        <Download size={14} /> Baixar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOriginDocPreviewOpen(false);
+                          setOriginDocPreviewContent(null);
+                        }}
+                        className="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors cursor-pointer"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-auto p-4 bg-slate-100 flex items-center justify-center min-h-[400px]">
+                    {originDocMeta.tipoMime.includes('pdf') || originDocMeta.nomeArquivo.toLowerCase().endsWith('.pdf') ? (
+                      <iframe
+                        src={originDocPreviewContent}
+                        className="w-full h-[65vh] rounded-lg border border-slate-300 bg-white shadow-inner"
+                        title="Visualização da Ficha de Atendimento"
+                      />
+                    ) : (
+                      <img
+                        src={originDocPreviewContent}
+                        alt="Ficha de Atendimento da Clínica Conveniada"
+                        className="max-h-[65vh] max-w-full object-contain rounded-lg border border-slate-300 shadow-md bg-white"
+                      />
+                    )}
+                  </div>
                 </div>
               </div>
             )}

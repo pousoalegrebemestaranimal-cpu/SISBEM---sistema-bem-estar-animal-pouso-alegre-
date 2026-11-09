@@ -268,6 +268,20 @@ export interface Animal {
   emAtendimentoVetId?: string;
   emAtendimentoInicio?: string;
   dataEntradaFila?: string;
+  encaminhadoClinicaConveniada?: boolean;
+  nomeClinicaConveniada?: string;
+}
+
+export interface AnimalOriginDocument {
+  id: string;
+  animalId: string;
+  clinicaOrigem: string;
+  nomeArquivo: string;
+  tipoMime: string;
+  tamanhoBytes?: number;
+  dataAnexo: string;
+  arquivo?: string;
+  createdAt?: string;
 }
 
 export interface AnimalJoined extends Animal {
@@ -280,6 +294,7 @@ export interface AnimalJoined extends Animal {
   currentOccupation?: KennelOccupation & { kennel?: Kennel };
   cirurgias?: AgendamentoCirurgia[];
   agendamentoCastracaoAtivo?: AgendamentoCirurgia;
+  originDocument?: AnimalOriginDocument;
 }
 
 export enum CirurgiaStatus {

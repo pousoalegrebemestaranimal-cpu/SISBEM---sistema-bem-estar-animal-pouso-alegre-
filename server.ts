@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import { db, createPool } from './src/db/index.ts';
 import { animals, kennels, clinicalRecords, surgeries, users, clinicalRecordAddenda } from './src/db/schema.ts';
@@ -637,6 +638,265 @@ app.get('/api/health', (req, res) => {
     } catch (error: any) {
       console.error('Failed to fetch surgeries from DB:', error);
       res.status(500).json({ error: 'Erro ao buscar cirurgias do banco' });
+    }
+  });
+
+  // ==============================================================================
+  // DOCUMENTOS DE ORIGEM (FICHAS DE CLÍNICAS CONVENIADAS)
+  // Armazenamento dedicado e permanente, desacoplado da tabela animals
+  // ==============================================================================
+  const ORIGIN_DOCS_DIR = path.join(process.cwd(), 'data');
+  const ORIGIN_DOCS_FILE = path.join(ORIGIN_DOCS_DIR, 'origin_documents.json');
+
+  function getStoredOriginDocs(): Map<string, any> {
+    const map = new Map<string, any>();
+    try {
+      if (fs.existsSync(ORIGIN_DOCS_FILE)) {
+        const raw = fs.readFileSync(ORIGIN_DOCS_FILE, 'utf-8');
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          list.forEach(item => {
+            if (item && item.animalId) {
+              map.set(item.animalId, item);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao ler origin_documents.json:', e);
+    }
+    return map;
+  }
+
+  function persistOriginDocs(map: Map<string, any>) {
+    try {
+      if (!fs.existsSync(ORIGIN_DOCS_DIR)) {
+        fs.mkdirSync(ORIGIN_DOCS_DIR, { recursive: true });
+      }
+      const list = Array.from(map.values());
+      fs.writeFileSync(ORIGIN_DOCS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    } catch (e) {
+      console.error('Erro ao gravar origin_documents.json:', e);
+    }
+  }
+
+  // 1. Consulta Metadados Leves (Sem carregar o payload do arquivo - Zero Egress)
+  app.get('/api/animals/:animalId/origin-document', async (req, res) => {
+    const animalId = String(req.params.animalId || '').trim();
+    if (!animalId) {
+      return res.status(400).json({ success: false, message: 'animalId obrigatório' });
+    }
+
+    try {
+      // 1. Tenta consulta no Supabase se a tabela existir
+      try {
+        const { data, error } = await supabase
+          .from('animal_origin_documents')
+          .select('id, animal_id, clinica_origem, nome_arquivo, tipo_mime, tamanho_bytes, data_anexo, created_at')
+          .eq('animal_id', animalId)
+          .maybeSingle();
+
+        if (!error && data) {
+          return res.json({
+            success: true,
+            hasDocument: true,
+            document: {
+              id: data.id,
+              animalId: data.animal_id,
+              clinicaOrigem: data.clinica_origem,
+              nomeArquivo: data.nome_arquivo,
+              tipoMime: data.tipo_mime,
+              tamanhoBytes: data.tamanho_bytes,
+              dataAnexo: data.data_anexo,
+              createdAt: data.created_at,
+            }
+          });
+        }
+      } catch (_) {}
+
+      // 2. Consulta no armazenamento persistente do servidor
+      const map = getStoredOriginDocs();
+      const doc = map.get(animalId);
+      if (doc) {
+        return res.json({
+          success: true,
+          hasDocument: true,
+          document: {
+            id: doc.id,
+            animalId: doc.animalId,
+            clinicaOrigem: doc.clinicaOrigem,
+            nomeArquivo: doc.nomeArquivo,
+            tipoMime: doc.tipoMime,
+            tamanhoBytes: doc.tamanhoBytes,
+            dataAnexo: doc.dataAnexo,
+            createdAt: doc.createdAt,
+          }
+        });
+      }
+
+      return res.json({ success: true, hasDocument: false, document: null });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message || 'Erro ao consultar documento de origem' });
+    }
+  });
+
+  // 2. Consulta Conteúdo Completo sob demanda (Para visualização ou download)
+  app.get('/api/animals/:animalId/origin-document/content', async (req, res) => {
+    const animalId = String(req.params.animalId || '').trim();
+    if (!animalId) {
+      return res.status(400).json({ success: false, message: 'animalId obrigatório' });
+    }
+
+    try {
+      // Tenta Supabase
+      try {
+        const { data, error } = await supabase
+          .from('animal_origin_documents')
+          .select('*')
+          .eq('animal_id', animalId)
+          .maybeSingle();
+
+        if (!error && data && data.arquivo) {
+          return res.json({
+            success: true,
+            document: {
+              id: data.id,
+              animalId: data.animal_id,
+              clinicaOrigem: data.clinica_origem,
+              nomeArquivo: data.nome_arquivo,
+              tipoMime: data.tipo_mime,
+              tamanhoBytes: data.tamanho_bytes,
+              dataAnexo: data.data_anexo,
+              arquivo: data.arquivo,
+              createdAt: data.created_at,
+            }
+          });
+        }
+      } catch (_) {}
+
+      // Armazenamento persistente do servidor
+      const map = getStoredOriginDocs();
+      const doc = map.get(animalId);
+      if (doc) {
+        return res.json({ success: true, document: doc });
+      }
+
+      return res.status(404).json({ success: false, message: 'Documento não localizado para este animal' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message || 'Erro ao carregar conteúdo do documento' });
+    }
+  });
+
+  // 3. Salvar / Substituir Documento de Origem
+  app.post('/api/animals/:animalId/origin-document', async (req, res) => {
+    const animalId = String(req.params.animalId || '').trim();
+    const clinicaOrigem = req.body.clinicaOrigem || req.body.nomeClinica || '';
+    const nomeArquivo = req.body.nomeArquivo || '';
+    const tipoMime = req.body.tipoMime || req.body.tipoArquivo || '';
+    const tamanhoBytes = req.body.tamanhoBytes;
+    const dataAnexo = req.body.dataAnexo;
+    const arquivo = req.body.arquivo;
+
+    if (!animalId || !clinicaOrigem || !nomeArquivo || !arquivo) {
+      return res.status(400).json({
+        success: false,
+        message: 'Parâmetros incompletos: animalId, clinicaOrigem, nomeArquivo e arquivo são obrigatórios.'
+      });
+    }
+
+    // Validação de tipo MIME
+    const allowedMimes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+    const normMime = (tipoMime || '').toLowerCase();
+    if (normMime && !allowedMimes.includes(normMime)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Formato inválido. Apenas PDF, JPG e PNG são permitidos.'
+      });
+    }
+
+    // Validação de tamanho (5MB)
+    const MAX_SIZE = 5 * 1024 * 1024;
+    if (tamanhoBytes && tamanhoBytes > MAX_SIZE) {
+      return res.status(400).json({
+        success: false,
+        message: 'O documento excede o limite máximo permitido de 5MB.'
+      });
+    }
+
+    const docId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const docToSave = {
+      id: docId,
+      animalId,
+      clinicaOrigem: String(clinicaOrigem).trim(),
+      nomeArquivo: String(nomeArquivo).trim(),
+      tipoMime: normMime || 'application/octet-stream',
+      tamanhoBytes: Number(tamanhoBytes) || 0,
+      dataAnexo: dataAnexo || nowIso,
+      arquivo: String(arquivo),
+      createdAt: nowIso,
+    };
+
+    try {
+      // 1. Grava no armazenamento permanente do servidor
+      const map = getStoredOriginDocs();
+      map.set(animalId, docToSave);
+      persistOriginDocs(map);
+
+      // 2. Tenta replicar no Supabase se a tabela estiver criada
+      try {
+        await supabase.from('animal_origin_documents').upsert({
+          id: docId,
+          animal_id: animalId,
+          clinica_origem: docToSave.clinicaOrigem,
+          nome_arquivo: docToSave.nomeArquivo,
+          tipo_mime: docToSave.tipoMime,
+          tamanho_bytes: docToSave.tamanhoBytes,
+          data_anexo: docToSave.dataAnexo,
+          arquivo: docToSave.arquivo,
+        }, { onConflict: 'animal_id' });
+      } catch (sbErr) {
+        console.warn('Aviso ao sincronizar documento de origem com Supabase (mantido no servidor):', sbErr);
+      }
+
+      return res.json({
+        success: true,
+        message: 'Ficha de clínica conveniada salva com sucesso!',
+        document: {
+          id: docToSave.id,
+          animalId: docToSave.animalId,
+          clinicaOrigem: docToSave.clinicaOrigem,
+          nomeArquivo: docToSave.nomeArquivo,
+          tipoMime: docToSave.tipoMime,
+          tamanhoBytes: docToSave.tamanhoBytes,
+          dataAnexo: docToSave.dataAnexo,
+        }
+      });
+    } catch (err: any) {
+      console.error('Erro ao salvar documento de origem:', err);
+      return res.status(500).json({ success: false, message: err.message || 'Erro ao persistir documento de origem' });
+    }
+  });
+
+  // 4. Remover Documento de Origem
+  app.delete('/api/animals/:animalId/origin-document', async (req, res) => {
+    const animalId = String(req.params.animalId || '').trim();
+    if (!animalId) {
+      return res.status(400).json({ success: false, message: 'animalId obrigatório' });
+    }
+
+    try {
+      const map = getStoredOriginDocs();
+      map.delete(animalId);
+      persistOriginDocs(map);
+
+      try {
+        await supabase.from('animal_origin_documents').delete().eq('animal_id', animalId);
+      } catch (_) {}
+
+      return res.json({ success: true, message: 'Ficha da clínica removida com sucesso' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err.message || 'Erro ao remover documento de origem' });
     }
   });
 

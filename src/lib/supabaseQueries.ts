@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, ClinicalRecordAddendum, Prescription, Referral, ExamFile } from '../../types';
+import { AnimalJoined, Solicitante, Tutor, AnimalCondicao, KennelOccupation, Kennel, ClinicalRecord, ClinicalRecordAddendum, Prescription, Referral, ExamFile, AnimalOriginDocument } from '../../types';
 import { mapSupabaseToAnimal, mapSupabaseToTutor, mapSupabaseToSolicitante, mapSupabaseToRecord } from './supabaseSync';
 import { safeSetLocalAnimals, safeSetLocalTutores } from './safeStorage';
 import { db } from '../../services/db';
@@ -1297,4 +1297,157 @@ export async function fetchDashboardMetrics(): Promise<DashboardMetrics> {
     })),
     lastUpdated: new Date().toISOString()
   };
+}
+
+/**
+ * Consulta estritamente os metadados leves da ficha da clínica conveniada.
+ * Zero impacto no tráfego de dados (egress) - o campo arquivo pesado é omitido.
+ */
+export async function fetchAnimalOriginDocumentMeta(animalId: string): Promise<AnimalOriginDocument | null> {
+  if (!animalId) return null;
+  try {
+    const res = await fetch(`/api/animals/${animalId}/origin-document`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && data.document) {
+        return data.document;
+      }
+    }
+  } catch (err) {
+    console.warn('Erro ao consultar metadados do documento de origem via API:', err);
+  }
+
+  // Fallback: consulta direta no Supabase caso a API REST esteja indisponível
+  try {
+    const { data: row, error } = await supabase
+      .from('animal_origin_documents')
+      .select('id, animal_id, clinica_origem, nome_arquivo, tipo_mime, tamanho_bytes, data_anexo, created_at')
+      .eq('animal_id', animalId)
+      .maybeSingle();
+
+    if (!error && row) {
+      return {
+        id: row.id,
+        animalId: row.animal_id,
+        clinicaOrigem: row.clinica_origem,
+        nomeArquivo: row.nome_arquivo,
+        tipoMime: row.tipo_mime,
+        tamanhoBytes: row.tamanho_bytes,
+        dataAnexo: row.data_anexo,
+        createdAt: row.created_at,
+      };
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * Consulta o arquivo completo sob demanda estritamente quando o usuário clica em "Visualizar" ou "Baixar".
+ */
+export async function fetchAnimalOriginDocumentContent(animalId: string): Promise<string | null> {
+  if (!animalId) return null;
+  try {
+    const res = await fetch(`/api/animals/${animalId}/origin-document/content`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && data.document?.arquivo) {
+        return data.document.arquivo;
+      }
+    }
+  } catch (err) {
+    console.warn('Erro ao carregar conteúdo do documento de origem via API:', err);
+  }
+
+  // Fallback direto no Supabase
+  try {
+    const { data: row, error } = await supabase
+      .from('animal_origin_documents')
+      .select('arquivo')
+      .eq('animal_id', animalId)
+      .maybeSingle();
+
+    if (!error && row?.arquivo) {
+      return row.arquivo;
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * Salva ou atualiza a ficha de atendimento da clínica conveniada vinculada ao animal.
+ */
+export async function saveAnimalOriginDocument(
+  animalId: string,
+  doc: {
+    clinicaOrigem: string;
+    nomeArquivo: string;
+    tipoMime: string;
+    tamanhoBytes?: number;
+    dataAnexo?: string;
+    arquivo: string;
+  }
+): Promise<boolean> {
+  if (!animalId || !doc.clinicaOrigem || !doc.nomeArquivo || !doc.arquivo) {
+    return false;
+  }
+
+  try {
+    const res = await fetch(`/api/animals/${animalId}/origin-document`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc),
+    });
+
+    if (res.ok) {
+      return true;
+    }
+  } catch (err) {
+    console.warn('Erro ao salvar documento de origem via API:', err);
+  }
+
+  // Fallback direto no Supabase
+  try {
+    const docId = crypto.randomUUID();
+    const { error } = await supabase.from('animal_origin_documents').upsert({
+      id: docId,
+      animal_id: animalId,
+      clinica_origem: doc.clinicaOrigem,
+      nome_arquivo: doc.nomeArquivo,
+      tipo_mime: doc.tipoMime,
+      tamanho_bytes: doc.tamanhoBytes || 0,
+      data_anexo: doc.dataAnexo || new Date().toISOString(),
+      arquivo: doc.arquivo,
+    }, { onConflict: 'animal_id' });
+
+    return !error;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Remove a ficha de atendimento da clínica conveniada vinculada ao animal.
+ */
+export async function deleteAnimalOriginDocument(animalId: string): Promise<boolean> {
+  if (!animalId) return false;
+  try {
+    const res = await fetch(`/api/animals/${animalId}/origin-document`, {
+      method: 'DELETE',
+    });
+    if (res.ok) return true;
+  } catch (err) {
+    console.warn('Erro ao remover documento de origem via API:', err);
+  }
+
+  try {
+    const { error } = await supabase
+      .from('animal_origin_documents')
+      .delete()
+      .eq('animal_id', animalId);
+    return !error;
+  } catch (_) {
+    return false;
+  }
 }

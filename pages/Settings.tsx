@@ -309,6 +309,18 @@ CREATE TABLE IF NOT EXISTS public.exam_files (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS public.animal_origin_documents (
+    id TEXT PRIMARY KEY,
+    animal_id TEXT NOT NULL REFERENCES public.animals(id) ON DELETE CASCADE,
+    clinica_origem TEXT NOT NULL,
+    nome_arquivo TEXT NOT NULL,
+    tipo_mime TEXT NOT NULL,
+    tamanho_bytes INTEGER,
+    data_anexo TEXT NOT NULL,
+    arquivo TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ÍNDICES DE ALTO DESEMPENHO
 CREATE INDEX IF NOT EXISTS idx_animals_condicao ON public.animals(condicao);
 CREATE INDEX IF NOT EXISTS idx_animals_especie ON public.animals(especie);
@@ -316,6 +328,7 @@ CREATE INDEX IF NOT EXISTS idx_clinical_records_animal_id ON public.clinical_rec
 CREATE INDEX IF NOT EXISTS idx_surgeries_animal_id ON public.surgeries(animal_id);
 CREATE INDEX IF NOT EXISTS idx_surgeries_status ON public.surgeries(status);
 CREATE INDEX IF NOT EXISTS idx_kennel_occupations_kennel_id ON public.kennel_occupations(kennel_id);
+CREATE INDEX IF NOT EXISTS idx_origin_docs_animal_id ON public.animal_origin_documents(animal_id);
 
 -- ROW LEVEL SECURITY (RLS)
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
@@ -330,6 +343,7 @@ ALTER TABLE public.prescriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referrals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.status_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exam_files ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.animal_origin_documents ENABLE ROW LEVEL SECURITY;
 
 -- POLÍTICAS DE ACESSO COMPLETO (RLS)
 DO $$ 
@@ -370,6 +384,9 @@ BEGIN
 
     DROP POLICY IF EXISTS "Permitir acesso completo a arquivos de exame" ON public.exam_files;
     CREATE POLICY "Permitir acesso completo a arquivos de exame" ON public.exam_files FOR ALL USING (true) WITH CHECK (true);
+
+    DROP POLICY IF EXISTS "Permitir acesso completo a documentos de origem" ON public.animal_origin_documents;
+    CREATE POLICY "Permitir acesso completo a documentos de origem" ON public.animal_origin_documents FOR ALL USING (true) WITH CHECK (true);
 END $$;
 
 -- CONFIGURAÇÃO DO SUPABASE STORAGE (BUCKET 'animal-photos' P/ CONTROLE DE EGRESS)
@@ -938,7 +955,8 @@ END $$;`;
             { name: 'prescriptions', cols: '12 colunas', desc: 'Receituários & Posologia' },
             { name: 'referrals', cols: '9 colunas', desc: 'Encaminhamentos' },
             { name: 'status_logs', cols: '8 colunas', desc: 'Auditoria de Condição' },
-            { name: 'exam_files', cols: '6 colunas', desc: 'Laudos & Anexos' }
+            { name: 'exam_files', cols: '6 colunas', desc: 'Laudos & Anexos' },
+            { name: 'animal_origin_documents', cols: '8 colunas', desc: 'Fichas de Clínicas Conveniadas' }
           ].map(tbl => (
             <div key={tbl.name} className="p-3 bg-slate-50 border border-slate-100 rounded-xl space-y-1">
               <div className="flex items-center justify-between">

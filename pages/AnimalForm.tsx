@@ -6,17 +6,18 @@ const { useParams, useNavigate } = ReactRouterDOM as any;
 import { db } from '../services/db';
 import { Animal, Especie, Porte, Sexo, AnimalCondicao, Tutor, Solicitante } from '../types';
 import { syncAnimalToSupabase, syncTutorToSupabase, syncSolicitanteToSupabase } from '../src/lib/supabaseSync';
-import { fetchAnimalById } from '../src/lib/supabaseQueries';
+import { fetchAnimalById, fetchAnimalOriginDocumentMeta, fetchAnimalOriginDocumentContent, saveAnimalOriginDocument, deleteAnimalOriginDocument } from '../src/lib/supabaseQueries';
 import { supabase } from '../src/lib/supabase';
 import { uploadAnimalPhoto, compressImage } from '../src/lib/storageService';
 import { validateCPF, formatCPF, formatTelefone } from '../utils/validation';
-import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock, Loader2 } from 'lucide-react';
+import { ArrowLeft, Save, AlertCircle, CheckCircle2, Stethoscope, AlertTriangle, Skull, MapPin, Calendar, Palette, UserCheck, Camera, Upload, X, Building2, User, Ambulance, UserCircle, HeartPulse, ClipboardList, Home, FileText, CheckCircle, Cpu, QrCode, HelpCircle, Shield, TreePine, Flame, Clock, Loader2, Eye, Download, RefreshCw, FileCheck } from 'lucide-react';
 
 const AnimalForm: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cadUnicoRef = useRef<HTMLInputElement>(null);
+  const originDocRef = useRef<HTMLInputElement>(null);
   const user = db.getCurrentUser();
   const isVetOrAdmin = user?.role === 'VETERINARIO' || user?.role === 'ADMIN';
 
@@ -25,6 +26,17 @@ const AnimalForm: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'RESGATE' | 'EXTERNO'>('RESGATE');
   const [solicitanteType, setSolicitanteType] = useState<'PARTICULAR' | 'ONG' | 'BOMBEIROS' | 'PM' | 'AMBIENTAL' | 'DESCONHECIDO'>('PARTICULAR');
   const [ongs, setOngs] = useState<Solicitante[]>([]);
+
+  // Estado para Encaminhamento por Clínica Veterinária Conveniada
+  const [isClinicaConveniada, setIsClinicaConveniada] = useState<boolean>(false);
+  const [nomeClinica, setNomeClinica] = useState<string>('');
+  const [originDoc, setOriginDoc] = useState<{
+    nomeArquivo: string;
+    tipoMime: string;
+    tamanhoBytes: number;
+    arquivo: string;
+  } | null>(null);
+  const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false);
   
   const [animal, setAnimal] = useState<any>({
     nome: '',
@@ -192,6 +204,23 @@ const AnimalForm: React.FC = () => {
         .finally(() => {
           setLoadingInitial(false);
         });
+
+      // 3. Busca documento de origem vinculado (se houver)
+      fetchAnimalOriginDocumentMeta(id).then(async doc => {
+        if (doc) {
+          setIsClinicaConveniada(true);
+          setNomeClinica(doc.clinicaOrigem || '');
+          const content = await fetchAnimalOriginDocumentContent(id);
+          if (content) {
+            setOriginDoc({
+              nomeArquivo: doc.nomeArquivo,
+              tipoMime: doc.tipoMime,
+              tamanhoBytes: doc.tamanhoBytes || 0,
+              arquivo: content,
+            });
+          }
+        }
+      }).catch(e => console.warn('Aviso ao consultar documento de origem:', e));
     }
   }, [id]);
 
@@ -440,6 +469,68 @@ const AnimalForm: React.FC = () => {
     }
   };
 
+  const handleOriginDocFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const isValidType = validTypes.includes(file.type.toLowerCase()) || ['pdf', 'jpg', 'jpeg', 'png'].includes(ext || '');
+
+    if (!isValidType) {
+      alert('Formato inválido. Apenas arquivos PDF, JPG e PNG são aceitos.');
+      if (e.target) e.target.value = '';
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Arquivo muito grande. O limite máximo permitido é de 5 MB.');
+      if (e.target) e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setOriginDoc({
+        nomeArquivo: file.name,
+        tipoMime: file.type || (ext === 'pdf' ? 'application/pdf' : 'image/jpeg'),
+        tamanhoBytes: file.size,
+        arquivo: reader.result as string,
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveOriginDoc = async () => {
+    if (!window.confirm('Confirma a remoção da ficha de atendimento da clínica conveniada?')) {
+      return;
+    }
+    setOriginDoc(null);
+    if (originDocRef.current) {
+      originDocRef.current.value = '';
+    }
+    if (id) {
+      try {
+        await deleteAnimalOriginDocument(id);
+      } catch (_) {}
+    }
+  };
+
+  const handleDownloadOriginDoc = () => {
+    if (!originDoc?.arquivo) return;
+    const link = document.createElement('a');
+    link.href = originDoc.arquivo;
+    link.download = originDoc.nomeArquivo || 'ficha_clinica_conveniada';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleViewOriginDoc = () => {
+    if (!originDoc?.arquivo) return;
+    setPreviewModalOpen(true);
+  };
+
   const removeFoto = () => {
     setAnimal({ ...animal, foto: '' });
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -461,6 +552,11 @@ const AnimalForm: React.FC = () => {
         setMessage({ type: 'error', text: 'O CPF informado para o solicitante é inválido.' });
         return;
       }
+    }
+
+    if (isClinicaConveniada && !nomeClinica.trim()) {
+      setMessage({ type: 'error', text: 'Por favor, informe o nome da clínica veterinária conveniada de origem.' });
+      return;
     }
 
     if (!animal.nome || !animal.peso || !animal.corPelagem || !animal.motivo) {
@@ -580,6 +676,25 @@ const AnimalForm: React.FC = () => {
 
       // 4. Salva no Supabase (Fonte Oficial dos Dados)
       const supabaseSuccess = await syncAnimalToSupabase(animalToSave);
+
+      // 4.1. Persistência da Ficha de Clínica Conveniada (Estrutura Dedicada e Desacoplada)
+      if (isClinicaConveniada && originDoc) {
+        try {
+          await saveAnimalOriginDocument(targetAnimalId, {
+            clinicaOrigem: nomeClinica.trim() || 'Clínica Conveniada',
+            nomeArquivo: originDoc.nomeArquivo,
+            tipoMime: originDoc.tipoMime,
+            tamanhoBytes: originDoc.tamanhoBytes,
+            arquivo: originDoc.arquivo,
+          });
+        } catch (originErr) {
+          console.warn('Aviso ao persistir ficha de clínica conveniada:', originErr);
+        }
+      } else if (!isClinicaConveniada && id) {
+        try {
+          await deleteAnimalOriginDocument(targetAnimalId);
+        } catch (_) {}
+      }
 
       // 5. Atualiza cache local de forma consistente com os mesmos IDs
       const personaData = isExterno 
@@ -1090,6 +1205,184 @@ const AnimalForm: React.FC = () => {
               )}
             </div>
 
+            {/* SEÇÃO: ENCAMINHAMENTO POR CLÍNICA VETERINÁRIA CONVENIADA */}
+            <div className="space-y-6 pt-6 border-t border-slate-200">
+              <div className="border-b pb-4">
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-700 flex items-center gap-2">
+                  <Building2 size={16} className="text-teal-600" />
+                  Procedência do Animal
+                </h3>
+              </div>
+
+              <div className="p-6 bg-slate-50/80 rounded-2xl border-2 border-slate-200/80 space-y-6">
+                <div>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <label className="text-xs font-black text-slate-800 uppercase tracking-tight block">
+                        Encaminhado por Clínica Veterinária Conveniada? *
+                      </label>
+                      <p className="text-[11px] text-slate-500 font-medium">
+                        Identifique se o paciente foi encaminhado por uma clínica parceira conveniada ao município.
+                      </p>
+                    </div>
+
+                    <div className="flex gap-3 shrink-0 pt-2 sm:pt-0">
+                      <label className={`flex items-center gap-2 px-4 py-2 rounded-xl border-2 cursor-pointer transition-all ${
+                        isClinicaConveniada 
+                          ? 'bg-teal-50 border-teal-500 text-teal-800 font-bold shadow-sm ring-1 ring-teal-400' 
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                      }`}>
+                        <input
+                          type="radio"
+                          name="isClinicaConveniada"
+                          checked={isClinicaConveniada === true}
+                          onChange={() => setIsClinicaConveniada(true)}
+                          className="text-teal-600 focus:ring-teal-500"
+                        />
+                        <span className="text-sm font-bold">Sim</span>
+                      </label>
+                      <label className={`flex items-center gap-2 px-4 py-2 rounded-xl border-2 cursor-pointer transition-all ${
+                        !isClinicaConveniada 
+                          ? 'bg-slate-100 border-slate-400 text-slate-800 font-bold shadow-sm' 
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                      }`}>
+                        <input
+                          type="radio"
+                          name="isClinicaConveniada"
+                          checked={isClinicaConveniada === false}
+                          onChange={() => {
+                            if (originDoc) {
+                              if (!window.confirm('Ao selecionar "Não", a ficha de atendimento anexada será desvinculada. Confirma?')) {
+                                return;
+                              }
+                            }
+                            setIsClinicaConveniada(false);
+                            setNomeClinica('');
+                            setOriginDoc(null);
+                          }}
+                          className="text-slate-600 focus:ring-slate-500"
+                        />
+                        <span className="text-sm font-bold">Não</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                {/* CAMPOS CONDICIONAIS DA CLÍNICA CONVENIADA */}
+                {isClinicaConveniada && (
+                  <div className="space-y-6 pt-4 border-t border-slate-200 animate-in slide-in-from-top-2 duration-300">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                        <Building2 size={13} className="text-teal-600" /> Nome da Clínica Veterinária Conveniada de Origem *
+                      </label>
+                      <input
+                        type="text"
+                        required={isClinicaConveniada}
+                        value={nomeClinica}
+                        onChange={e => setNomeClinica(e.target.value)}
+                        placeholder="Ex: Clínica Veterinária VetVida, Hospital Bicho Amigo..."
+                        className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none font-bold text-slate-800"
+                      />
+                    </div>
+
+                    {/* SEÇÃO: DOCUMENTAÇÃO DA CLÍNICA CONVENIADA */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] font-black text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
+                          <FileText size={13} className="text-teal-600" /> Documentação da Clínica Conveniada (Ficha de Atendimento)
+                        </label>
+                        <span className="text-[10px] text-slate-400 font-semibold uppercase">Opcional</span>
+                      </div>
+
+                      {!originDoc ? (
+                        <div
+                          onClick={() => originDocRef.current?.click()}
+                          className="p-6 rounded-2xl border-2 border-dashed border-slate-300 hover:border-teal-500 hover:bg-teal-50/40 transition-all flex flex-col items-center justify-center cursor-pointer text-center group bg-white"
+                        >
+                          <div className="p-3 bg-teal-50 text-teal-600 rounded-xl mb-2 group-hover:scale-110 transition-transform shadow-sm">
+                            <Upload size={22} />
+                          </div>
+                          <p className="text-xs font-bold text-slate-700">Clique para anexar a ficha de atendimento da clínica conveniada</p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">Formatos aceitos: PDF, JPG e PNG (Limite: 5 MB por arquivo)</p>
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); originDocRef.current?.click(); }}
+                            className="mt-3 px-4 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-black uppercase tracking-wider transition-colors shadow-sm"
+                          >
+                            Anexar Ficha
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="p-4 bg-white rounded-2xl border-2 border-teal-200 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-in zoom-in-95">
+                          <div className="flex items-center gap-3">
+                            <div className="p-3 bg-teal-100 text-teal-800 rounded-xl shrink-0">
+                              <FileCheck size={24} />
+                            </div>
+                            <div className="space-y-0.5">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-black text-slate-900 truncate max-w-xs sm:max-w-md" title={originDoc.nomeArquivo}>
+                                  {originDoc.nomeArquivo}
+                                </span>
+                                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black px-2 py-0.5 rounded uppercase">
+                                  Anexado
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500">
+                                {originDoc.tipoMime.includes('pdf') || originDoc.nomeArquivo.toLowerCase().endsWith('.pdf') ? 'Documento PDF' : 'Imagem'} • {(originDoc.tamanhoBytes / 1024).toFixed(1)} KB
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 w-full sm:w-auto justify-end border-t sm:border-t-0 pt-3 sm:pt-0 border-slate-100">
+                            <button
+                              type="button"
+                              onClick={handleViewOriginDoc}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
+                              title="Visualizar documento"
+                            >
+                              <Eye size={14} /> Visualizar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleDownloadOriginDoc}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
+                              title="Baixar arquivo"
+                            >
+                              <Download size={14} /> Baixar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => originDocRef.current?.click()}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-lg text-xs font-bold transition-colors"
+                              title="Substituir arquivo"
+                            >
+                              <RefreshCw size={14} /> Substituir
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleRemoveOriginDoc}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-xs font-bold transition-colors"
+                              title="Remover anexo"
+                            >
+                              <X size={14} /> Remover
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      <input
+                        type="file"
+                        ref={originDocRef}
+                        onChange={handleOriginDocFile}
+                        accept="application/pdf,image/jpeg,image/png,image/jpg"
+                        className="hidden"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div className="flex justify-end gap-4 pt-6 border-t border-slate-100">
               <button type="button" onClick={() => navigate('/animais')} className="px-8 py-3 text-slate-600 font-bold hover:bg-slate-100 rounded-xl transition-colors">Cancelar</button>
               <button type="submit" disabled={loading} className={`flex items-center gap-2 px-12 py-3 text-white font-black rounded-xl shadow-lg disabled:opacity-50 transition-all ${activeTab === 'EXTERNO' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-teal-600 hover:bg-teal-700'}`}>
@@ -1099,6 +1392,53 @@ const AnimalForm: React.FC = () => {
           </form>
         </div>
       </section>
+      )}
+
+      {/* MODAL DE PRÉ-VISUALIZAÇÃO DA FICHA DA CLÍNICA CONVENIADA */}
+      {previewModalOpen && originDoc && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200 animate-in zoom-in-95">
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <FileText size={18} className="text-teal-600" />
+                <h3 className="text-sm font-black text-slate-800 uppercase tracking-tight truncate max-w-md">
+                  {originDoc.nomeArquivo}
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadOriginDoc}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold transition-colors"
+                >
+                  <Download size={14} /> Baixar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModalOpen(false)}
+                  className="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg transition-colors"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto p-4 bg-slate-100 flex items-center justify-center min-h-[400px]">
+              {originDoc.tipoMime.includes('pdf') || originDoc.nomeArquivo.toLowerCase().endsWith('.pdf') ? (
+                <iframe
+                  src={originDoc.arquivo}
+                  className="w-full h-[65vh] rounded-lg border border-slate-300 bg-white"
+                  title="Visualização da Ficha"
+                />
+              ) : (
+                <img
+                  src={originDoc.arquivo}
+                  alt="Ficha de Atendimento"
+                  className="max-h-[65vh] max-w-full object-contain rounded-lg border border-slate-300 shadow-md bg-white"
+                />
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

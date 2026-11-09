@@ -276,6 +276,22 @@ export const clinicalRecordAddenda = pgTable('clinical_record_addenda', {
   index('idx_clinical_addenda_sync_status').on(table.syncStatus),
 ]);
 
+// 15. Documentos de Origem (Clínicas Conveniadas)
+export const animalOriginDocuments = pgTable('animal_origin_documents', {
+  id: text('id').primaryKey(),
+  animalId: text('animal_id').references(() => animals.id, { onDelete: 'cascade' }).notNull(),
+  clinicaOrigem: text('clinica_origem').notNull(),
+  nomeArquivo: text('nome_arquivo').notNull(),
+  tipoMime: text('tipo_mime').notNull(),
+  tamanhoBytes: integer('tamanho_bytes'),
+  dataAnexo: text('data_anexo').notNull(),
+  arquivo: text('arquivo').notNull(), // Base64 ou URL de armazenamento
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index('idx_origin_docs_animal_id').on(table.animalId),
+  index('idx_origin_docs_created_at').on(table.createdAt),
+]);
+
 // Relacionamentos Drizzle
 export const usersRelations = relations(users, ({ many }) => ({
   animals: many(animals),
@@ -308,6 +324,14 @@ export const animalsRelations = relations(animals, ({ one, many }) => ({
   statusLogs: many(statusLogs),
   clinicalDrafts: many(clinicalDrafts),
   clinicalRecordAddenda: many(clinicalRecordAddenda),
+  originDocuments: many(animalOriginDocuments),
+}));
+
+export const animalOriginDocumentsRelations = relations(animalOriginDocuments, ({ one }) => ({
+  animal: one(animals, {
+    fields: [animalOriginDocuments.animalId],
+    references: [animals.id],
+  }),
 }));
 
 export const clinicalDraftsRelations = relations(clinicalDrafts, ({ one }) => ({
