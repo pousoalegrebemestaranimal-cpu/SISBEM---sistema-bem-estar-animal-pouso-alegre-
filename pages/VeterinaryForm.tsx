@@ -628,7 +628,7 @@ const VeterinaryForm: React.FC = () => {
                 const recToPrint: ClinicalRecord = {
                   id: editId,
                   animalId: animal.id,
-                  veterinarioId: user?.id || '1',
+                  veterinarioId: record.veterinarioId || user?.id || '',
                   dataAtendimento: new Date().toISOString(),
                   inativo: false,
                   vacinas: record.vacinas || '',

@@ -929,10 +929,24 @@ app.get('/api/health', (req, res) => {
       const targetVetId = user.role === 'ADMIN' && vetId ? vetId : user.id;
       const pool = createPool();
 
+      // Resolve o ID do usuário no PostgreSQL (aceita tanto id quanto uid ou email do usuário autenticado)
+      let pgVetId = targetVetId;
+      try {
+        const userRes = await pool.query(
+          'SELECT id FROM public.users WHERE id = $1 OR uid = $1 OR email = $2 LIMIT 1;',
+          [targetVetId, user.email || '']
+        );
+        if (userRes.rows.length > 0) {
+          pgVetId = userRes.rows[0].id;
+        }
+      } catch (uErr) {
+        console.warn('Erro ao resolver pgVetId no start_clinical_attendance:', uErr);
+      }
+
       try {
         let queryRes = await pool.query(
           'SELECT public.start_clinical_attendance($1, $2) AS result;',
-          [animalId, targetVetId]
+          [animalId, pgVetId]
         );
         let result = queryRes.rows[0]?.result;
 
@@ -999,7 +1013,7 @@ app.get('/api/health', (req, res) => {
             // Reexecuta o bloqueio no Cloud SQL com o registro presente
             queryRes = await pool.query(
               'SELECT public.start_clinical_attendance($1, $2) AS result;',
-              [animalId, targetVetId]
+              [animalId, pgVetId]
             );
             result = queryRes.rows[0]?.result;
           }
@@ -1204,10 +1218,33 @@ app.get('/api/health', (req, res) => {
       payload.record.authenticatedVetId = user.id;
 
       const pool = createPool();
+
+      // Resolve o ID do usuário no PostgreSQL (aceita tanto id quanto uid ou email do usuário autenticado)
+      let pgVetId = targetVetId;
+      try {
+        const userRes = await pool.query(
+          'SELECT id FROM public.users WHERE id = $1 OR uid = $1 OR email = $2 LIMIT 1;',
+          [targetVetId, user.email || '']
+        );
+        if (userRes.rows.length > 0) {
+          pgVetId = userRes.rows[0].id;
+        }
+      } catch (uErr) {
+        console.warn('Erro ao resolver pgVetId no finish_clinical_attendance:', uErr);
+      }
+
+      const sqlPayload = {
+        ...payload,
+        record: {
+          ...payload.record,
+          veterinarioId: pgVetId
+        }
+      };
+
       try {
         const queryRes = await pool.query(
           'SELECT public.finish_clinical_attendance($1::jsonb) AS result;',
-          [JSON.stringify(payload)]
+          [JSON.stringify(sqlPayload)]
         );
         const result = queryRes.rows[0]?.result;
         if (result?.success && payload.record?.animalId) {
@@ -1228,8 +1265,15 @@ app.get('/api/health', (req, res) => {
             await supabase.from('animals').update(animalUpdate).eq('id', payload.record.animalId);
             const recordToSync = {
               ...payload.record,
-              receitas: payload.prescriptions || payload.record.receitas || [],
-              encaminhamentos: payload.referrals || payload.record.encaminhamentos || [],
+              veterinarioId: targetVetId,
+              receitas: (payload.prescriptions || payload.record.receitas || []).map((p: any) => ({
+                ...p,
+                veterinarioId: targetVetId
+              })),
+              encaminhamentos: (payload.referrals || payload.record.encaminhamentos || []).map((r: any) => ({
+                ...r,
+                veterinarioId: targetVetId
+              })),
               examesLaboratoriais: payload.examFiles || payload.record.examesLaboratoriais || []
             };
             await syncRecordToSupabase(recordToSync);

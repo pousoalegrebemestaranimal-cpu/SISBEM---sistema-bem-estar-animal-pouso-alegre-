@@ -660,14 +660,15 @@ export function generateAnimalSheetHTML(animal: AnimalJoined): string {
             Nenhum atendimento clínico registrado até o momento.
           </div>
         ` : historico.map((rec, index) => {
-          const vet = users.find(u => u.id === rec.veterinarioId);
+          const vet = users.find(u => u.id === rec.veterinarioId || u.uid === rec.veterinarioId) || db.getUserById(rec.veterinarioId);
           const dataAtendimentoFormatted = rec.dataAtendimento ? format(new Date(rec.dataAtendimento), 'dd/MM/yyyy HH:mm', { locale: ptBR }) : 'N/A';
+          const vetDisplayName = vet?.name ? (vet.role === 'VETERINARIO' && !vet.name.startsWith('Dr') ? `Dr(a). ${vet.name}` : vet.name) : 'Veterinário Responsável';
 
           return `
             <div class="record-box">
               <div class="record-header">
                 <div class="record-title">
-                  Atendimento #${historico.length - index} • ${dataAtendimentoFormatted} • Dr(a). ${vet?.name || 'Veterinário Responsável'} ${vet?.crmv ? `(CRMV: ${vet.crmv})` : ''}
+                  Atendimento #${historico.length - index} • ${dataAtendimentoFormatted} • ${vetDisplayName} ${vet?.crmv ? `(CRMV: ${vet.crmv})` : ''}
                 </div>
                 <div class="record-badges">
                   ${rec.v10Aplicada ? '<span class="tag-pill">Vacina V10</span>' : ''}

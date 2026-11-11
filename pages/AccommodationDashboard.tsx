@@ -695,8 +695,8 @@ const AccommodationDashboard: React.FC = () => {
       }
 
       // 7. Veterinário responsável
-      const vet = users.find(u => u.id === latestRecord.veterinarioId);
-      const vetInfo = vet ? `${vet.name}${vet.crmv ? ` (CRMV: ${vet.crmv})` : ''}` : 'Veterinário SISBEM';
+      const vet = users.find(u => u.id === latestRecord.veterinarioId || u.uid === latestRecord.veterinarioId) || db.getUserById(latestRecord.veterinarioId);
+      const vetInfo = vet ? `${vet.role === 'VETERINARIO' && !vet.name.startsWith('Dr') ? `Dr(a). ${vet.name}` : vet.name}${vet.crmv ? ` (CRMV: ${vet.crmv})` : ''}` : 'Veterinário SISBEM';
 
       items.push({
         animal,

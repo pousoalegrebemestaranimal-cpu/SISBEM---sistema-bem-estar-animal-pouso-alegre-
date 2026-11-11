@@ -221,7 +221,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
 
   const handlePrintPrescriptions = (record: ClinicalRecord) => {
     if (!record.receitas || record.receitas.length === 0) return;
-    const vet = users.find(u => u.id === record.veterinarioId);
+    const vet = users.find(u => u.id === record.veterinarioId || u.uid === record.veterinarioId) || db.getUserById(record.veterinarioId);
     const html = generatePrintHTML(
       'Receituário Veterinário (Histórico)',
       animal,
@@ -234,7 +234,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
 
   const handlePrintReferrals = (record: ClinicalRecord) => {
     if (!record.encaminhamentos || record.encaminhamentos.length === 0) return;
-    const vet = users.find(u => u.id === record.veterinarioId);
+    const vet = users.find(u => u.id === record.veterinarioId || u.uid === record.veterinarioId) || db.getUserById(record.veterinarioId);
     const html = generatePrintHTML(
       'Guia de Encaminhamento Veterinário (Histórico)',
       animal,
@@ -419,7 +419,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
 
               {records.map((rec, index) => {
                 const isExpanded = !!expandedRecordIds[rec.id];
-                const vet = users.find(u => u.id === rec.veterinarioId);
+                const vet = users.find(u => u.id === rec.veterinarioId || u.uid === rec.veterinarioId) || db.getUserById(rec.veterinarioId);
                 const prescCount = rec.receitas?.length || 0;
                 const refCount = rec.encaminhamentos?.length || 0;
                 const examCount = (rec.examesLaboratoriais?.length || 0) + (rec.examesSolicitados ? 1 : 0);
@@ -462,7 +462,7 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                           </div>
                           <p className="text-[11px] text-slate-600 font-bold uppercase flex items-center gap-1.5 mt-0.5">
                             <UserIcon size={12} className="text-slate-400" /> 
-                            Veterinário(a): <span className="text-slate-800 font-black">{vet?.name || 'Veterinário(a)'}</span>
+                            Veterinário(a): <span className="text-slate-800 font-black">{vet?.name ? (vet.role === 'VETERINARIO' && !vet.name.startsWith('Dr') ? `Dr(a). ${vet.name}` : vet.name) : 'Veterinário(a)'}</span>
                             {vet?.crmv && <span className="text-slate-400 font-normal">• CRMV: {vet.crmv}</span>}
                           </p>
                         </div>
@@ -831,8 +831,8 @@ export const ClinicalHistoryModal: React.FC<ClinicalHistoryModalProps> = ({
                             {/* LISTA DE COMPLEMENTOS EXISTENTES EM ORDEM CRONOLÓGICA */}
                             <div className="space-y-2 pt-1">
                               {rec.adendos.map((ad, adIdx) => {
-                                const adVet = users.find(u => u.id === ad.veterinarioId);
-                                const displayName = ad.veterinarioNome || adVet?.name || 'Médico Veterinário';
+                                const adVet = users.find(u => u.id === ad.veterinarioId || u.uid === ad.veterinarioId) || db.getUserById(ad.veterinarioId);
+                                const displayName = ad.veterinarioNome || (adVet?.name ? (adVet.role === 'VETERINARIO' && !adVet.name.startsWith('Dr') ? `Dr(a). ${adVet.name}` : adVet.name) : 'Médico Veterinário');
                                 const displayCrmv = ad.crmv || adVet?.crmv;
 
                                 return (

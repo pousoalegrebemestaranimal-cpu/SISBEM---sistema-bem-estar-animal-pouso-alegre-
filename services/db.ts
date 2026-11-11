@@ -1152,6 +1152,19 @@ let isLoggingOut = false;
 
 export const db = {
   getUsers: (): any[] => JSON.parse(localStorage.getItem(KEYS.USERS) || '[]'),
+  getUserById: (idOrUid?: string): User | undefined => {
+    if (!idOrUid) return undefined;
+    const cleanId = String(idOrUid).trim();
+    if (!cleanId) return undefined;
+    const users: any[] = db.getUsers();
+    const found = users.find(u => u.id === cleanId || u.uid === cleanId);
+    if (found) return found;
+    const current = db.getCurrentUser();
+    if (current && (current.id === cleanId || (current as any).uid === cleanId)) {
+      return current;
+    }
+    return undefined;
+  },
   saveUsers: (usersList: any[]) => {
     localStorage.setItem(KEYS.USERS, JSON.stringify(usersList));
   },
@@ -2265,8 +2278,8 @@ export const db = {
     if (!user) return null;
     try {
       const parsed = JSON.parse(user);
-      if (parsed && (parsed.password || parsed.uid || parsed.credentialProof)) {
-        const { password, uid, credentialProof, secret, authSecret, ...clean } = parsed;
+      if (parsed && (parsed.password || parsed.credentialProof || parsed.secret || parsed.authSecret)) {
+        const { password, credentialProof, secret, authSecret, ...clean } = parsed;
         localStorage.setItem(KEYS.CURRENT_USER, JSON.stringify(clean));
         return clean as User;
       }

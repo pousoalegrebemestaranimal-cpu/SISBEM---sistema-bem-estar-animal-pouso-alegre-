@@ -423,7 +423,7 @@ const AnimalDetail: React.FC = () => {
 
   const handlePrintPrescription = (prescriptions: Prescription[]) => {
     if (!animal || prescriptions.length === 0) return;
-    const vet = db.getUsers().find(u => u.id === prescriptions[0].veterinarioId);
+    const vet = db.getUserById(prescriptions[0].veterinarioId);
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
 
@@ -434,7 +434,7 @@ const AnimalDetail: React.FC = () => {
 
   const handlePrintReferral = (referrals: Referral[]) => {
     if (!animal || referrals.length === 0) return;
-    const vet = db.getUsers().find(u => u.id === referrals[0].veterinarioId);
+    const vet = db.getUserById(referrals[0].veterinarioId);
     const printWindow = window.open('', '_blank');
     if (!printWindow) return;
 
@@ -1881,7 +1881,7 @@ const AnimalDetail: React.FC = () => {
                     </h4>
                     <div className="space-y-3">
                       {atendimentosCirurgicos.map((atendimento) => {
-                        const vet = db.getUsers().find(u => u.id === atendimento.veterinarioId);
+                        const vet = db.getUserById(atendimento.veterinarioId);
                         return (
                           <div key={atendimento.id} className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2 text-xs">
                             <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-1 border-b border-slate-200 pb-2">
@@ -1889,7 +1889,7 @@ const AnimalDetail: React.FC = () => {
                                 Atendimento Clínico em {safeFormatDate(atendimento.dataAtendimento, "dd/MM/yyyy 'às' HH:mm")}
                               </span>
                               <span className="text-[11px] font-bold text-slate-500">
-                                Responsável: {vet?.name || 'Veterinário(a)'}
+                                Responsável: {vet?.name ? (vet.role === 'VETERINARIO' && !vet.name.startsWith('Dr') ? `Dr(a). ${vet.name}` : vet.name) : 'Veterinário(a)'} {vet?.crmv ? `(CRMV: ${vet.crmv})` : ''}
                               </span>
                             </div>
                             {atendimento.diagnosticoClinico && (
@@ -1945,7 +1945,7 @@ const AnimalDetail: React.FC = () => {
                 {historicoOrdenado.length > 0 ? (
                   historicoOrdenado.map((record, index) => {
                     const isExpanded = isRecordExpanded(record.id, index);
-                    const vet = db.getUsers().find(u => u.id === record.veterinarioId);
+                    const vet = db.getUserById(record.veterinarioId);
                     const prescCount = record.receitas?.length || 0;
                     const refCount = record.encaminhamentos?.length || 0;
                     const examCount = (record.examesLaboratoriais?.length || 0) + (record.examesSolicitados ? 1 : 0);
@@ -1985,7 +1985,7 @@ const AnimalDetail: React.FC = () => {
                               </div>
                               <p className="text-[10px] text-slate-500 font-bold uppercase flex items-center gap-1.5 mt-0.5">
                                 <User size={12} className="text-slate-400" /> 
-                                Veterinário(a): <span className="text-slate-700 font-black">{vet?.name || 'Veterinário(a)'}</span>
+                                Veterinário(a): <span className="text-slate-700 font-black">{vet?.name ? (vet.role === 'VETERINARIO' && !vet.name.startsWith('Dr') ? `Dr(a). ${vet.name}` : vet.name) : 'Veterinário(a)'}</span>
                                 {vet?.crmv && <span className="text-slate-400">• CRMV: {vet.crmv}</span>}
                               </p>
                             </div>
@@ -2341,8 +2341,8 @@ const AnimalDetail: React.FC = () => {
                                 {/* LISTA DE COMPLEMENTOS EXISTENTES EM ORDEM CRONOLÓGICA */}
                                 <div className="space-y-2 pt-1">
                                   {record.adendos.map((ad, adIdx) => {
-                                    const adVet = db.getUsers().find(u => u.id === ad.veterinarioId);
-                                    const displayName = ad.veterinarioNome || adVet?.name || 'Médico Veterinário';
+                                    const adVet = db.getUserById(ad.veterinarioId);
+                                    const displayName = ad.veterinarioNome || (adVet?.name ? (adVet.role === 'VETERINARIO' && !adVet.name.startsWith('Dr') ? `Dr(a). ${adVet.name}` : adVet.name) : 'Médico Veterinário');
                                     const displayCrmv = ad.crmv || adVet?.crmv;
 
                                     return (

@@ -362,8 +362,8 @@ export function mapSurgeryToSupabase(
 ) {
   const vetId = cleanString(s.veterinarioResponsavelId);
   const criadorId = cleanString(s.usuarioCriadorId) || '1';
-  const validCriadorId = (existingUserIds && existingUserIds.has(criadorId)) ? criadorId : (existingUserIds?.values().next().value || '1');
-  const validVetId = (existingUserIds && vetId && existingUserIds.has(vetId)) ? vetId : null;
+  const validVetId = vetId || null;
+  const validCriadorId = criadorId;
 
   return {
     id: s.id,
@@ -380,7 +380,7 @@ export function mapSurgeryToSupabase(
     observacoes_pos_operatorias: cleanString(s.observacoesPosOperatorias),
     receitas_pos_operatorias: s.receitasPosOperatorias || [],
     data_realizacao: cleanString(s.dataRealizacao),
-    realizada_por_id: (existingUserIds && s.realizadaPorId && existingUserIds.has(s.realizadaPorId)) ? s.realizadaPorId : null,
+    realizada_por_id: (existingUserIds && existingUserIds.size > 0 ? (s.realizadaPorId && existingUserIds.has(s.realizadaPorId) ? s.realizadaPorId : null) : (s.realizadaPorId || null)),
     realizada_por_nome: cleanString(s.realizadaPorNome),
     motivo_cancelamento: cleanString(s.motivoCancelamento),
     data_cadastro: cleanString(s.dataCadastro) || new Date().toISOString(),
@@ -417,8 +417,15 @@ export function mapRecordToSupabase(
   existingUserIds?: Set<string>,
   existingAnimalIds?: Set<string>
 ) {
-  const vetId = cleanString(r.veterinarioId) || '1';
-  const validVetId = (existingUserIds && existingUserIds.has(vetId)) ? vetId : (existingUserIds?.values().next().value || '1');
+  const vetId = cleanString(r.veterinarioId);
+  // Preserva RIGOROSAMENTE o identificador do profissional veterinário responsável
+  // NUNCA força ou substitui por '1' se houver identificador original informado
+  let validVetId = vetId;
+  if (!validVetId) {
+    validVetId = (existingUserIds && existingUserIds.size > 0)
+      ? (existingUserIds.values().next().value || '1')
+      : '1';
+  }
 
   let obsGerais = cleanString(r.observacoesGerais) || '';
   if (r.necessitaCurativo) {
@@ -1877,7 +1884,7 @@ export async function pullFromSupabaseToLocal(
       if (shouldSync('users')) {
         const { data: remUsers } = await supabase
           .from('users')
-          .select('id, name, username, role, crmv, matricula, email');
+          .select('id, uid, name, username, role, crmv, matricula, email');
 
         if (remUsers && remUsers.length > 0) {
           const localUsers = (dbInstance && typeof dbInstance.getUsers === 'function')
@@ -1888,6 +1895,7 @@ export async function pullFromSupabaseToLocal(
           remUsers.forEach((r: any) => {
             map.set(r.id, {
               id: r.id,
+              uid: r.uid || r.id,
               name: r.name,
               username: r.username,
               role: r.role,

@@ -5,7 +5,7 @@ import { db } from '../services/db';
 
 export function generateClinicalRecordHTML(record: ClinicalRecord, animal: AnimalJoined): string {
   const users = db.getUsers();
-  const vet = users.find(u => u.id === record.veterinarioId);
+  const vet = users.find(u => u.id === record.veterinarioId || u.uid === record.veterinarioId) || db.getUserById(record.veterinarioId);
   const formattedDate = format(new Date(), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR });
   
   const dataAtendimentoFormatted = record.dataAtendimento 

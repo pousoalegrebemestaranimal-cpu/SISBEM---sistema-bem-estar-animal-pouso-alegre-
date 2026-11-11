@@ -46,6 +46,7 @@ export interface KennelConfig {
 
 export interface User {
   id: string;
+  uid?: string;
   name: string;
   username: string;
   role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO';

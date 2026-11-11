@@ -126,6 +126,7 @@ export function mapSupabaseUserToAppUser(su: any): {
  */
 export async function resolveSupabaseProfile(su: any): Promise<{
   id: string;
+  uid?: string;
   name: string;
   username: string;
   role: 'ADMIN' | 'OPERATOR' | 'VETERINARIO';
@@ -139,7 +140,8 @@ export async function resolveSupabaseProfile(su: any): Promise<{
     const { data: profile } = await supabase
       .from('users')
       .select('id, name, username, email, role, crmv, matricula, uid')
-      .eq('id', su.id)
+      .or(`id.eq.${su.id},uid.eq.${su.id}`)
+      .limit(1)
       .maybeSingle();
 
     if (profile) {
@@ -149,6 +151,7 @@ export async function resolveSupabaseProfile(su: any): Promise<{
       }
       return {
         id: su.id, // O UUID do Supabase Auth é a IDENTIDADE OFICIAL
+        uid: profile.uid || su.id,
         name: profile.name || su.user_metadata?.name || 'Usuário SISBEM',
         username: profile.username || su.email?.split('@')[0] || profile.name,
         role,
@@ -268,7 +271,8 @@ export async function authenticateWithSupabase(identifier: string, password: str
     const { data: profile } = await supabase
       .from('users')
       .select('id, name, username, email, role, crmv, matricula, uid')
-      .eq('id', authUser.id)
+      .or(`id.eq.${authUser.id},uid.eq.${authUser.id}`)
+      .limit(1)
       .maybeSingle();
 
     // 2. Verificação de status de ativação
@@ -321,6 +325,7 @@ export async function authenticateWithSupabase(identifier: string, password: str
 
     const appUser: any = {
       id: authUser.id, // O UUID do Supabase Auth é a IDENTIDADE OFICIAL ABSOLUTA
+      uid: finalProfile.uid || authUser.id,
       name: finalProfile.name || authUser.user_metadata?.name || 'Usuário SISBEM',
       username: finalProfile.username || authUser.email?.split('@')[0] || 'usuario',
       role: finalProfile.role as any,
